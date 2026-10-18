@@ -1,0 +1,5 @@
+# The Chromium checkout lives outside this repo (C:\src\chromium); never commit it here.
+/src/
+/out/
+*.log
+/.claude/
