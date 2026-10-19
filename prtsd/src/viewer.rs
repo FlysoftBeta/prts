@@ -1,5 +1,7 @@
 //! WebRTC adapter. The actor owns signaling; media workers see only bounded latest-frame slots.
 use crate::model::{Error, Result, invalid};
+#[path = "shaping.rs"]
+mod shaping;
 use rtc::{
     interceptor::{Interceptor, Packet, Registry, Slot, StreamInfo, TaggedPacket},
     media::Sample,
@@ -12,6 +14,7 @@ use rtc::{
     shared::marshal::MarshalSize,
 };
 use serde_json::{Value, json};
+use shaping::{ShapedRuntime, Shaper};
 use std::{
     collections::VecDeque,
     sync::{
@@ -81,6 +84,7 @@ pub struct Session {
     pub connected: bool,
     pub bytes: Arc<AtomicU64>,
     pub congestion: Arc<AtomicU64>,
+    pub shaper: Arc<Shaper>,
     pub tasks: Vec<JoinHandle<()>>,
     pub failed: AtomicBool,
     pub errors: u32,
@@ -93,6 +97,7 @@ impl Session {
         control: bool,
         tx: mpsc::Sender<Event>,
         video: &crate::video::Video,
+        network: &crate::model::Network,
     ) -> Result<Self> {
         let mut frames = video.frames.clone();
         let state = video.state.clone();
@@ -141,8 +146,10 @@ impl Session {
             },
         );
         let connected = Arc::new(AtomicBool::new(false));
+        let shaper = Shaper::new(network);
         let pc: Arc<dyn PeerConnection> = Arc::new(
             PeerConnectionBuilder::new()
+                .with_runtime(Arc::new(ShapedRuntime(shaper.clone())))
                 .with_media_engine(engine)
                 .with_interceptor_registry(registry)
                 .with_handler(Arc::new(Handler {
@@ -230,6 +237,7 @@ impl Session {
         }
         tasks.push(tokio::spawn(async move {
             let mut previous = 0;
+            let mut previous_capture: Option<Instant> = None;
             while frames.changed().await.is_ok() {
                 let frame = frames.borrow_and_update().clone();
                 let Some(frame) = frame else {
@@ -256,15 +264,30 @@ impl Session {
                     keyframe.store(true, Ordering::Release);
                 }
                 previous = frame.id;
+                // RTP media time must keep advancing across encoder/capture
+                // skips and latest-slot coalescing. Compressing those gaps to
+                // one nominal frame creates artificial transit jitter and
+                // drives the receiver's bandwidth estimate into a spiral.
+                let duration = previous_capture
+                    .map(|at| frame.capture.saturating_duration_since(at))
+                    .unwrap_or(frame.duration);
+                previous_capture = Some(frame.capture);
                 let sample = Sample {
                     data: frame.data,
-                    duration: frame.duration,
+                    // StaticSample advances its RTP clock *after* packetizing.
+                    // Advance with an empty sample first, then packetize this
+                    // access unit at its actual capture time with zero advance.
+                    duration: Duration::ZERO,
                     ..Sample::new(frame.capture)
                 };
-                if tokio::time::timeout(
-                    Duration::from_millis(100),
-                    track.write_sample(ssrc, pt, &sample, &[]),
-                )
+                if tokio::time::timeout(Duration::from_millis(100), async {
+                    let advance = Sample {
+                        duration,
+                        ..Sample::new(frame.capture)
+                    };
+                    track.write_sample(ssrc, pt, &advance, &[]).await?;
+                    track.write_sample(ssrc, pt, &sample, &[]).await
+                })
                 .await
                 .is_ok_and(|r| r.is_ok())
                 {
@@ -276,6 +299,7 @@ impl Session {
                 }
             }
         }));
+        tasks.push(shaper.start());
         Ok(Self {
             instance_id,
             control,
@@ -294,6 +318,7 @@ impl Session {
             connected: false,
             bytes,
             congestion,
+            shaper,
             tasks,
             failed: AtomicBool::new(false),
             errors: 0,
@@ -382,6 +407,7 @@ impl Session {
         }
     }
     pub async fn close(mut self) {
+        self.shaper.close();
         for task in self.tasks.drain(..) {
             task.abort();
         }

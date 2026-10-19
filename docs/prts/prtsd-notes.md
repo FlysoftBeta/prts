@@ -204,3 +204,149 @@ IPC disconnect to request graceful server shutdown on Windows. It verifies both
 server exit code zero and disappearance of the exact daemon PID, including on
 test failure. The screenshot is `docs/prts/phase1-e2e.png`; browser override and
 run instructions are in the root README and server notes.
+
+## Phase 1 part D: hardware encoding, motion under caps, packet shaping
+
+2026-10-19, Windows 11 development machine: **Intel(R) UHD Graphics 630**,
+PCI VEN_8086 / DEV_9BC5; no NVIDIA adapter enumerated. No Chromium build or
+source changes. Earlier sections describe historical milestones; this section
+supersedes their QSV/shaping unsupported statements.
+
+`encoder=auto` and `qsv` enumerate hardware H.264 MFTs with
+MFT_ENUM_FLAG_HARDWARE, preferring Intel vendor 8086 / Intel Quick Sync names.
+`software` selects OpenH264 directly. Initialization, dynamic bitrate or encode
+failure switches to software and emits stderr plus a scoped warning log event;
+instance.ready and interval stats carry the actual backend name. The requested
+preference remains in instance options. A fallback sticks for that instance,
+including resize, rather than repeatedly retrying a broken device.
+
+The MF implementation owns COM/MF on a dedicated MTA thread. It unlocks the
+async transform and consumes NeedInput/HaveOutput events with bounded polling
+and input/output deadlines. Intel's initial output-type change is negotiated
+before continuing. Codec controls require low latency, CBR, zero B pictures,
+a two-second GOP, mean bitrate, and requested IDR. Output is baseline H.264
+Annex B. Bitrate changes call ICodecAPI, then recreate the MFT with matching media-type
+bitrate because the UHD 630 driver ignores successful live property updates.
+The replacement emits fresh SPS/PPS and IDR; public RTP time stays continuous.
+BGRA converts to BT.601 limited-range I420 then interleaves UV into NV12 in an
+MF memory sample. `cpu_sample` is the future device-manager/DXGI surface seam;
+**D3D11 upload, GPU conversion, texture import and zero-copy are deferred**.
+See Microsoft's [hardware MFT contract](https://learn.microsoft.com/en-us/windows/win32/medfound/hardware-mfts)
+and [asynchronous MFT event model](https://learn.microsoft.com/en-us/windows/win32/medfound/asynchronous-mfts).
+
+OpenH264 now disables frame skipping at caps >=150,000 bps, allowing its full
+QP range (0..51) to reduce quality first; below that it may skip. The cap is
+still an encoder average target, not a strict network token bucket. In the
+180-frame moving synthetic 1280x720 release encoder regression:
+
+| Target bps | Encoded bps | Encoded FPS | Conversion + encode ms/frame |
+| ---: | ---: | ---: | ---: |
+| 4,000,000 | 155,458 | 30.00 | 9.70 |
+| 300,000 | 206,473 | 30.00 | 15.16 |
+| 150,000 | 147,826 | 30.00 | 11.73 |
+| 50,000 | 50,841 | 14.83 | 6.53 |
+
+These deterministic-source rates are not directly comparable to wall-clock
+browser runs (frame/time text and animation differ). OpenH264 prints a generic
+frame-skip-disabled RC warning; measured low-cap output is checked rather than
+assuming strict control. No QP statistic is fabricated.
+
+Packet shaping wraps each viewer's actual encrypted UDP socket through
+webrtc-rs Runtime::wrap_udp_socket. RFC7983 RTP/RTCP first-byte classification
+selects SRTP/SRTCP, including retransmissions. ICE/STUN, DTLS/SCTP, inbound
+traffic and input bypass shaping. A seeded SplitMix64 loss decision is made
+per outgoing datagram, including seed zero. GSO is disabled at this wrapper.
+The queue retains at most 4 MiB per session including an in-flight datagram;
+overflow discards oldest queued packets. Replacement reseeds and flushes;
+close flushes and aborts the tracked worker. Drops are cumulative per session
+and reported separately; no inbound loss or whole-frame delay is simulated.
+Socket tests exercise actual UDP delay/control bypass, deterministic loss,
+queue bounds/oldest-drop behavior, replacement and close.
+
+The browser test defaults to explicit software; set PRTS_TEST_ENCODER=qsv or
+auto to exercise selection. It measures encoder/receiver stats at baseline,
+150 kbps and 50 kbps, requires >=15 encoded FPS at 150 kbps without resizing,
+checks increased receiver transition jitter with 400 ms added delay and rising
+receiver packetsLost plus shaper drops with 15% packet loss, then verifies
+recovery. ICE RTT intentionally bypasses media shaping. These are transport,
+decode and publication measurements, not glass-to-glass capture latency.
+
+Two rate-control feedback bugs were corrected during browser qualification:
+encoded-frame sequence numbers now exclude deliberate capture/encoder skips,
+so skips do not request unnecessary IDRs; RTP duration follows elapsed capture
+time per viewer across skipped/coalesced frames, preventing false transit jitter
+and collapsing REMB estimates. Software bitrate updates now use OpenH264
+ENCODER_OPTION_BITRATE and RC_FRAME_SKIP in place, preserving prediction and
+rate-control history. A regression changes bitrate on 30 consecutive frames
+and verifies continued decoding with only the initial IDR. The synthetic click
+indicator remains red while a button is held, then retains its short flash,
+so decoded-input checks observe persistent button state under scheduling load.
+
+Hardware qualification: the opt-in release MF smoke test activates **Intel?
+Quick Sync Video H.264 Encoder MFT**, decodes 90/90 1280x720 frames, checks
+baseline SPS profile_idc=66, changes bitrate 2,000,000 ->150,000 bps at frame 45,
+and observes a requested nonperiodic IDR at frame 25 without latching every
+frame to IDR. Conversion+encode averages were approximately 11-13 ms/frame
+(12.19 ms in the parent verification run). NVIDIA/NVENC was not available to
+qualify. Real device-removal/driver failure and a machine lacking any hardware
+MFT remain untested physically; error paths fall back to software. Windows 10
+22H2, Chromium capture and production isolation remain qualification gaps.
+
+Final software browser acceptance (release prtsd + Node + headless Edge,
+2026-10-20) passed in 61.88 s with two instances and three viewers:
+
+| Target | Measured bps | Encoded FPS | encode_ms_avg |
+| --- | ---: | ---: | ---: |
+| No simulation cap | 136,134 | 28.44 | 10.43 |
+| 150 kbps, unchanged 1280x720 | 133,389 | 25.65 | 12.80 |
+| 50 kbps, unchanged 1280x720 | 50,228 | 14.16 | 13.72 |
+
+The receiver's peak transition jitter rose 8->34 ms with 400 ms outgoing delay.
+With 15% loss it reported packetsLost 0->peak 2 (final 0 after retransmission
+repair), while cumulative daemon shaper drops rose 0->5. Loss is measured at
+the receiver as well as the sender; NACK repair may revise cumulative lost
+packets downward. Restoring settings resumed video, and instance/server/exact
+daemon-PID teardown passed. Mouse/button/text decoded pixel checks and target
+create/switch/resize/close passed on the same WebRTC track.
+
+Final browser run with decoded-FPS measurements (2026-10-20):
+
+| Requested encoder / setting | Active encoder | Measured bps | Encoded / decoded FPS | encode_ms_avg |
+| --- | --- | ---: | ---: | ---: |
+| software / no cap | OpenH264 | 128,619 | 23.90 / 23.22 | 12.65 |
+| software / 150 kbps | OpenH264 | 120,872 | 22.83 / 22.44 | 12.69 |
+| software / 50 kbps | OpenH264 | 47,990 | 12.07 / 12.65 | 12.79 |
+| qsv / no cap | Intel Quick Sync MFT | 3,081,133 | 28.30 / 28.14 | 13.92 |
+| qsv / 150 kbps | OpenH264 after warning/fallback | 137,883 | 20.35 / 19.23 | 13.19 |
+| qsv / 50 kbps | OpenH264 | 29,262 | 10.92 / 8.28 | 11.85 |
+
+Both full browser suites passed: software in 68.80 s, requested qsv in 58.63 s.
+All low-cap runs retain 1280x720. With the qsv instance, 400 ms added delay
+raised peak receiver jitter 6->50 ms; 15% loss raised packetsLost 0->peak 2
+(final 0 after repair) and daemon drops 1->20. The software run measured
+10->29 ms jitter, packetsLost 0->peak/final 1, and drops 2->7. Restore and exact
+process cleanup passed. Encoded/decoded FPS use different sampling windows,
+so decoded FPS can briefly exceed interval encoded FPS.
+
+**Intel driver limitation:** native 150 kbps QSV qualification failed. Live
+ICodecAPI SetValue succeeds without changing output, so reconfiguration now
+recreates the MFT. A native 1 Mbps setting then measures 999,998 bps (from a
+4,000,000 bps baseline), but rich 720p30 at a 150 kbps target still measures
+about 440,120 bps even with max QP 51 and a small buffer. Low-delay VBR returns
+E_INVALIDARG on this driver. After one second of media settles, a one-second
+output window exceeding 150% of target raises an encoder error; the existing
+warning + software fallback path takes over. The rich-source regression
+measures 155,057 bps after fallback with 150/150 frames decoded. This is an
+explicit compatibility fallback, not native low-bitrate QSV verification.
+Native MFT restart adds a reconfiguration IDR and startup cost; seamless live
+hardware rate changes need driver-specific qualification. Sustained low-cap
+overshoot is bounded by media frames rather than a strict wire token bucket.
+
+Final verification: cargo build --release passed; cargo test passed (eight
+ordinary tests, two hardware tests intentionally ignored by default); explicit
+cargo test --release --test mf_encoder -- --ignored --nocapture passed both
+hardware tests (native smoke 90/90 decoded, 12.03 ms average; rich rate-control
+regression 10.49 ms average across native and fallback phases). Clippy with
+-D warnings, rustfmt check, seven Node tests and both software/qsv npm run e2e
+runs passed. git diff --check is clean. No prtsd process remains after tests.
+No Chromium build, changes outside authorized paths, or git commit.

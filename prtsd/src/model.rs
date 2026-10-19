@@ -150,10 +150,10 @@ impl Options {
         let encoder = v
             .get("encoder")
             .map_or(Ok("auto"), |_| string(v, "encoder"))?;
-        if !matches!(encoder, "auto" | "software") {
+        if !matches!(encoder, "auto" | "qsv" | "software") {
             return Err(Error::new(
                 "unsupported",
-                "Only software OpenH264 is available; QSV is not implemented",
+                "Encoder must be auto, qsv, or software",
             ));
         }
         let profile = v
@@ -192,7 +192,7 @@ impl Options {
                 .map(Size::parse)
                 .transpose()?
                 .unwrap_or_default(),
-            encoder: "software".into(),
+            encoder: encoder.into(),
             bitrate_caps: Caps {
                 min_bps: min,
                 max_bps: max,
@@ -291,12 +291,6 @@ impl Network {
             || !(0.0..=100.0).contains(&n.loss_percent)
         {
             return Err(invalid("invalid network settings"));
-        }
-        if n.added_latency_ms != 0 || n.loss_percent != 0.0 {
-            return Err(Error::new(
-                "unsupported",
-                "SRTP/SRTCP latency/loss shaping is not implemented; bitrate cap is supported",
-            ));
         }
         Ok(n)
     }

@@ -1071,6 +1071,7 @@ dependencies = [
  "bytes",
  "font8x8",
  "openh264",
+ "openh264-sys2",
  "rtc",
  "serde",
  "serde_json",

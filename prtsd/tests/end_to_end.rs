@@ -271,22 +271,17 @@ async fn synthetic_stdio_webrtc_input_and_lifecycle() -> Result<()> {
         .request_fragmented("hello", json!({"versions":[1]}), true)
         .await?;
     assert_eq!(hello["result"]["version"], 1);
-    assert_eq!(hello["result"]["capabilities"]["packet_shaping"], false);
+    assert_eq!(hello["result"]["capabilities"]["packet_shaping"], true);
     c.ok("stats.configure", json!({"interval_ms":250})).await?;
     assert_eq!(
         c.request("instance.create", json!({"options":{"source":"chromium"}}))
             .await?["error"]["code"],
         "unsupported"
     );
-    assert_eq!(
-        c.request("instance.create", json!({"options":{"encoder":"qsv"}}))
-            .await?["error"]["code"],
-        "unsupported"
-    );
     let instance = c
         .ok(
             "instance.create",
-            json!({"options":{"size":{"width":320,"height":240},"fps":30}}),
+            json!({"options":{"encoder":"software","size":{"width":320,"height":240},"fps":30}}),
         )
         .await?;
     assert_eq!(instance["instance"]["state"], "starting");
@@ -537,7 +532,7 @@ async fn synthetic_stdio_webrtc_input_and_lifecycle() -> Result<()> {
         wait_for(|| (handler.rtp.load(Ordering::Acquire) > packets + 5).then_some(())).await?;
     }
     c.ok("network.set",json!({"instance_id":iid,"settings":{"bitrate_cap_bps":800000,"added_latency_ms":0,"loss_percent":0,"seed":42}})).await?;
-    assert_eq!(c.request("network.set",json!({"instance_id":iid,"settings":{"bitrate_cap_bps":800000,"added_latency_ms":80,"loss_percent":2.5,"seed":42}})).await?["error"]["code"],"unsupported");
+    c.ok("network.set",json!({"instance_id":iid,"settings":{"bitrate_cap_bps":800000,"added_latency_ms":80,"loss_percent":2.5,"seed":42}})).await?;
     let second = c
         .ok(
             "target.create",

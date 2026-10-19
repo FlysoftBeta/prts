@@ -1,5 +1,5 @@
 use crate::{
-    encoder::{Software, VideoEncoder},
+    encoder::{Selected, VideoEncoder},
     model::{Options, Target},
 };
 use bytes::Bytes;
@@ -40,12 +40,14 @@ pub struct Metrics {
     pub capture_encode_ms: Vec<f64>,
     pub send_ms: Vec<f64>,
     pub failure: Option<String>,
+    pub warnings: Vec<String>,
 }
 pub struct Video {
     pub state: Arc<Mutex<State>>,
     pub metrics: Arc<Mutex<Metrics>>,
     pub frames: watch::Receiver<Option<Frame>>,
     pub keyframe: Arc<AtomicBool>,
+    pub encoder_name: Arc<Mutex<String>>,
     pub worker: Option<std::thread::JoinHandle<()>>,
 }
 impl Video {
@@ -63,11 +65,35 @@ impl Video {
         let keyframe = Arc::new(AtomicBool::new(true));
         let (tx, frames) = watch::channel(None);
         let (s, m, k) = (state.clone(), metrics.clone(), keyframe.clone());
+        let encoder_name = Arc::new(Mutex::new("initializing".to_string()));
+        let name = encoder_name.clone();
+        let preference = options.encoder.clone();
+        let initial_size = options.size.device();
+        let initial_bps = options.bitrate_caps.max_bps;
+        let initial_fps = options.fps;
         let worker = std::thread::spawn(move || {
             let origin = Instant::now();
             let mut frame_id = 0;
-            let mut encoder: Option<Software> = None;
-            let mut config = (0, 0, 0, 0);
+            let mut encoded_id = 0;
+            let (mut encoder, warning) = match Selected::new(
+                &preference,
+                initial_size.0,
+                initial_size.1,
+                initial_bps,
+                initial_fps,
+            ) {
+                Ok(result) => result,
+                Err(e) => {
+                    m.lock().unwrap().failure = Some(e.to_string());
+                    return;
+                }
+            };
+            if let Some(warning) = warning {
+                m.lock().unwrap().warnings.push(warning);
+            }
+            *name.lock().unwrap() = encoder.name().to_string();
+            let mut hardware_disabled = encoder.name() == "software/openh264";
+            let mut config = (initial_size.0, initial_size.1, initial_bps, initial_fps);
             let mut next = Instant::now();
             loop {
                 let (target, bps, fps, epoch, key) = {
@@ -101,18 +127,53 @@ impl Video {
                 let cfg = (w, h, bps, fps);
                 let mut encode_ms = 0.0;
                 let result = (|| -> anyhow::Result<Vec<u8>> {
-                    if config != cfg || encoder.is_none() {
-                        encoder = Some(Software::new(bps, fps)?);
+                    if (config.0, config.1, config.3) != (w, h, fps) {
+                        let (new, warning) = Selected::new(
+                            if hardware_disabled {
+                                "software"
+                            } else {
+                                &preference
+                            },
+                            w,
+                            h,
+                            bps,
+                            fps,
+                        )?;
+                        encoder = new;
+                        if let Some(warning) = warning {
+                            m.lock().unwrap().warnings.push(warning);
+                        }
+                        hardware_disabled = encoder.name() == "software/openh264";
                         config = cfg;
+                    } else if config.2 != bps {
+                        if let Err(e) = encoder.set_bitrate(bps) {
+                            m.lock().unwrap().warnings.push(format!(
+                                "Hardware bitrate change failed: {e:#}; falling back to software"
+                            ));
+                            encoder.fallback()?;
+                            encoder.set_bitrate(bps)?;
+                            hardware_disabled = true;
+                        }
+                        config.2 = bps;
                     }
                     let bgra = render(&target, frame_id, origin.elapsed().as_secs_f64());
                     let encode_start = Instant::now();
-                    let result = encoder.as_mut().unwrap().encode(
+                    let mut result = encoder.encode(
                         &bgra,
                         w as usize,
                         h as usize,
                         key | k.swap(false, Ordering::AcqRel),
                     );
+                    if result.is_err() && !hardware_disabled {
+                        m.lock().unwrap().warnings.push(format!(
+                            "Hardware encode failed: {:#}; falling back to software",
+                            result.as_ref().unwrap_err()
+                        ));
+                        encoder.fallback()?;
+                        hardware_disabled = true;
+                        result = encoder.encode(&bgra, w as usize, h as usize, true);
+                    }
+                    *name.lock().unwrap() = encoder.name().to_string();
                     encode_ms = encode_start.elapsed().as_secs_f64() * 1000.0;
                     result
                 })();
@@ -120,6 +181,7 @@ impl Video {
                 stats.captured += 1;
                 match result {
                     Ok(data) if !data.is_empty() => {
+                        encoded_id += 1;
                         stats.encoded += 1;
                         stats.bytes += data.len() as u64;
                         if stats.encode_ms.len() < 1200 {
@@ -136,7 +198,9 @@ impl Video {
                                 capture,
                                 duration: period,
                                 epoch,
-                                id: frame_id,
+                                // Only a missing encoded access unit breaks the
+                                // prediction chain. Capture skips do not.
+                                id: encoded_id,
                             }));
                         } else {
                             stats.dropped += 1;
@@ -163,6 +227,7 @@ impl Video {
             metrics,
             frames,
             keyframe,
+            encoder_name,
             worker: Some(worker),
         }
     }
@@ -247,9 +312,10 @@ pub fn render(t: &Target, frame: u64, seconds: f64) -> Vec<u8> {
     canvas.text(8, 50 * scale, &t.url, scale);
     let px = (t.input.x * t.size.dpr) as i32;
     let py = (t.input.y * t.size.dpr) as i32;
-    if t.input
-        .click
-        .is_some_and(|at| at.elapsed() < Duration::from_millis(250))
+    if t.input.buttons != 0
+        || t.input
+            .click
+            .is_some_and(|at| at.elapsed() < Duration::from_millis(250))
     {
         canvas.rect(px - 14, py - 14, 28, 28, [20, 20, 255]);
     }

@@ -389,8 +389,9 @@ effective value and supported range are reported in options/capabilities),
 encoder=`"auto"|"qsv"|"software"` (default auto), bitrate_caps=
 `{min_bps?:number=100000,max_bps?:number=4000000}` with 1<=min<=max<=100000000,
 isolation_profile:string (default `"job"`). Auto prefers QSV, then software;
-explicit qsv errors if unavailable. Report the actual encoder, never silently
-substitute an explicitly requested encoder. Optional profiles `appcontainer`
+explicit qsv attempts the hardware H.264 MFT too. Hardware initialization or
+encoding failure falls back to software and emits a warning log; stats and
+instance.ready report the actual backend name. Optional profiles `appcontainer`
 and `lpac` are accepted only if advertised and GPU compatibility is validated.
 `job` means managed process-tree Job Object containment, not a security sandbox.
 Synthetic uses the same validated options; isolation records policy but there is
@@ -473,6 +474,8 @@ capture_to_send_ms_avg:number|null. Latency ends at encode completion/first RTP
 submission respectively; no cross-host subtraction. Session entries contain
 session_id,rtt_ms:number|null,available_outgoing_bps:number|null,
 rtp_sent_bps:number,shaper_dropped_packets:number,viewer_feedback:object|null.
+shaper_dropped_packets is cumulative over the session, including loss, overflow,
+settings replacement flushes and socket-send failures.
 Counter/rate units are bytes*8/second excluding IP overhead; rates cover the stated
 interval, not lifetime. Unavailable values are null, not zero. No samples means
 latencies/qp are null. Node may combine these with browser getStats for display.

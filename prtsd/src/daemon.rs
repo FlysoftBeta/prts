@@ -339,8 +339,15 @@ impl Daemon {
                 self.next_session += 1;
                 let sid = format!("s{}", self.next_session);
                 let i = &self.instances[&id];
-                let session =
-                    Session::create(sid.clone(), id, control, self.tx.clone(), &i.video).await?;
+                let session = Session::create(
+                    sid.clone(),
+                    id,
+                    control,
+                    self.tx.clone(),
+                    &i.video,
+                    &i.network,
+                )
+                .await?;
                 self.sessions.insert(sid.clone(), session);
                 Ok(json!({"session_id":sid,"polite":false,"ice_servers":[],"control":control}))
             }
@@ -381,6 +388,13 @@ impl Daemon {
                         .ok_or_else(|| invalid("settings required"))?,
                 )?;
                 let result = json!({"settings":n});
+                for session in self.sessions.values().filter(|s| s.instance_id == id) {
+                    session.shaper.configure(&n);
+                    // A changed simulated link invalidates the previous link's
+                    // estimate; allow fresh feedback instead of pinning a
+                    // restored connection to its old low-cap REMB forever.
+                    session.congestion.store(0, Ordering::Release);
+                }
                 self.instances.get_mut(&id).unwrap().network = n;
                 self.update_viewers();
                 Ok(result)
@@ -402,8 +416,10 @@ impl Daemon {
         for i in self.instances.values() {
             let mut m = i.video.metrics.lock().unwrap();
             let failure = m.failure.take();
+            let warnings = std::mem::take(&mut m.warnings);
             *m = Metrics {
                 failure,
+                warnings,
                 ..Default::default()
             };
         }
@@ -416,7 +432,7 @@ impl Daemon {
         let mut ready = Vec::new();
         let mut failed = Vec::new();
         for i in self.instances.values_mut() {
-            if i.state == "starting" {
+            if i.state == "starting" && *i.video.encoder_name.lock().unwrap() != "initializing" {
                 let target = Target::new(1, i.options.initial_url.clone(), i.options.size, true);
                 i.targets.insert(1, target.clone());
                 i.next_target = 2;
@@ -433,6 +449,13 @@ impl Daemon {
                 }
             }
             let error = i.video.metrics.lock().unwrap().failure.take();
+            for warning in std::mem::take(&mut i.video.metrics.lock().unwrap().warnings) {
+                eprintln!("prtsd: {warning}");
+                self.out.event(
+                    "log",
+                    json!({"level":"warn","instance_id":i.id,"message":warning}),
+                );
+            }
             if let Some(e) = error {
                 failed.push((i.id.clone(), e));
             }
@@ -443,7 +466,7 @@ impl Daemon {
         }
         for id in ready {
             let i = &self.instances[&id];
-            self.out.event("instance.ready",json!({"instance_id":id,"source":"synthetic","active_target_id":"1","encoder":"software","isolation_profile":i.options.isolation_profile}));
+            self.out.event("instance.ready",json!({"instance_id":id,"source":"synthetic","active_target_id":"1","encoder":*i.video.encoder_name.lock().unwrap(),"isolation_profile":i.options.isolation_profile}));
         }
         for (id, error) in failed {
             eprintln!("prtsd: encoder failed for {id}: {error}");
@@ -452,7 +475,7 @@ impl Daemon {
             i.video.stop();
             self.out.event(
                 "instance.failed",
-                json!({"instance_id":id,"error":Error::new("internal","software encoder failed")}),
+                json!({"instance_id":id,"error":Error::new("internal","video encoder failed")}),
             );
             let sessions: Vec<_> = self
                 .sessions
@@ -488,7 +511,12 @@ impl Daemon {
             }
             let mut m = {
                 let mut guard = i.video.metrics.lock().unwrap();
-                std::mem::take(&mut *guard)
+                let mut sample = std::mem::take(&mut *guard);
+                // Lifecycle diagnostics belong to tick(), including failures that
+                // arrive while stats awaits another viewer's transport report.
+                guard.failure = sample.failure.take();
+                guard.warnings = std::mem::take(&mut sample.warnings);
+                sample
             };
             let avg = |v: &[f64]| {
                 if v.is_empty() {
@@ -520,10 +548,10 @@ impl Daemon {
                     .find(|p| p.nominated && p.responses_received > 0)
                     .map(|p| p.current_round_trip_time * 1000.0);
                 let available = s.congestion.load(Ordering::Acquire);
-                sessions.push(json!({"session_id":id,"rtt_ms":rtt,"available_outgoing_bps":if available==0 {None}else{Some(available)},"rtp_sent_bps":s.bytes.swap(0,Ordering::AcqRel) as f64*8.0/seconds,"shaper_dropped_packets":0,"viewer_feedback":s.feedback}));
+                sessions.push(json!({"session_id":id,"rtt_ms":rtt,"available_outgoing_bps":if available==0 {None}else{Some(available)},"rtp_sent_bps":s.bytes.swap(0,Ordering::AcqRel) as f64*8.0/seconds,"shaper_dropped_packets":s.shaper.dropped.load(Ordering::Relaxed),"viewer_feedback":s.feedback}));
             }
             self.out.event("stats",json!({"instance_id":i.id,"interval_ms":elapsed.as_millis() as u64,
-                "encoder":{"name":"software/openh264","fps":m.encoded as f64/seconds,"bitrate_bps":m.bytes as f64*8.0/seconds,"qp_avg":null,"encode_ms_avg":encode_avg},
+                "encoder":{"name":*i.video.encoder_name.lock().unwrap(),"fps":m.encoded as f64/seconds,"bitrate_bps":m.bytes as f64*8.0/seconds,"qp_avg":null,"encode_ms_avg":encode_avg},
                 "frames":{"captured":m.captured,"encoded":m.encoded,"dropped":m.dropped,"capture_to_encode_ms_avg":capture_encode_avg,"capture_to_encode_ms_p95":p95,"capture_to_send_ms_avg":avg(&m.send_ms)},"sessions":sessions}));
         }
     }
@@ -914,7 +942,7 @@ fn virtual_key(code: &str, key: &str) -> Option<u8> {
 }
 pub async fn run() -> anyhow::Result<()> {
     #[cfg(windows)]
-    eprintln!("prtsd: synthetic/software daemon pid {}", unsafe {
+    eprintln!("prtsd: synthetic daemon pid {}", unsafe {
         windows::Win32::System::Threading::GetCurrentProcessId()
     });
     let mut input = transport::input();
@@ -951,7 +979,7 @@ pub async fn run() -> anyhow::Result<()> {
                         if !params.is_object() || !params["versions"].as_array().is_some_and(|a| a.len()<=4096 && a.iter().all(|v|v.as_u64().is_some_and(|n|n<=MAX_SAFE)) && a.contains(&json!(1))) {
                             out.response(id,Err(Error::new("unsupported","protocol v1 required")));break;
                         }
-                        out.response(id,Ok(json!({"version":1,"daemon":"prtsd","capabilities":{"sources":["synthetic"],"encoders":["software"],"isolation_profiles":["job"],"max_instances":8,"max_sessions":32,"max_width":4096,"max_height":4096,"max_pixels":8294400,"max_device_width":4096,"max_device_height":4096,"min_device_dimension":16,"device_dimension_alignment":2,"fps":{"default":30,"min":1,"max":60},"packet_shaping":false,"bitrate_cap":true,"custom_cursor":false}})));hello=true;
+                        out.response(id,Ok(json!({"version":1,"daemon":"prtsd","capabilities":{"sources":["synthetic"],"encoders":["auto","qsv","software"],"isolation_profiles":["job"],"max_instances":8,"max_sessions":32,"max_width":4096,"max_height":4096,"max_pixels":8294400,"max_device_width":4096,"max_device_height":4096,"min_device_dimension":16,"device_dimension_alignment":2,"fps":{"default":30,"min":1,"max":60},"packet_shaping":true,"bitrate_cap":true,"custom_cursor":false}})));hello=true;
                     } else {
                         let response=match method {
                             Some(method) if params.is_object()=>match tokio::time::timeout(Duration::from_secs(5),d.command(method,params)).await {Ok(r)=>r,Err(_)=>{out.failed.store(true,Ordering::Release);Err(Error::new("timeout","command exceeded five seconds; daemon shutting down"))}},
