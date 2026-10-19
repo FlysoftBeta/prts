@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PRTS · Remote browser</title>
+<link rel="stylesheet" href="/style.css">
+<script type="module" src="/app.js"></script>
+<header><h1>PRTS <small>remote browser</small></h1><span id="status" role="status">Connecting…</span></header>
+<main>
+  <aside>
+    <h2>Instances</h2>
+    <form id="create">
+      <label>Initial URL<input name="url" value="about:blank" required></label>
+      <div class="row"><label>Width<input name="width" type="number" min="1" max="8192" value="1280" required></label><label>Height<input name="height" type="number" min="1" max="8192" value="720" required></label><label>DPR<input name="dpr" type="number" min="0.5" max="4" step="0.25" value="1" required></label></div>
+      <div class="row"><label>Source<select name="source"><option>synthetic</option><option>chromium</option></select></label><label>Encoder<select name="encoder"><option>auto</option><option>software</option><option>qsv</option></select></label></div>
+      <button>Create instance</button>
+    </form>
+    <div id="instances"></div>
+    <button id="refresh">Refresh list</button>
+    <h2>Network simulation</h2>
+    <form id="network">
+      <label>Bitrate cap (kbps, blank = none)<input name="cap" type="number" min="1" max="100000" placeholder="No cap"></label>
+      <div class="row"><label>Latency (ms)<input name="latency" type="number" min="0" max="2000" value="0" required></label><label>Loss (%)<input name="loss" type="number" min="0" max="100" step="0.1" value="0" required></label></div>
+      <label>Seed<input name="seed" type="number" min="0" max="4294967295" value="1" required></label>
+      <button>Apply to selected instance</button>
+    </form>
+  </aside>
+  <section class="viewer">
+    <div class="row toolbar"><h2 id="selected">Select an instance</h2><label><input id="control" type="checkbox" checked> Request control</label><button id="connect">Connect viewer</button><button id="disconnect">Disconnect</button></div>
+    <div id="tabs" class="tabs"></div>
+    <form id="navigate" class="row"><input name="url" aria-label="Tab URL" placeholder="https://example.org/" value="about:blank" required><button>Navigate</button><button type="button" id="new-tab">New tab</button><button type="button" id="close-tab">Close tab</button></form>
+    <form id="resize" class="row"><label>Width<input name="width" type="number" min="1" max="8192" value="1280" required></label><label>Height<input name="height" type="number" min="1" max="8192" value="720" required></label><label>DPR<input name="dpr" type="number" min="0.5" max="4" step="0.25" value="1" required></label><button>Resize active tab</button></form>
+    <div id="stage"><video id="video" autoplay playsinline muted aria-label="Remote viewport"></video><p id="empty">Connect a viewer to receive video</p><img id="cursor" alt="" hidden></div>
+    <textarea id="keyboard" aria-label="Remote keyboard input" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+    <p class="hint">Click the video to focus remote input. Tab stays remote; press Escape to return to the controls. Text and IME commits are supported.</p>
+    <p id="session-state">No viewer connected</p>
+    <h2>Connection quality</h2>
+    <pre id="quality">No receiver samples yet</pre>
+    <h2>Encoder and frame statistics</h2>
+    <pre id="encoder">No server samples yet</pre>
+    <p id="error" role="alert"></p>
+  </section>
+</main>
+</html>

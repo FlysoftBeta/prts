@@ -3,3 +3,4 @@
 /out/
 *.log
 /.claude/
+/server/node_modules/
