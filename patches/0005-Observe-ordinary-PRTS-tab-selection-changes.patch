@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 04:36:46 +0800
+Subject: [PATCH 5/7] Observe ordinary PRTS tab selection changes
+
+Update logical activation when Chrome switches existing tabs in the active target's strip, while preserving popup insertion and close ordering and preventing activation recursion.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_target_registry.cc b/chrome/browser/prts/prts_target_registry.cc
+index 0a0f30c61b..f6d1dc81ff 100644
+--- a/chrome/browser/prts/prts_target_registry.cc
++++ b/chrome/browser/prts/prts_target_registry.cc
+@@ -410,9 +410,10 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+       Activate(*target);
+     }
+   }
+-  void OnTabStripModelChanged(TabStripModel* strip,
+-                              const TabStripModelChange& change,
+-                              const TabStripSelectionChange&) override {
++  void OnTabStripModelChanged(
++      TabStripModel* strip,
++      const TabStripModelChange& change,
++      const TabStripSelectionChange& selection) override {
+     if (change.type() == TabStripModelChange::kReplaced) {
+       const auto* replacement = change.GetReplace();
+       if (auto* target = Find(replacement->old_contents)) {
+@@ -420,6 +421,21 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+       }
+     }
+     Scan(strip);
++    if (started_ && !creating_ &&
++        change.type() == TabStripModelChange::kSelectionOnly &&
++        selection.active_tab_changed()) {
++      auto* previous = Find(selection.old_contents);
++      auto* selected = Find(selection.new_contents);
++      // Chrome may change tab selection while inserting a popup or removing a
++      // closing tab. Those lifecycle operations have separate activation rules.
++      // Only an ordinary switch within the logical active strip selects a new
++      // stream, and a popup never steals that stream implicitly. Activate sets
++      // active_ before touching the strip, which also prevents recursion here.
++      if (previous && previous->id == active_ && selected &&
++          selected->announced && selected->kind == 1) {
++        Activate(*selected);
++      }
++    }
+   }
+   void Scan(TabStripModel* strip) {
+     if (!started_ || creating_) {

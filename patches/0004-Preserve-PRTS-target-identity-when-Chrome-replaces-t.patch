@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 04:26:41 +0800
+Subject: [PATCH 4/7] Preserve PRTS target identity when Chrome replaces tab
+ contents
+
+Retarget observers and internal viewport emulation during tab discard/replacement, retaining logical target ID and advancing the generation before publishing its snapshot.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_target_registry.cc b/chrome/browser/prts/prts_target_registry.cc
+index 5b0b59dc27..0a0f30c61b 100644
+--- a/chrome/browser/prts/prts_target_registry.cc
++++ b/chrome/browser/prts/prts_target_registry.cc
+@@ -146,6 +146,20 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+       }
+     }
+ 
++    void ReplaceContents(content::WebContents* contents) {
++      if (agent_) {
++        agent_->DetachClient(this);
++        agent_.reset();
++      }
++      // A discarded tab can replace WebContents without changing the logical
++      // tab. Detach from the retired contents before its destruction callback.
++      Observe(contents);
++      load = contents->IsLoading() ? 1 : 0;
++      ++generation;
++      ApplySize();
++      Changed();
++    }
++
+     void ApplySize() {
+       auto* browser =
+           GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
+@@ -397,8 +411,14 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+     }
+   }
+   void OnTabStripModelChanged(TabStripModel* strip,
+-                              const TabStripModelChange&,
++                              const TabStripModelChange& change,
+                               const TabStripSelectionChange&) override {
++    if (change.type() == TabStripModelChange::kReplaced) {
++      const auto* replacement = change.GetReplace();
++      if (auto* target = Find(replacement->old_contents)) {
++        target->ReplaceContents(replacement->new_contents);
++      }
++    }
+     Scan(strip);
+   }
+   void Scan(TabStripModel* strip) {

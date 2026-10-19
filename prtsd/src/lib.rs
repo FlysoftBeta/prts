@@ -1,3 +1,6 @@
+#[cfg(windows)]
+pub mod browser;
+pub mod browser_wire;
 pub mod daemon;
 pub mod encoder;
 #[cfg(windows)]

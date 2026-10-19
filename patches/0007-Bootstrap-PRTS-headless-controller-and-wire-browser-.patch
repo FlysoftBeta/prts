@@ -1,0 +1,445 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 04:38:10 +0800
+Subject: [PATCH 7/7] Bootstrap PRTS headless controller and wire browser
+ lifecycle
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/BUILD.gn b/chrome/BUILD.gn
+index c7159fc107..7322fa2faa 100644
+--- a/chrome/BUILD.gn
++++ b/chrome/BUILD.gn
+@@ -449,6 +449,7 @@ if (is_win) {
+       "//chrome/browser:process_singleton",
+       "//chrome/browser:startup_data",
+       "//chrome/browser/lifetime",
++      "//chrome/browser/prts:transport",
+       "//chrome/browser/win/isolated_browser:isolated_browser_support",
+       "//chrome/chrome_elf",
+       "//chrome/common:buildflags",
+diff --git a/chrome/app/chrome_main.cc b/chrome/app/chrome_main.cc
+index 199142d671..dbfaf6b6fd 100644
+--- a/chrome/app/chrome_main.cc
++++ b/chrome/app/chrome_main.cc
+@@ -24,6 +24,9 @@
+ #endif
+ #include "chrome/app/startup_timestamps.h"
+ #include "chrome/browser/headless/headless_mode_init.h"
++#if BUILDFLAG(IS_WIN)
++#include "chrome/browser/prts/prts_pipe_client_win.h"
++#endif
+ #include "chrome/common/buildflags.h"
+ #include "chrome/common/chrome_result_codes.h"
+ #include "chrome/common/chrome_switches.h"
+@@ -164,6 +167,14 @@ int ChromeMain(int argc, const char** argv) {
+ 
+   base::CommandLine* command_line(base::CommandLine::ForCurrentProcess());
+ 
++#if BUILDFLAG(IS_WIN)
++  // Validate inherited PRTS handles before ContentMain can launch children.
++  if (!prts::ValidateLaunch()) {
++    LOG(ERROR) << "Invalid browser-only --prts-pipe launch";
++    return CHROME_RESULT_CODE_UNSUPPORTED_PARAM;
++  }
++#endif
++
+   // Capture the unpolluted command line snapshot in the browser process.
+   // This must happen immediately after CommandLine::Init to ensure we capture
+   // the state before any internal programmatic mutations.
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 5727620375..4e10fb1e80 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -13,6 +13,7 @@ import("//build/config/python.gni")
+ import("//build/config/ui.gni")
+ import("//chrome/browser/buildflags.gni")
+ import("//chrome/browser/downgrade/buildflags.gni")
++import("//chrome/browser/prts/prts_sources.gni")
+ import("//chrome/common/features.gni")
+ import("//chrome/common/request_header_integrity/buildflags.gni")
+ import("//chrome/services/speech/buildflags/buildflags.gni")
+@@ -1462,6 +1463,18 @@ source_set("core") {
+   }
+ 
+   if (!is_android) {
++    if (is_win) {
++      sources += prts_browser_sources +
++                 [ "headless/chrome_browser_main_extra_parts_headless.cc" ]
++      deps += [
++        "//chrome/browser/prts:controller_interface",
++        "//chrome/browser/prts:transport",
++        "//chrome/browser/ui/browser_window:create_browser_window",
++        "//components/headless/clipboard",
++        "//components/keep_alive_registry",
++      ]
++    }
++
+     public_deps = [
+       "//chrome/browser/ui/omnibox/omnibox_everywhere:impl",
+       "//chrome/browser/ui/webui/omnibox_everywhere",
+diff --git a/chrome/browser/headless/BUILD.gn b/chrome/browser/headless/BUILD.gn
+index f5601a3192..19d68b8956 100644
+--- a/chrome/browser/headless/BUILD.gn
++++ b/chrome/browser/headless/BUILD.gn
+@@ -84,12 +84,18 @@ if (!is_android) {
+   }
+ 
+   source_set("headless_extra_parts") {
+-    sources = [
+-      "chrome_browser_main_extra_parts_headless.cc",
+-      "chrome_browser_main_extra_parts_headless.h",
+-    ]
++    sources = [ "chrome_browser_main_extra_parts_headless.h" ]
+ 
+-    deps = [
++    if (!is_win) {
++      sources += [ "chrome_browser_main_extra_parts_headless.cc" ]
++    }
++    if (is_win) {
++      deps = [ "//chrome/browser/prts:controller_interface" ]
++    } else {
++      deps = []
++    }
++
++    deps += [
+       ":headless",
+       "//base",
+       "//chrome/browser:main_extra_parts",
+diff --git a/chrome/browser/headless/chrome_browser_main_extra_parts_headless.cc b/chrome/browser/headless/chrome_browser_main_extra_parts_headless.cc
+index e08b97b89c..ca80abe898 100644
+--- a/chrome/browser/headless/chrome_browser_main_extra_parts_headless.cc
++++ b/chrome/browser/headless/chrome_browser_main_extra_parts_headless.cc
+@@ -6,6 +6,11 @@
+ 
+ #include "chrome/browser/headless/headless_mode_util.h"
+ #include "components/headless/clipboard/headless_clipboard.h"
++#if BUILDFLAG(IS_WIN)
++#include "base/command_line.h"
++#include "chrome/browser/prts/prts_controller.h"
++#include "chrome/browser/prts/prts_switches.h"
++#endif
+ 
+ namespace headless {
+ 
+@@ -20,6 +25,32 @@ void ChromeBrowserMainExtraPartsHeadless::PreBrowserStart() {
+   if (IsHeadlessMode()) {
+     SetHeadlessClipboardForCurrentThread();
+   }
++#if BUILDFLAG(IS_WIN)
++  const auto* command = base::CommandLine::ForCurrentProcess();
++  if (command->GetSwitchValueASCII("headless") == "new" &&
++      command->GetSwitchValueASCII("type").empty() &&
++      command->HasSwitch(prts::kPipeSwitch)) {
++    prts_controller_ = std::make_unique<prts::PrtsController>();
++    prts_controller_->Prepare();
++  }
++#endif
++}
++
++void ChromeBrowserMainExtraPartsHeadless::PostBrowserStart() {
++#if BUILDFLAG(IS_WIN)
++  if (prts_controller_) {
++    prts_controller_->Start();
++  }
++#endif
++}
++
++void ChromeBrowserMainExtraPartsHeadless::PostMainMessageLoopRun() {
++#if BUILDFLAG(IS_WIN)
++  if (prts_controller_) {
++    prts_controller_->Stop();
++  }
++  prts_controller_.reset();
++#endif
+ }
+ 
+ }  // namespace headless
+diff --git a/chrome/browser/headless/chrome_browser_main_extra_parts_headless.h b/chrome/browser/headless/chrome_browser_main_extra_parts_headless.h
+index 42aa0d183c..9c3c7f361e 100644
+--- a/chrome/browser/headless/chrome_browser_main_extra_parts_headless.h
++++ b/chrome/browser/headless/chrome_browser_main_extra_parts_headless.h
+@@ -5,7 +5,14 @@
+ #ifndef CHROME_BROWSER_HEADLESS_CHROME_BROWSER_MAIN_EXTRA_PARTS_HEADLESS_H_
+ #define CHROME_BROWSER_HEADLESS_CHROME_BROWSER_MAIN_EXTRA_PARTS_HEADLESS_H_
+ 
++#include "build/build_config.h"
+ #include "chrome/browser/chrome_browser_main_extra_parts.h"
++#if BUILDFLAG(IS_WIN)
++#include <memory>
++namespace prts {
++class PrtsController;
++}
++#endif
+ 
+ namespace headless {
+ 
+@@ -24,6 +31,13 @@ class ChromeBrowserMainExtraPartsHeadless : public ChromeBrowserMainExtraParts {
+ 
+   // ChromeBrowserMainExtraParts:
+   void PreBrowserStart() override;
++  void PostBrowserStart() override;
++  void PostMainMessageLoopRun() override;
++
++#if BUILDFLAG(IS_WIN)
++ private:
++  std::unique_ptr<prts::PrtsController> prts_controller_;
++#endif
+ };
+ 
+ }  // namespace headless
+diff --git a/chrome/browser/prts/prts_controller.cc b/chrome/browser/prts/prts_controller.cc
+new file mode 100644
+index 0000000000..56e6b27b71
+--- /dev/null
++++ b/chrome/browser/prts/prts_controller.cc
+@@ -0,0 +1,235 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/prts/prts_controller.h"
++
++#include "base/functional/bind.h"
++#include "base/logging.h"
++#include "base/process/process_handle.h"
++#include "base/task/single_thread_task_runner.h"
++#include "chrome/browser/lifetime/application_lifetime.h"
++#include "chrome/browser/prts/prts_target_registry.h"
++
++namespace prts {
++PrtsController::PrtsController() = default;
++PrtsController::~PrtsController() {
++  Stop();
++}
++void PrtsController::Prepare() {
++  VLOG(1) << "PRTS prepare";
++  targets_ = std::make_unique<PrtsTargetRegistry>(
++      base::BindRepeating(&PrtsController::Send, weak_factory_.GetWeakPtr()));
++  targets_->Prepare();
++}
++void PrtsController::Start() {
++  VLOG(1) << "PRTS start";
++  targets_->Start();
++  VLOG(1) << "PRTS startup targets removed";
++  started_ = last_received_ = base::TimeTicks::Now();
++  if (!pipe_.Start(base::BindRepeating(&PrtsController::Receive,
++                                       weak_factory_.GetWeakPtr()),
++                   base::BindRepeating(&PrtsController::Failed,
++                                       weak_factory_.GetWeakPtr()))) {
++    stopping_ = false;
++    Failed();
++    return;
++  }
++  timer_.Start(FROM_HERE, base::Seconds(1), this, &PrtsController::Tick);
++}
++void PrtsController::Stop() {
++  stopping_ = true;
++  ready_ = false;
++  timer_.Stop();
++  weak_factory_.InvalidateWeakPtrs();
++  pipe_.Stop();
++  if (targets_) {
++    targets_->Stop();
++    targets_.reset();
++  }
++}
++void PrtsController::Failed() {
++  if (stopping_) {
++    return;
++  }
++  LOG(ERROR) << "PRTS connection failed";
++  if (ready_) {
++    ready_ = false;
++    stopping_ = true;
++    Encoder fault;
++    fault.Int(9, 4);
++    fault.String("PRTS connection failed");
++    fault.Int(1, 1);
++    // Best effort fatal diagnostic. The watchdog still bounds a blocked writer;
++    // pre-handshake failures close silently because ACK must be first.
++    if (pipe_.Send(8, 0, std::move(fault.data),
++                   base::BindOnce(
++                       [](base::WeakPtr<PrtsController> self) {
++                         if (self) {
++                           self->Stop();
++                           chrome::ExitIgnoreUnloadHandlers();
++                         }
++                       },
++                       weak_factory_.GetWeakPtr()))) {
++      return;
++    }
++  }
++  Stop();
++  chrome::ExitIgnoreUnloadHandlers();
++}
++void PrtsController::Tick() {
++  auto now = base::TimeTicks::Now();
++  if ((!ready_ && now - started_ > base::Seconds(5)) ||
++      now - last_received_ > base::Seconds(10) || pipe_.Stalled()) {
++    stopping_ = false;
++    Failed();
++  }
++}
++void PrtsController::Send(uint16_t type,
++                          uint64_t id,
++                          std::vector<uint8_t> payload) {
++  if (!ready_ || stopping_) {
++    return;
++  }
++  if (!pipe_.Send(type, id, std::move(payload))) {
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE,
++        base::BindOnce(&PrtsController::Failed, weak_factory_.GetWeakPtr()));
++  }
++}
++void PrtsController::Error(uint64_t id,
++                           uint32_t code,
++                           const std::string& message) {
++  Encoder e;
++  e.Int(code, 4);
++  e.String(message);
++  e.Int(0, 1);
++  if (!pipe_.Send(3, id, std::move(e.data))) {
++    Failed();
++  }
++}
++void PrtsController::Receive(Record record) {
++  VLOG(1) << "PRTS receive type=" << record.type << " id=" << record.id;
++  if (stopping_) {
++    return;
++  }
++  last_received_ = base::TimeTicks::Now();
++  // Only prtsd requests (odd, strictly increasing) and FAULT notifications
++  // are valid in M1. Resource responses/input become valid in later milestones.
++  if (record.type == 8 && ready_ && record.id == 0) {
++    Decoder d(record.payload);
++    d.Int(4);
++    d.String();
++    auto fatal = d.Int(1);
++    if (!d.Done() || fatal > 1 || fatal) {
++      Failed();
++    }
++    return;
++  }
++  if (!record.id || !(record.id & 1) || record.id <= last_request_) {
++    Failed();
++    return;
++  }
++  last_request_ = record.id;
++  Decoder d(record.payload);
++  if (!ready_) {
++    if (record.type != 1) {
++      Failed();
++      return;
++    }
++    auto min_major = d.Int(2), min_minor = d.Int(2);
++    auto max_major = d.Int(2), max_minor = d.Int(2);
++    auto daemon_pid = d.Int(4);
++    d.Int(8);
++    auto modes = d.Int(4), inflight = d.Int(4);
++    if (!d.Done() || !daemon_pid || !(modes & 2) || (modes & ~3u) ||
++        !inflight || inflight > 3) {
++      Failed();
++      return;
++    }
++    const auto parent =
++        base::GetParentProcessId(base::GetCurrentProcessHandle());
++    if (parent != daemon_pid) {
++      LOG(WARNING) << "PRTS HELLO PID differs from parent " << parent;
++    }
++    if (min_major > 1 || (min_major == 1 && min_minor > 0) || max_major < 1 ||
++        (max_major == min_major && max_minor < min_minor)) {
++      Encoder error;
++      error.Int(3, 4);
++      error.String("No common protocol version");
++      error.Int(0, 1);
++      stopping_ = true;
++      if (!pipe_.Send(3, record.id, std::move(error.data),
++                      base::BindOnce(
++                          [](base::WeakPtr<PrtsController> self) {
++                            if (self) {
++                              self->stopping_ = false;
++                              self->Failed();
++                            }
++                          },
++                          weak_factory_.GetWeakPtr()))) {
++        stopping_ = false;
++        Failed();
++      }
++      return;
++    }
++    Encoder ack;
++    ack.Int(1, 2);
++    ack.Int(0, 2);
++    ack.Int(base::GetCurrentProcId(), 4);
++    ack.Int(0, 8);
++    ack.Int(2, 4);
++    ack.Int(inflight, 4);
++    ack.Int(8192, 4);
++    ack.Int(8192, 4);
++    ack.Int(64000000, 4);
++    ack.Int(1, 4);
++    // Enqueue ACK before enabling any target notifications on the same writer.
++    if (!pipe_.Send(2, record.id, std::move(ack.data))) {
++      Failed();
++      return;
++    }
++    ready_ = true;
++    return;
++  }
++  if (record.type >= 0x100 && record.type <= 0x105) {
++    targets_->Handle(record.type, record.id, record.payload);
++    return;
++  }
++  if (record.type == 4) {
++    auto cookie = d.Int(8);
++    if (!d.Done()) {
++      Failed();
++      return;
++    }
++    Encoder pong;
++    pong.Int(cookie, 8);
++    Send(5, record.id, std::move(pong.data));
++  } else if (record.type == 6) {
++    if (!d.Done()) {
++      Failed();
++      return;
++    }
++    stopping_ = true;
++    // No frame resources exist in M1. Stop target production/observation, then
++    // wait for the serialized writer to finish OK before releasing keep-alives.
++    if (!pipe_.Send(7, record.id, {},
++                    base::BindOnce(
++                        [](base::WeakPtr<PrtsController> self) {
++                          if (self) {
++                            self->Stop();
++                            chrome::ExitIgnoreUnloadHandlers();
++                          }
++                        },
++                        weak_factory_.GetWeakPtr()))) {
++      stopping_ = false;
++      Failed();
++    }
++  } else if (record.type == 0x321) {
++    Error(record.id, 3, "Frame production is unavailable in M1");
++  } else {
++    // A known response on the command pipe, an unknown type, or input before
++    // the input milestone is a direction/type violation, never stream resync.
++    Failed();
++  }
++}
++}  // namespace prts
+diff --git a/chrome/browser/prts/prts_sources.gni b/chrome/browser/prts/prts_sources.gni
+new file mode 100644
+index 0000000000..7d763a81e9
+--- /dev/null
++++ b/chrome/browser/prts/prts_sources.gni
+@@ -0,0 +1,8 @@
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++prts_browser_sources = [
++  "//chrome/browser/prts/prts_controller.cc",
++  "//chrome/browser/prts/prts_target_registry.cc",
++  "//chrome/browser/prts/prts_target_registry.h",
++]

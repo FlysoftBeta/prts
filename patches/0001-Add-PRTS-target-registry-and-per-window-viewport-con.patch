@@ -1,0 +1,671 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 04:20:26 +0800
+Subject: [PATCH 1/7] Add PRTS target registry and per-window viewport control
+
+Observe browser collections, tab strips and WebContents for stable target IDs, lifecycle events and headless navigation. Retain process/profile lifetime across last-window closure and apply per-target device emulation.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_target_registry.cc b/chrome/browser/prts/prts_target_registry.cc
+new file mode 100644
+index 0000000000..20a4c85c52
+--- /dev/null
++++ b/chrome/browser/prts/prts_target_registry.cc
+@@ -0,0 +1,610 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "chrome/browser/prts/prts_target_registry.h"
++
++#include <bit>
++#include <cmath>
++#include <map>
++#include <set>
++#include <string>
++#include <utility>
++
++#include "base/containers/span.h"
++#include "base/json/json_writer.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/ref_counted.h"
++#include "base/scoped_observation.h"
++#include "base/strings/string_util.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/values.h"
++#include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
++#include "chrome/browser/profiles/keep_alive/scoped_profile_keep_alive.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/profiles/profile_manager.h"
++#include "chrome/browser/ui/browser.h"
++#include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
++#include "chrome/browser/ui/browser_window/public/create_browser_window.h"
++#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
++#include "chrome/browser/ui/navigator/browser_navigator.h"
++#include "chrome/browser/ui/navigator/browser_navigator_params.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
++#include "components/keep_alive_registry/keep_alive_types.h"
++#include "components/keep_alive_registry/scoped_keep_alive.h"
++#include "content/public/browser/devtools_agent_host.h"
++#include "content/public/browser/devtools_agent_host_client.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "ui/base/base_window.h"
++#include "ui/base/page_transition_types.h"
++#include "ui/base/window_open_disposition.h"
++#include "ui/gfx/geometry/rect.h"
++#include "url/gurl.h"
++
++namespace {
++struct Size {
++  uint32_t width = 800;
++  uint32_t height = 600;
++  double dpr = 1;
++};
++
++// Validate before advancing or allocating; never accept a partial schema.
++class Reader {
++ public:
++  explicit Reader(const std::vector<uint8_t>& bytes) : bytes_(bytes) {}
++  bool Integer(size_t count, uint64_t& result) {
++    if (count > bytes_.size() - position_) {
++      return false;
++    }
++    result = 0;
++    for (size_t i = 0; i < count; ++i) {
++      result |= uint64_t{bytes_[position_++]} << (i * 8);
++    }
++    return true;
++  }
++  bool String(std::string& result) {
++    uint64_t length;
++    if (!Integer(4, length) || length > 65536 ||
++        length > bytes_.size() - position_) {
++      return false;
++    }
++    result.assign(reinterpret_cast<const char*>(bytes_.data() + position_),
++                  length);
++    position_ += length;
++    return base::IsStringUTF8(result) && result.find('\0') == std::string::npos;
++  }
++  bool ReadSize(Size& size) {
++    uint64_t w, h, bits;
++    if (!Integer(4, w) || !Integer(4, h) || !Integer(8, bits)) {
++      return false;
++    }
++    size = {static_cast<uint32_t>(w), static_cast<uint32_t>(h),
++            std::bit_cast<double>(bits)};
++    const double dw = std::ceil(w * size.dpr);
++    const double dh = std::ceil(h * size.dpr);
++    return w >= 1 && w <= 8192 && h >= 1 && h <= 8192 &&
++           std::isfinite(size.dpr) && size.dpr >= 0.5 && size.dpr <= 4 &&
++           dw <= 16384 && dh <= 16384 && dw * dh <= 64000000;
++  }
++  bool Done() const { return position_ == bytes_.size(); }
++
++ private:
++  const std::vector<uint8_t>& bytes_;
++  size_t position_ = 0;
++};
++
++void Put(std::vector<uint8_t>& bytes, uint64_t value, size_t count) {
++  for (size_t i = 0; i < count; ++i) {
++    bytes.push_back(static_cast<uint8_t>(value >> (i * 8)));
++  }
++}
++
++void PutString(std::vector<uint8_t>& bytes, const std::string& value) {
++  // A page can supply an arbitrarily long title. Truncate only at a UTF-8
++  // boundary, so even hostile content cannot generate an invalid wire string.
++  std::string_view bounded = base::TruncateUTF8ToByteSize(value, 65536);
++  Put(bytes, bounded.size(), 4);
++  bytes.insert(bytes.end(), bounded.begin(), bounded.end());
++}
++}  // namespace
++
++class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
++                                 public TabStripModelObserver {
++ public:
++  explicit Impl(SendCallback send) : send_(std::move(send)) {}
++  ~Impl() override { Stop(); }
++
++  class StartupContents : public content::WebContentsObserver {
++   public:
++    explicit StartupContents(content::WebContents* contents)
++        : WebContentsObserver(contents) {}
++  };
++
++  class Target : public content::WebContentsObserver,
++                 public content::DevToolsAgentHostClient {
++   public:
++    Target(Impl* owner, content::WebContents* contents, uint64_t identity)
++        : WebContentsObserver(contents), owner_(owner), id(identity) {
++      load = contents->IsLoading() ? 1 : 0;
++      auto* opener_contents =
++          contents->GetFirstWebContentsInLiveOriginalOpenerChain();
++      for (const auto& [other_id, target] : owner_->targets_) {
++        if (target->web_contents() == opener_contents) {
++          opener = other_id;
++          kind = 2;
++          break;
++        }
++      }
++    }
++    ~Target() override {
++      if (agent_) {
++        agent_->DetachClient(this);
++      }
++    }
++
++    void ApplySize() {
++      auto* browser =
++          GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
++              web_contents());
++      if (browser && browser->GetWindow()) {
++        // Window bounds are only a backing surface. Device emulation below is
++        // the authority for CSS viewport and DPR, independent of native insets.
++        browser->GetWindow()->SetBounds(
++            gfx::Rect(0, 0, size.width, size.height));
++      }
++      if (!agent_) {
++        agent_ = content::DevToolsAgentHost::GetOrCreateFor(web_contents());
++        if (!agent_->AttachClient(this)) {
++          agent_.reset();
++          return;
++        }
++      }
++      base::DictValue params;
++      params.Set("width", static_cast<int>(size.width));
++      params.Set("height", static_cast<int>(size.height));
++      params.Set("deviceScaleFactor", size.dpr);
++      params.Set("mobile", false);
++      base::DictValue command;
++      command.Set("id", ++devtools_id_);
++      command.Set("method", "Emulation.setDeviceMetricsOverride");
++      command.Set("params", std::move(params));
++      std::string json;
++      base::JSONWriter::Write(command, &json);
++      agent_->DispatchProtocolMessage(this, base::as_byte_span(json));
++    }
++    void DispatchProtocolMessage(content::DevToolsAgentHost*,
++                                 base::span<const uint8_t>) override {}
++    void AgentHostClosed(content::DevToolsAgentHost*) override {
++      agent_.reset();
++    }
++    bool IsTrusted() override { return true; }
++    void DidStartLoading() override {
++      load = 1;
++      Changed();
++    }
++    void DidStopLoading() override {
++      if (load != 3) {
++        load = 2;
++      }
++      Changed();
++    }
++    void DidFinishNavigation(content::NavigationHandle* navigation) override {
++      if (!navigation->IsInPrimaryMainFrame()) {
++        return;
++      }
++      if (navigation->HasCommitted()) {
++        if (navigation->IsErrorPage()) {
++          load = 3;
++        }
++        Changed();
++      } else if (navigation->GetNetErrorCode() != 0) {
++        load = 3;
++        Changed();
++      }
++    }
++    void TitleWasSet(content::NavigationEntry*) override { Changed(); }
++    void WebContentsDestroyed() override { owner_->Destroyed(id); }
++    void Changed() { owner_->Changed(*this); }
++
++    const raw_ptr<Impl> owner_;
++    const uint64_t id;
++    uint64_t opener = 0;
++    uint8_t kind = 1;
++    uint8_t load = 0;
++    Size size;
++    uint64_t generation = 1;
++    bool announced = false;
++    std::vector<uint64_t> close_requests;
++
++   private:
++    scoped_refptr<content::DevToolsAgentHost> agent_;
++    int devtools_id_ = 0;
++  };
++
++  void Prepare() {
++    keep_alive_ = std::make_unique<ScopedKeepAlive>(
++        KeepAliveOrigin::HEADLESS_COMMAND, KeepAliveRestartOption::DISABLED);
++    observation_.Observe(GlobalBrowserCollection::GetInstance());
++    GlobalBrowserCollection::GetInstance()->ForEach([this](auto* browser) {
++      OnBrowserCreated(browser);
++      return true;
++    });
++  }
++
++  void Start() {
++    Profile* startup_profile = nullptr;
++    GlobalBrowserCollection::GetInstance()->ForEach([&](auto* browser) {
++      startup_profile = browser->GetProfile();
++      return false;
++    });
++    if (!startup_profile) {
++      startup_profile = ProfileManager::GetLastUsedProfile();
++    }
++    profile_ = startup_profile->GetOriginalProfile();
++    off_the_record_ = startup_profile->IsOffTheRecord();
++    profile_keep_alive_ = ScopedProfileKeepAlive::TryAcquire(
++        profile_, ProfileKeepAliveOrigin::kHeadlessCommand);
++    // Startup navigation is a Chrome implementation detail, never a PRTS
++    // target. Keep the process and original profile alive before closing it.
++    GlobalBrowserCollection::GetInstance()->ForEach([this](auto* browser) {
++      auto* strip = browser->GetTabStripModel();
++      for (int i = 0; i < strip->count(); ++i) {
++        ignored_.push_back(
++            std::make_unique<StartupContents>(strip->GetWebContentsAt(i)));
++      }
++      strip->CloseAllTabs();
++      return true;
++    });
++    started_ = true;
++  }
++
++  void Stop() {
++    if (!keep_alive_) {
++      return;
++    }
++    started_ = false;
++    observation_.Reset();
++    for (auto* strip : strips_) {
++      strip->RemoveObserver(this);
++    }
++    strips_.clear();
++    ignored_.clear();
++    targets_.clear();
++    GlobalBrowserCollection::GetInstance()->ForEach([](auto* browser) {
++      browser->GetTabStripModel()->CloseAllTabs();
++      return true;
++    });
++    profile_ = nullptr;
++    profile_keep_alive_.reset();
++    keep_alive_.reset();
++  }
++
++  std::vector<uint8_t> Snapshot(const Target& target) const {
++    std::vector<uint8_t> bytes;
++    Put(bytes, target.id, 8);
++    Put(bytes, target.kind, 1);
++    Put(bytes, target.opener, 8);
++    PutString(bytes, target.web_contents()->GetVisibleURL().spec());
++    PutString(bytes, base::UTF16ToUTF8(target.web_contents()->GetTitle()));
++    Put(bytes, target.load, 1);
++    Put(bytes, target.size.width, 4);
++    Put(bytes, target.size.height, 4);
++    Put(bytes, std::bit_cast<uint64_t>(target.size.dpr), 8);
++    Put(bytes, target.generation, 8);
++    Put(bytes, active_ == target.id, 1);
++    return bytes;
++  }
++
++  void Changed(Target& target) {
++    if (started_ && target.announced) {
++      send_.Run(0x0192, 0, Snapshot(target));
++    }
++  }
++
++  Target* Find(content::WebContents* contents) {
++    for (const auto& [id, target] : targets_) {
++      if (target->web_contents() == contents) {
++        return target.get();
++      }
++    }
++    return nullptr;
++  }
++
++  Target* Track(content::WebContents* contents) {
++    if (auto* existing = Find(contents)) {
++      return existing;
++    }
++    auto target = std::make_unique<Target>(this, contents, ++next_id_);
++    auto* result = target.get();
++    targets_.emplace(result->id, std::move(target));
++    return result;
++  }
++
++  void Activate(Target& target) {
++    if (active_ == target.id) {
++      return;
++    }
++    const uint64_t previous = std::exchange(active_, target.id);
++    ++target.generation;
++    if (auto it = targets_.find(previous); it != targets_.end()) {
++      Changed(*it->second);
++    }
++    // Selecting/focusing content is intentionally separate from activation of
++    // the platform window. No Windows foreground/focus API is used.
++    auto* browser = GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
++        target.web_contents());
++    if (browser) {
++      auto* strip = browser->GetTabStripModel();
++      strip->ActivateTabAt(strip->GetIndexOfWebContents(target.web_contents()));
++    }
++    Changed(target);
++  }
++
++  void Destroyed(uint64_t id) {
++    auto found = targets_.find(id);
++    if (found == targets_.end()) {
++      return;
++    }
++    auto target = std::move(found->second);
++    targets_.erase(found);
++    if (started_ && target->announced) {
++      std::vector<uint8_t> bytes;
++      Put(bytes, id, 8);
++      PutString(bytes, "closed");
++      send_.Run(0x0191, 0, std::move(bytes));
++      if (active_ == id) {
++        active_ = 0;
++        if (!targets_.empty()) {
++          Activate(*targets_.begin()->second);
++        }
++      }
++      for (uint64_t request : target->close_requests) {
++        send_.Run(0x0007, request, {});
++      }
++    }
++  }
++
++  void OnBrowserCreated(BrowserWindowInterface* browser) override {
++    auto* strip = browser->GetTabStripModel();
++    if (strips_.insert(strip).second) {
++      strip->AddObserver(this);
++    }
++    Scan(strip);
++  }
++  void OnBrowserClosed(BrowserWindowInterface* browser) override {
++    auto* strip = browser->GetTabStripModel();
++    if (strips_.erase(strip)) {
++      strip->RemoveObserver(this);
++    }
++  }
++  void OnBrowserActivated(BrowserWindowInterface* browser) override {
++    if (!started_ || creating_) {
++      return;
++    }
++    auto* target = Find(browser->GetTabStripModel()->GetActiveWebContents());
++    if (target && target->kind == 1 && target->announced) {
++      Activate(*target);
++    }
++  }
++  void OnTabStripModelChanged(TabStripModel* strip,
++                              const TabStripModelChange&,
++                              const TabStripSelectionChange&) override {
++    Scan(strip);
++  }
++  void Scan(TabStripModel* strip) {
++    if (!started_ || creating_) {
++      return;
++    }
++    for (int i = 0; i < strip->count(); ++i) {
++      auto* contents = strip->GetWebContentsAt(i);
++      bool ignored = false;
++      for (const auto& startup : ignored_) {
++        ignored |= startup->web_contents() == contents;
++      }
++      if (ignored || Find(contents)) {
++        continue;
++      }
++      // Chrome popup policy remains authoritative. Discover only tabs actually
++      // inserted by Chrome, without replacing its WebContentsDelegate.
++      if (targets_.size() >= 256) {
++        strip->CloseWebContents(contents, 0);
++        return;
++      }
++      auto* target = Track(contents);
++      auto* browser =
++          GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(contents);
++      if (browser && browser->GetType() == BrowserWindowInterface::TYPE_POPUP) {
++        target->kind = 2;
++      }
++      if (!active_) {
++        active_ = target->id;
++      }
++      target->ApplySize();
++      target->announced = true;
++      send_.Run(0x0190, 0, Snapshot(*target));
++    }
++  }
++
++  void Error(uint64_t request, uint32_t code, const std::string& message) {
++    std::vector<uint8_t> bytes;
++    Put(bytes, code, 4);
++    PutString(bytes, message);
++    Put(bytes, 0, 1);
++    send_.Run(0x0003, request, std::move(bytes));
++  }
++
++  void Handle(uint16_t type,
++              uint64_t request,
++              const std::vector<uint8_t>& payload) {
++    Reader reader(payload);
++    uint64_t id = 0;
++    uint64_t activate = 0;
++    std::string url;
++    Size size;
++    bool valid = true;
++    switch (type) {
++      case 0x0100:
++        valid = reader.String(url) && reader.ReadSize(size) &&
++                reader.Integer(1, activate) && activate <= 1;
++        break;
++      case 0x0101:
++      case 0x0105:
++        valid = reader.Integer(8, id) && id;
++        break;
++      case 0x0102:
++        valid = reader.Integer(8, id) && id && reader.String(url);
++        break;
++      case 0x0103:
++        break;
++      case 0x0104:
++        valid = reader.Integer(8, id) && id && reader.ReadSize(size);
++        break;
++      default:
++        Error(request, 3, "Unsupported target operation");
++        return;
++    }
++    if (!valid || !reader.Done()) {
++      Error(request, 1, "Invalid target payload");
++      return;
++    }
++    if ((type == 0x0100 || type == 0x0102) && !GURL(url).is_valid()) {
++      Error(request, 1, "Invalid absolute URL");
++      return;
++    }
++    if (type == 0x0103) {
++      std::vector<uint8_t> bytes;
++      Put(bytes, targets_.size(), 4);
++      for (const auto& [identity, target] : targets_) {
++        auto snapshot = Snapshot(*target);
++        // Envelope limit takes precedence over the maximum target count.
++        if (bytes.size() + snapshot.size() > 1048556) {
++          Error(request, 5, "Target snapshot exceeds control record limit");
++          return;
++        }
++        bytes.insert(bytes.end(), snapshot.begin(), snapshot.end());
++      }
++      send_.Run(0x0181, request, std::move(bytes));
++      return;
++    }
++    if (type == 0x0100) {
++      if (targets_.size() >= 256) {
++        Error(request, 5, "Target limit reached");
++        return;
++      }
++      Profile* profile = off_the_record_ ? profile_->GetPrimaryOTRProfile(true)
++                                         : profile_.get();
++      BrowserWindowCreateParams create(profile, false);
++      create.initial_bounds = gfx::Rect(0, 0, size.width, size.height);
++      create.omit_from_session_restore = true;
++      create.should_trigger_session_restore = false;
++      creating_ = true;
++      Browser* browser = Browser::Create(std::move(create));
++      NavigateParams params(browser, GURL(url), ui::PAGE_TRANSITION_TYPED);
++      params.disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
++      params.window_action = NavigateParams::WindowAction::kShowWindowInactive;
++      Navigate(&params);
++      creating_ = false;
++      auto* contents = params.navigated_or_inserted_contents;
++      if (!contents) {
++        browser->GetWindow()->Close();
++        Error(request, 9, "Chrome failed to create target");
++        return;
++      }
++      auto* target = Track(contents);
++      target->size = size;
++      // The first target's initial stream starts at generation 1.
++      if (!active_) {
++        active_ = target->id;
++      } else if (activate) {
++        Activate(*target);
++      }
++      target->ApplySize();
++      target->announced = true;
++      send_.Run(0x0190, 0, Snapshot(*target));
++      send_.Run(0x0180, request, Snapshot(*target));
++      return;
++    }
++    auto found = targets_.find(id);
++    if (found == targets_.end()) {
++      Error(request, 2, "Unknown target");
++      return;
++    }
++    Target& target = *found->second;
++    if (!target.close_requests.empty()) {
++      Error(request, 4, "Target is closing");
++      return;
++    }
++    switch (type) {
++      case 0x0101: {
++        auto* browser =
++            GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
++                target.web_contents());
++        if (!browser) {
++          Error(request, 4, "Target is moving between windows");
++          return;
++        }
++        target.close_requests.push_back(request);
++        browser->GetTabStripModel()->CloseWebContents(target.web_contents(), 0);
++        return;  // Destruction emits CLOSED, then OK.
++      }
++      case 0x0102:
++        target.web_contents()->GetController().LoadURL(
++            GURL(url), content::Referrer(), ui::PAGE_TRANSITION_TYPED, "");
++        Changed(target);
++        send_.Run(0x0007, request, {});
++        return;
++      case 0x0104:
++        target.size = size;
++        ++target.generation;
++        target.ApplySize();
++        Changed(target);
++        break;
++      case 0x0105:
++        if (active_ == id) {
++          Changed(target);
++        } else {
++          Activate(target);
++        }
++        break;
++    }
++    send_.Run(0x0180, request, Snapshot(target));
++  }
++
++ private:
++  SendCallback send_;
++  base::ScopedObservation<GlobalBrowserCollection, BrowserCollectionObserver>
++      observation_{this};
++  std::set<TabStripModel*> strips_;
++  std::vector<std::unique_ptr<StartupContents>> ignored_;
++  std::map<uint64_t, std::unique_ptr<Target>> targets_;
++  std::unique_ptr<ScopedKeepAlive> keep_alive_;
++  std::unique_ptr<ScopedProfileKeepAlive> profile_keep_alive_;
++  raw_ptr<Profile> profile_ = nullptr;
++  bool off_the_record_ = false;
++  bool started_ = false;
++  bool creating_ = false;
++  uint64_t next_id_ = 0;
++  uint64_t active_ = 0;
++};
++
++PrtsTargetRegistry::PrtsTargetRegistry(SendCallback send)
++    : impl_(std::make_unique<Impl>(std::move(send))) {}
++PrtsTargetRegistry::~PrtsTargetRegistry() = default;
++void PrtsTargetRegistry::Prepare() {
++  impl_->Prepare();
++}
++void PrtsTargetRegistry::Start() {
++  impl_->Start();
++}
++void PrtsTargetRegistry::Stop() {
++  impl_->Stop();
++}
++void PrtsTargetRegistry::Handle(uint16_t type,
++                                uint64_t request,
++                                const std::vector<uint8_t>& payload) {
++  impl_->Handle(type, request, payload);
++}
+diff --git a/chrome/browser/prts/prts_target_registry.h b/chrome/browser/prts/prts_target_registry.h
+new file mode 100644
+index 0000000000..77914d96fc
+--- /dev/null
++++ b/chrome/browser/prts/prts_target_registry.h
+@@ -0,0 +1,40 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_PRTS_PRTS_TARGET_REGISTRY_H_
++#define CHROME_BROWSER_PRTS_PRTS_TARGET_REGISTRY_H_
++
++#include <stdint.h>
++
++#include <memory>
++#include <vector>
++
++#include "base/functional/callback.h"
++
++// All entry points and callbacks run on the browser UI sequence. Wire
++// identities belong to WebContents, independently of their renderer or
++// containing window.
++class PrtsTargetRegistry {
++ public:
++  using SendCallback =
++      base::RepeatingCallback<void(uint16_t, uint64_t, std::vector<uint8_t>)>;
++
++  explicit PrtsTargetRegistry(SendCallback send);
++  ~PrtsTargetRegistry();
++  PrtsTargetRegistry(const PrtsTargetRegistry&) = delete;
++  PrtsTargetRegistry& operator=(const PrtsTargetRegistry&) = delete;
++
++  void Prepare();
++  void Start();
++  void Handle(uint16_t type,
++              uint64_t request_id,
++              const std::vector<uint8_t>& payload);
++  void Stop();
++
++ private:
++  class Impl;
++  std::unique_ptr<Impl> impl_;
++};
++
++#endif  // CHROME_BROWSER_PRTS_PRTS_TARGET_REGISTRY_H_

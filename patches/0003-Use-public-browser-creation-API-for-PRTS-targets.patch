@@ -1,0 +1,118 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 04:23:00 +0800
+Subject: [PATCH 3/7] Use public browser creation API for PRTS targets
+
+Follow CreateBrowserWindow's BrowserWindowCreateParams interface because Browser::Create is private at the pinned revision. Use explicit FunctionRef argument types and raw_span for Chromium safety checks.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_target_registry.cc b/chrome/browser/prts/prts_target_registry.cc
+index b88f76ba6c..5b0b59dc27 100644
+--- a/chrome/browser/prts/prts_target_registry.cc
++++ b/chrome/browser/prts/prts_target_registry.cc
+@@ -14,6 +14,7 @@
+ #include "base/containers/span.h"
+ #include "base/json/json_writer.h"
+ #include "base/memory/raw_ptr.h"
++#include "base/memory/raw_span.h"
+ #include "base/memory/ref_counted.h"
+ #include "base/scoped_observation.h"
+ #include "base/strings/string_util.h"
+@@ -23,7 +24,6 @@
+ #include "chrome/browser/profiles/keep_alive/scoped_profile_keep_alive.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+-#include "chrome/browser/ui/browser.h"
+ #include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
+ #include "chrome/browser/ui/browser_window/public/create_browser_window.h"
+ #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+@@ -93,7 +93,7 @@ class Reader {
+   bool Done() const { return position_ == bytes_.size(); }
+ 
+  private:
+-  const std::vector<uint8_t>& bytes_;
++  base::raw_span<const uint8_t> bytes_;
+   size_t position_ = 0;
+ };
+ 
+@@ -229,18 +229,20 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+     keep_alive_ = std::make_unique<ScopedKeepAlive>(
+         KeepAliveOrigin::HEADLESS_COMMAND, KeepAliveRestartOption::DISABLED);
+     observation_.Observe(GlobalBrowserCollection::GetInstance());
+-    GlobalBrowserCollection::GetInstance()->ForEach([this](auto* browser) {
+-      OnBrowserCreated(browser);
+-      return true;
+-    });
++    GlobalBrowserCollection::GetInstance()->ForEach(
++        [this](BrowserWindowInterface* browser) {
++          OnBrowserCreated(browser);
++          return true;
++        });
+   }
+ 
+   void Start() {
+     Profile* startup_profile = nullptr;
+-    GlobalBrowserCollection::GetInstance()->ForEach([&](auto* browser) {
+-      startup_profile = browser->GetProfile();
+-      return false;
+-    });
++    GlobalBrowserCollection::GetInstance()->ForEach(
++        [&](BrowserWindowInterface* browser) {
++          startup_profile = browser->GetProfile();
++          return false;
++        });
+     if (!startup_profile) {
+       startup_profile = ProfileManager::GetLastUsedProfile();
+     }
+@@ -250,15 +252,16 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+         profile_, ProfileKeepAliveOrigin::kHeadlessCommand);
+     // Startup navigation is a Chrome implementation detail, never a PRTS
+     // target. Keep the process and original profile alive before closing it.
+-    GlobalBrowserCollection::GetInstance()->ForEach([this](auto* browser) {
+-      auto* strip = browser->GetTabStripModel();
+-      for (int i = 0; i < strip->count(); ++i) {
+-        ignored_.push_back(
+-            std::make_unique<StartupContents>(strip->GetWebContentsAt(i)));
+-      }
+-      strip->CloseAllTabs();
+-      return true;
+-    });
++    GlobalBrowserCollection::GetInstance()->ForEach(
++        [this](BrowserWindowInterface* browser) {
++          auto* strip = browser->GetTabStripModel();
++          for (int i = 0; i < strip->count(); ++i) {
++            ignored_.push_back(
++                std::make_unique<StartupContents>(strip->GetWebContentsAt(i)));
++          }
++          strip->CloseAllTabs();
++          return true;
++        });
+     started_ = true;
+   }
+ 
+@@ -274,10 +277,11 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+     strips_.clear();
+     ignored_.clear();
+     targets_.clear();
+-    GlobalBrowserCollection::GetInstance()->ForEach([](auto* browser) {
+-      browser->GetTabStripModel()->CloseAllTabs();
+-      return true;
+-    });
++    GlobalBrowserCollection::GetInstance()->ForEach(
++        [](BrowserWindowInterface* browser) {
++          browser->GetTabStripModel()->CloseAllTabs();
++          return true;
++        });
+     profile_ = nullptr;
+     profile_keep_alive_.reset();
+     keep_alive_.reset();
+@@ -504,7 +508,7 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+       create.omit_from_session_restore = true;
+       create.should_trigger_session_restore = false;
+       creating_ = true;
+-      Browser* browser = Browser::Create(std::move(create));
++      BrowserWindowInterface* browser = CreateBrowserWindow(std::move(create));
+       NavigateParams params(browser, GURL(url), ui::PAGE_TRANSITION_TYPED);
+       params.disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
+       params.window_action = NavigateParams::WindowAction::kShowWindowInactive;

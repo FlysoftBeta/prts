@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 04:21:01 +0800
+Subject: [PATCH 2/7] Tighten PRTS target creation and bounded string parsing
+
+Use explicit WebContents conversion for NavigateParams and retain generation 1 for targets entering their first stream.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_target_registry.cc b/chrome/browser/prts/prts_target_registry.cc
+index 20a4c85c52..b88f76ba6c 100644
+--- a/chrome/browser/prts/prts_target_registry.cc
++++ b/chrome/browser/prts/prts_target_registry.cc
+@@ -72,8 +72,8 @@ class Reader {
+         length > bytes_.size() - position_) {
+       return false;
+     }
+-    result.assign(reinterpret_cast<const char*>(bytes_.data() + position_),
+-                  length);
++    result = base::as_string_view(
++        base::span(bytes_).subspan(position_, static_cast<size_t>(length)));
+     position_ += length;
+     return base::IsStringUTF8(result) && result.find('\0') == std::string::npos;
+   }
+@@ -329,7 +329,9 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+       return;
+     }
+     const uint64_t previous = std::exchange(active_, target.id);
+-    ++target.generation;
++    if (target.announced) {
++      ++target.generation;
++    }
+     if (auto it = targets_.find(previous); it != targets_.end()) {
+       Changed(*it->second);
+     }
+@@ -508,7 +510,7 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+       params.window_action = NavigateParams::WindowAction::kShowWindowInactive;
+       Navigate(&params);
+       creating_ = false;
+-      auto* contents = params.navigated_or_inserted_contents;
++      content::WebContents* contents = params.navigated_or_inserted_contents;
+       if (!contents) {
+         browser->GetWindow()->Close();
+         Error(request, 9, "Chrome failed to create target");

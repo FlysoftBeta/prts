@@ -1,0 +1,556 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 04:37:06 +0800
+Subject: [PATCH 6/7] Add bounded Windows PRTS pipe transport and protocol
+ interfaces
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/BUILD.gn b/chrome/browser/prts/BUILD.gn
+new file mode 100644
+index 0000000000..178193f60f
+--- /dev/null
++++ b/chrome/browser/prts/BUILD.gn
+@@ -0,0 +1,22 @@
++# Copyright 2026 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++source_set("transport") {
++  assert(is_win)
++  sources = [
++    "prts_pipe_client_win.cc",
++    "prts_pipe_client_win.h",
++    "prts_protocol.h",
++    "prts_switches.h",
++  ]
++  public_deps = [ "//base" ]
++}
++
++source_set("controller_interface") {
++  assert(is_win)
++  sources = [ "prts_controller.h" ]
++  public_deps = [
++    ":transport",
++    "//base",
++  ]
++}
+diff --git a/chrome/browser/prts/prts_controller.h b/chrome/browser/prts/prts_controller.h
+new file mode 100644
+index 0000000000..74af34471d
+--- /dev/null
++++ b/chrome/browser/prts/prts_controller.h
+@@ -0,0 +1,40 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_PRTS_PRTS_CONTROLLER_H_
++#define CHROME_BROWSER_PRTS_PRTS_CONTROLLER_H_
++#include <memory>
++
++#include "base/memory/weak_ptr.h"
++#include "base/time/time.h"
++#include "base/timer/timer.h"
++#include "chrome/browser/prts/prts_pipe_client_win.h"
++
++class PrtsTargetRegistry;
++namespace prts {
++class PrtsController {
++ public:
++  PrtsController();
++  ~PrtsController();
++  void Prepare();
++  void Start();
++  void Stop();
++
++ private:
++  void Receive(Record record);
++  void Send(uint16_t type, uint64_t id, std::vector<uint8_t> payload);
++  void Error(uint64_t id, uint32_t code, const std::string& message);
++  void Failed();
++  void Tick();
++  bool ready_ = false;
++  bool stopping_ = false;
++  uint64_t last_request_ = 0;
++  base::TimeTicks started_;
++  base::TimeTicks last_received_;
++  base::RepeatingTimer timer_;
++  PrtsPipeClient pipe_;
++  std::unique_ptr<PrtsTargetRegistry> targets_;
++  base::WeakPtrFactory<PrtsController> weak_factory_{this};
++};
++}  // namespace prts
++#endif  // CHROME_BROWSER_PRTS_PRTS_CONTROLLER_H_
+diff --git a/chrome/browser/prts/prts_pipe_client_win.cc b/chrome/browser/prts/prts_pipe_client_win.cc
+new file mode 100644
+index 0000000000..fb3c6d2d10
+--- /dev/null
++++ b/chrome/browser/prts/prts_pipe_client_win.cc
+@@ -0,0 +1,323 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/prts/prts_pipe_client_win.h"
++
++#include <windows.h>
++
++#include <array>
++#include <atomic>
++#include <deque>
++
++#include "base/command_line.h"
++#include "base/functional/bind.h"
++#include "base/location.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/strings/string_split.h"
++#include "base/synchronization/lock.h"
++#include "base/synchronization/waitable_event.h"
++#include "base/task/single_thread_task_runner.h"
++#include "base/task/thread_pool.h"
++#include "base/threading/thread.h"
++#include "base/time/time.h"
++#include "base/win/scoped_handle.h"
++#include "chrome/browser/prts/prts_switches.h"
++
++namespace prts {
++namespace {
++bool Parse(std::array<HANDLE, 3>& handles) {
++  const auto* command = base::CommandLine::ForCurrentProcess();
++  auto fields =
++      base::SplitString(command->GetSwitchValueASCII(kPipeSwitch), ",",
++                        base::KEEP_WHITESPACE, base::SPLIT_WANT_ALL);
++  if (fields.size() != 3) {
++    return false;
++  }
++  std::array<bool, 3> seen = {};
++  for (const auto& field : fields) {
++    size_t colon = field.find(':');
++    if (colon == std::string::npos) {
++      return false;
++    }
++    const auto key = field.substr(0, colon);
++    size_t index = key == "cmd" ? 0 : key == "evt" ? 1 : key == "frame" ? 2 : 3;
++    const auto value = field.substr(colon + 1);
++    if (index == 3 || seen[index] || value.size() < 3 ||
++        value.substr(0, 2) != "0x" ||
++        value.find_first_not_of("0123456789abcdefABCDEF", 2) !=
++            std::string::npos) {
++      return false;
++    }
++    uint64_t raw = 0;
++    if (!base::HexStringToUInt64(value.substr(2), &raw) || !raw ||
++        raw > UINTPTR_MAX || raw == UINTPTR_MAX) {
++      return false;
++    }
++    HANDLE handle = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(raw));
++    DWORD flags = 0;
++    if (!GetHandleInformation(handle, &flags) ||
++        GetFileType(handle) != FILE_TYPE_PIPE) {
++      return false;
++    }
++    handles[index] = handle;
++    seen[index] = true;
++  }
++  return handles[0] != handles[1] && handles[0] != handles[2] &&
++         handles[1] != handles[2];
++}
++bool Transfer(HANDLE handle,
++              base::span<uint8_t> bytes,
++              bool write,
++              const std::atomic_bool& stopped) {
++  while (!bytes.empty() && !stopped.load()) {
++    DWORD count = 0;
++    BOOL ok = write
++                  ? WriteFile(handle, bytes.data(),
++                              static_cast<DWORD>(bytes.size()), &count, nullptr)
++                  : ReadFile(handle, bytes.data(),
++                             static_cast<DWORD>(bytes.size()), &count, nullptr);
++    if (!ok || !count) {
++      return false;
++    }
++    bytes = bytes.subspan(count);
++  }
++  return bytes.empty();
++}
++}  // namespace
++
++bool ValidateLaunch() {
++  const auto* command = base::CommandLine::ForCurrentProcess();
++  if (!command->HasSwitch(kPipeSwitch)) {
++    return true;
++  }
++  if (!command->GetSwitchValueASCII("type").empty() ||
++      command->GetSwitchValueASCII("headless") != "new") {
++    return false;
++  }
++  std::array<HANDLE, 3> handles;
++  if (!Parse(handles)) {
++    return false;
++  }
++  for (HANDLE handle : handles) {
++    if (!SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0)) {
++      return false;
++    }
++  }
++  return true;
++}
++
++struct PrtsPipeClient::State {
++  struct Pending {
++    std::vector<uint8_t> bytes;
++    base::OnceClosure written;
++  };
++  State()
++      : wake(base::WaitableEvent::ResetPolicy::AUTOMATIC),
++        reader("PrtsRead"),
++        writer("PrtsWrite") {}
++  std::array<base::win::ScopedHandle, 3> handles;
++  std::atomic_bool stopped{false};
++  base::Lock lock;
++  std::deque<Pending> outgoing;
++  size_t outgoing_bytes = 0;
++  size_t outgoing_count = 0;
++  size_t incoming_bytes = 0;
++  size_t incoming_count = 0;
++  base::TimeTicks oldest_write;
++  base::WaitableEvent wake;
++  base::Thread reader;
++  base::Thread writer;
++  scoped_refptr<base::SingleThreadTaskRunner> ui;
++  base::RepeatingCallback<void(Record)> receive;
++  base::RepeatingClosure failed;
++
++  void Fail() { ui->PostTask(FROM_HERE, failed); }
++  static void Read(std::shared_ptr<State> self) {
++    while (!self->stopped.load()) {
++      std::array<uint8_t, 4> prefix;
++      if (!Transfer(self->handles[0].get(), prefix, false, self->stopped)) {
++        break;
++      }
++      Decoder length(prefix);
++      size_t size = length.Int(4);
++      if (size < 20 || size > kMaxRecord) {
++        break;
++      }
++      std::vector<uint8_t> bytes(size);
++      if (!Transfer(self->handles[0].get(), bytes, false, self->stopped)) {
++        break;
++      }
++      Decoder d(bytes);
++      if (d.Int(4) != 0x53545250 || d.Int(2) != 1 || d.Int(2) != 0) {
++        break;
++      }
++      Record record;
++      record.type = d.Int(2);
++      if (d.Int(2) != 0) {
++        break;
++      }
++      record.id = d.Int(8);
++      record.payload.assign(bytes.begin() + 20, bytes.end());
++      {
++        base::AutoLock hold(self->lock);
++        if (self->incoming_count >= 1024 ||
++            self->incoming_bytes + size > 8 * 1024 * 1024) {
++          break;
++        }
++        ++self->incoming_count;
++        self->incoming_bytes += size;
++      }
++      self->ui->PostTask(
++          FROM_HERE,
++          base::BindOnce(
++              [](std::shared_ptr<State> state, Record message, size_t size) {
++                {
++                  base::AutoLock hold(state->lock);
++                  --state->incoming_count;
++                  state->incoming_bytes -= size;
++                }
++                if (!state->stopped.load()) {
++                  state->receive.Run(std::move(message));
++                }
++              },
++              self, std::move(record), size));
++    }
++    if (!self->stopped.load()) {
++      self->Fail();
++    }
++  }
++  static void Write(std::shared_ptr<State> self) {
++    for (;;) {
++      self->wake.Wait();
++      while (!self->stopped.load()) {
++        Pending pending;
++        {
++          base::AutoLock hold(self->lock);
++          if (self->outgoing.empty()) {
++            break;
++          }
++          pending = std::move(self->outgoing.front());
++          self->outgoing.pop_front();
++        }
++        if (!Transfer(self->handles[1].get(), pending.bytes, true,
++                      self->stopped)) {
++          if (!self->stopped.load()) {
++            self->Fail();
++          }
++          return;
++        }
++        {
++          base::AutoLock hold(self->lock);
++          self->outgoing_bytes -= pending.bytes.size();
++          if (!--self->outgoing_count) {
++            self->oldest_write = {};
++          }
++        }
++        if (pending.written) {
++          self->ui->PostTask(FROM_HERE, std::move(pending.written));
++        }
++      }
++      if (self->stopped.load()) {
++        return;
++      }
++    }
++  }
++};
++
++PrtsPipeClient::PrtsPipeClient() = default;
++PrtsPipeClient::~PrtsPipeClient() {
++  Stop();
++}
++bool PrtsPipeClient::Start(base::RepeatingCallback<void(Record)> receive,
++                           base::RepeatingClosure failed) {
++  std::array<HANDLE, 3> handles;
++  if (!Parse(handles)) {
++    return false;
++  }
++  auto state = std::make_shared<State>();
++  for (size_t i = 0; i < 3; ++i) {
++    state->handles[i].Set(handles[i]);
++  }
++  state->ui = base::SingleThreadTaskRunner::GetCurrentDefault();
++  state->receive = std::move(receive);
++  state->failed = std::move(failed);
++  state_ = state;
++  if (!state->reader.Start() || !state->writer.Start()) {
++    Stop();
++    return false;
++  }
++  state->reader.task_runner()->PostTask(FROM_HERE,
++                                        base::BindOnce(&State::Read, state));
++  state->writer.task_runner()->PostTask(FROM_HERE,
++                                        base::BindOnce(&State::Write, state));
++  return true;
++}
++bool PrtsPipeClient::Send(uint16_t type,
++                          uint64_t id,
++                          std::vector<uint8_t> payload,
++                          base::OnceClosure written) {
++  if (!state_ || state_->stopped.load() || payload.size() > kMaxRecord - 20) {
++    return false;
++  }
++  auto bytes = Encode(type, id, std::move(payload));
++  {
++    base::AutoLock hold(state_->lock);
++    if (state_->outgoing_count >= 1024 ||
++        state_->outgoing_bytes + bytes.size() > 8 * 1024 * 1024) {
++      return false;
++    }
++    if (!state_->outgoing_count++) {
++      state_->oldest_write = base::TimeTicks::Now();
++    }
++    state_->outgoing_bytes += bytes.size();
++    state_->outgoing.push_back({std::move(bytes), std::move(written)});
++  }
++  state_->wake.Signal();
++  return true;
++}
++bool PrtsPipeClient::Stalled() const {
++  if (!state_) {
++    return false;
++  }
++  base::AutoLock hold(state_->lock);
++  return !state_->oldest_write.is_null() &&
++         base::TimeTicks::Now() - state_->oldest_write > base::Seconds(5);
++}
++void PrtsPipeClient::Stop() {
++  if (!state_) {
++    return;
++  }
++  auto state = std::move(state_);
++  state->stopped.store(true);
++  state->wake.Signal();
++  // Joining runs off UI. Cancellation is repeated to close the small race
++  // between checking stopped and entering synchronous ReadFile/WriteFile.
++  base::ThreadPool::PostTask(
++      FROM_HERE,
++      {base::MayBlock(), base::WithBaseSyncPrimitives(),
++       base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN},
++      base::BindOnce(
++          [](std::shared_ptr<State> state) {
++            for (base::Thread* thread : {&state->reader, &state->writer}) {
++              if (!thread->IsRunning()) {
++                continue;
++              }
++              thread->DetachFromSequence();
++              base::win::ScopedHandle handle(
++                  OpenThread(THREAD_TERMINATE | SYNCHRONIZE, FALSE,
++                             thread->GetThreadId().raw()));
++              thread->StopSoon();
++              if (handle.is_valid()) {
++                do {
++                  CancelSynchronousIo(handle.get());
++                  for (const auto& pipe : state->handles) {
++                    CancelIoEx(pipe.get(), nullptr);
++                  }
++                } while (WaitForSingleObject(handle.get(), 10) == WAIT_TIMEOUT);
++              }
++              thread->Stop();
++            }
++          },
++          std::move(state)));
++}
++}  // namespace prts
+diff --git a/chrome/browser/prts/prts_pipe_client_win.h b/chrome/browser/prts/prts_pipe_client_win.h
+new file mode 100644
+index 0000000000..b22f9b2f49
+--- /dev/null
++++ b/chrome/browser/prts/prts_pipe_client_win.h
+@@ -0,0 +1,35 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_PRTS_PRTS_PIPE_CLIENT_WIN_H_
++#define CHROME_BROWSER_PRTS_PRTS_PIPE_CLIENT_WIN_H_
++
++#include <memory>
++#include <string>
++
++#include "base/functional/callback.h"
++#include "chrome/browser/prts/prts_protocol.h"
++
++namespace prts {
++// Called before ContentMain: validate browser-only launch and clear inheritance
++// before Chromium can create any subprocess. Does not adopt handles yet.
++bool ValidateLaunch();
++class PrtsPipeClient {
++ public:
++  PrtsPipeClient();
++  ~PrtsPipeClient();
++  bool Start(base::RepeatingCallback<void(Record)> receive,
++             base::RepeatingClosure failed);
++  bool Send(uint16_t type,
++            uint64_t id,
++            std::vector<uint8_t> payload,
++            base::OnceClosure written = {});
++  bool Stalled() const;
++  void Stop();
++
++ private:
++  struct State;
++  std::shared_ptr<State> state_;
++};
++}  // namespace prts
++#endif  // CHROME_BROWSER_PRTS_PRTS_PIPE_CLIENT_WIN_H_
+diff --git a/chrome/browser/prts/prts_protocol.h b/chrome/browser/prts/prts_protocol.h
+new file mode 100644
+index 0000000000..2fb2ba54ba
+--- /dev/null
++++ b/chrome/browser/prts/prts_protocol.h
+@@ -0,0 +1,83 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_PRTS_PRTS_PROTOCOL_H_
++#define CHROME_BROWSER_PRTS_PRTS_PROTOCOL_H_
++
++#include <cstdint>
++#include <string>
++#include <vector>
++
++#include "base/containers/span.h"
++#include "base/memory/raw_span.h"
++#include "base/strings/string_util.h"
++
++namespace prts {
++constexpr uint32_t kMaxRecord = 1048576;
++struct Record {
++  uint16_t type = 0;
++  uint64_t id = 0;
++  std::vector<uint8_t> payload;
++};
++class Encoder {
++ public:
++  void Int(uint64_t value, size_t size) {
++    for (size_t i = 0; i < size; ++i) {
++      data.push_back(static_cast<uint8_t>(value >> (i * 8)));
++    }
++  }
++  void String(const std::string& value) {
++    Int(value.size(), 4);
++    data.insert(data.end(), value.begin(), value.end());
++  }
++  std::vector<uint8_t> data;
++};
++class Decoder {
++ public:
++  explicit Decoder(base::span<const uint8_t> data) : data_(data) {}
++  uint64_t Int(size_t size) {
++    if (size > data_.size()) {
++      valid_ = false;
++      return 0;
++    }
++    uint64_t value = 0;
++    for (size_t i = 0; i < size; ++i) {
++      value |= uint64_t{data_[i]} << (8 * i);
++    }
++    data_ = data_.subspan(size);
++    return value;
++  }
++  std::string String() {
++    size_t size = Int(4);
++    if (!valid_ || size > 65536 || size > data_.size()) {
++      valid_ = false;
++      return {};
++    }
++    auto bytes = data_.first(size);
++    std::string value(bytes.begin(), bytes.end());
++    data_ = data_.subspan(size);
++    valid_ &= base::IsStringUTF8(value);
++    return value;
++  }
++  bool Done() const { return valid_ && data_.empty(); }
++
++ private:
++  base::raw_span<const uint8_t> data_;
++  bool valid_ = true;
++};
++inline std::vector<uint8_t> Encode(uint16_t type,
++                                   uint64_t id,
++                                   std::vector<uint8_t> payload) {
++  Encoder e;
++  e.Int(20 + payload.size(), 4);
++  e.Int(0x53545250, 4);
++  e.Int(1, 2);
++  e.Int(0, 2);
++  e.Int(type, 2);
++  e.Int(0, 2);
++  e.Int(id, 8);
++  e.data.insert(e.data.end(), payload.begin(), payload.end());
++  return std::move(e.data);
++}
++}  // namespace prts
++#endif  // CHROME_BROWSER_PRTS_PRTS_PROTOCOL_H_
+diff --git a/chrome/browser/prts/prts_switches.h b/chrome/browser/prts/prts_switches.h
+new file mode 100644
+index 0000000000..0f048ae667
+--- /dev/null
++++ b/chrome/browser/prts/prts_switches.h
+@@ -0,0 +1,9 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_PRTS_PRTS_SWITCHES_H_
++#define CHROME_BROWSER_PRTS_PRTS_SWITCHES_H_
++namespace prts {
++inline constexpr char kPipeSwitch[] = "prts-pipe";
++}  // namespace prts
++#endif  // CHROME_BROWSER_PRTS_PRTS_SWITCHES_H_
