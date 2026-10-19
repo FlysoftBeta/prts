@@ -384,6 +384,8 @@ and options contains effective values, including the resolved encoder/profile.
 
 InstanceOptions fields: source=`"synthetic"|"chromium"` (default synthetic),
 initial_url:string (default about:blank), size:Size (default 1280x720,dpr=1),
+fps?:number (synthetic production ceiling, default 30; 1..60 in Phase 1;
+effective value and supported range are reported in options/capabilities),
 encoder=`"auto"|"qsv"|"software"` (default auto), bitrate_caps=
 `{min_bps?:number=100000,max_bps?:number=4000000}` with 1<=min<=max<=100000000,
 isolation_profile:string (default `"job"`). Auto prefers QSV, then software;
@@ -463,6 +465,8 @@ include session_id. Target events mirror section 2; Node translates binary enums
 
 stats.encoder fields: name:string, fps:number, bitrate_bps:number,
 qp_avg:number|null (codec-specific quantizer, null if unavailable).
+Optional encode_ms_avg:number|null measures conversion plus encoder time/frame,
+excluding synthetic rendering; capture_to_encode below includes rendering.
 stats.frames fields: captured:number,encoded:number,dropped:number (interval
 counts), capture_to_encode_ms_avg:number|null, capture_to_encode_ms_p95:number|null,
 capture_to_send_ms_avg:number|null. Latency ends at encode completion/first RTP
@@ -529,7 +533,8 @@ generation is accepted. Release held state on switch/blur/disconnect. Session
 control is authority from session.create, never a viewer-supplied boolean.
 
 The video includes only viewport content, with no letterboxing or cursor baked
-in. Viewer maps pointer location through the actual displayed video content
+in. The synthetic input indicator in section 5 is test content, not the browser
+cursor. Viewer maps pointer location through the actual displayed video content
 rectangle, excluding CSS object-fit bars, to `[0,width)` / `[0,height)` CSS
 coordinates from the latest target snapshot. Do not multiply by the viewer's
 DPR. Exported device pixels equal CSS coordinates times the target DPR; browser
