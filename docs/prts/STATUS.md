@@ -13,12 +13,16 @@
   input; OOPIF hit testing; root-selected built-in cursor events. Real browser acceptance at DPR 1/2,
   hostile input validation, held-state blur release, navigation/close races, full M1 requalification,
   Rust tests/Clippy/fmt all pass. See phase2-m2.md. Custom cursor capability remains unadvertised.
-- Next action: orchestrator cr export of work commits; reconnect desktop and rerun foreground acceptance;
-  M3 CPU frames, then M4 GPU textures. Continue detached incremental builds only.
+- Patches 0001-0009 exported to patches/ and committed (infra f91806c M1, 751bb9b M2).
+- Next action: WAIT for Codex 5h reset (2026-10-20 09:13 local) first, then M3 CPU frames (one Codex job), then
+  M4 GPU textures (one job), each re-checking desktop invisibility. Detached incremental builds only.
+  Foreground-preservation check needs a CONNECTED interactive desktop session (user action: reconnect
+  RDP/console session 2), then rerun browser_m1/m2 acceptance; until then it stays UNVERIFIED.
 - Open gaps: D3D11 zero-copy encoder input (QSV currently fed CPU NV12), QSV overshoots at very low caps
   (<=150 kbps -> auto-fallback to software), Windows 10 22H2 qualification, isolation untested at runtime.
 
 ## Log
+- 2026-10-20 (orchestrator run 2, 04:12-05:20): Verified 5h window reset (0% used) before starting. Ran Codex m1 (~32 min, incremental build 38.8 s final) and m2 (~25 min); both exit 0, acceptance passed, cr export -> patches 0001-0009, committed f91806c and 751bb9b. Desktop invisibility: target HWNDs hidden + DWMWA_CLOAKED=1, auxiliary HWNDs hidden, no taskbar entry; foreground preservation unverified (disconnected session). Stopped before M3: Codex usage after m2 = 5h window 79% (m1 ~40 points, m2 ~39), weekly ~20%+; M3+M4 would exceed the window, so per pacing rules next orchestrator starts after 09:13 reset. Decision: budget ~1 milestone per 40% of a 5h window.
 - 2026-10-20 (orchestrator run 1): Ran Codex jobs p0-protocol, p0-hooks, p0-isolation (parallel), p1-server + p1-prtsd (parallel), p1-e2e, p1-qsv. All exited 0. QSV job: native QSV 28 fps / 13.9 ms encode at 720p; software at 150 kbps cap 22 fps; latency/loss shaping verified in E2E. Codex usage after run: 5h window 86% (resets ~2026-10-20 04:06 local), weekly 13%. Next orchestrator should wait for the 5h reset before starting Phase 2.
 - 2026-10-19: Phase 1 part C passed real release prtsd + Node + headless Edge 155 browser acceptance. Added server/test/e2e.js and npm run e2e: live H264, decoded pointer/click/text pixels from real frontend input, target create/switch/resize/close, two instances/three viewers, receiver and encoder UI stats, bitrate cap reduction (latest run 571680 to 135652 bps at a 50 kbps target), clean instance/server/exact-daemon-PID teardown. Fixed other-operator instance discovery and spurious normal-close UI errors; added IPC supervisor shutdown for Windows. Release build, four Rust tests, seven Node tests and browser E2E pass. Saved phase1-e2e.png and updated root README/component notes. No Chromium build or git commit; optional latency/loss shaping remains unsupported.
 - 2026-10-19: Phase 1 part B implemented server/ Node control plane and vanilla browser viewer, framed stdio, scoped WebSocket signaling, instance/tab controls, input, network controls and receiver/encoder stats. Installed Node LTS 24.20.0; seven mock/unit tests pass without Rust or Chromium. Added server-notes.md; no protocol changes, Chromium build, prtsd edits or commit. Real media/input/shaping integration remains to be verified with the concurrent prtsd implementation.
