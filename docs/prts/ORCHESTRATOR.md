@@ -24,6 +24,12 @@ You are a PRTS orchestrator. Working dir: C:\Users\Flysoft\Desktop\chromium.
    Don't commit build outputs (add .gitignore for target/, node_modules/ etc.).
 7. Before returning: update STATUS.md (Current state, Next action, log entry with what was done, blockers,
    Codex usage observed). Return a <= 25-line report to your parent.
+7b. KEEPALIVE (mandatory): your context must never sit idle for more than 55 minutes. Whenever you wait
+   (Codex job, build, rate-limit reset), the background waiter you start must return within <=55 min:
+   e.g. a background command that waits for the job OR 55 min (`timeout 3300 tail --pid=<pid> -f /dev/null`,
+   or PowerShell `Wait-Process -Id <pid> -Timeout 3300`), whichever first. When it returns and the job is
+   still running, start another such waiter immediately. Never wait on a single long sleep/timer > 55 min.
+   Any sub-agents you spawn (non-Codex) must follow this same rule — copy this item into their prompt.
 8. Stop after your chunk is done, or after ~3-4 hours of wall time, whichever first — the parent will start
    a fresh orchestrator from STATUS.md. Non-interactive: never ask the user questions; make reasonable calls
    and record them in STATUS.md.
