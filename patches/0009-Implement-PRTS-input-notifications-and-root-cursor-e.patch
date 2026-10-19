@@ -1,0 +1,696 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 05:12:55 +0800
+Subject: [PATCH 9/9] Implement PRTS input notifications and root cursor events
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 4e10fb1e80..c4605139ff 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1469,6 +1469,7 @@ source_set("core") {
+       deps += [
+         "//chrome/browser/prts:controller_interface",
+         "//chrome/browser/prts:transport",
++        "//content/public/browser:synthetic_input",
+         "//chrome/browser/ui/browser_window:create_browser_window",
+         "//components/headless/clipboard",
+         "//components/keep_alive_registry",
+diff --git a/chrome/browser/prts/prts_controller.cc b/chrome/browser/prts/prts_controller.cc
+index 56e6b27b71..9f570d25bf 100644
+--- a/chrome/browser/prts/prts_controller.cc
++++ b/chrome/browser/prts/prts_controller.cc
+@@ -113,8 +113,8 @@ void PrtsController::Receive(Record record) {
+     return;
+   }
+   last_received_ = base::TimeTicks::Now();
+-  // Only prtsd requests (odd, strictly increasing) and FAULT notifications
+-  // are valid in M1. Resource responses/input become valid in later milestones.
++  // Requests use odd, strictly increasing IDs. Input and FAULT notifications
++  // use zero; no frame-resource responses are accepted yet.
+   if (record.type == 8 && ready_ && record.id == 0) {
+     Decoder d(record.payload);
+     d.Int(4);
+@@ -125,6 +125,11 @@ void PrtsController::Receive(Record record) {
+     }
+     return;
+   }
++  if (ready_ && record.type >= 0x200 && record.type <= 0x207 &&
++      record.id == 0) {
++    targets_->Input(record.type, record.payload);
++    return;
++  }
+   if (!record.id || !(record.id & 1) || record.id <= last_request_) {
+     Failed();
+     return;
+@@ -227,8 +232,8 @@ void PrtsController::Receive(Record record) {
+   } else if (record.type == 0x321) {
+     Error(record.id, 3, "Frame production is unavailable in M1");
+   } else {
+-    // A known response on the command pipe, an unknown type, or input before
+-    // the input milestone is a direction/type violation, never stream resync.
++    // A response on the command pipe, unknown type, or notification with a
++    // request ID is a direction/type violation, never stream resync.
+     Failed();
+   }
+ }
+diff --git a/chrome/browser/prts/prts_input.cc b/chrome/browser/prts/prts_input.cc
+new file mode 100644
+index 0000000000..52caae135d
+--- /dev/null
++++ b/chrome/browser/prts/prts_input.cc
+@@ -0,0 +1,358 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/prts/prts_input.h"
++
++#include <array>
++#include <bit>
++#include <cmath>
++#include <limits>
++#include <map>
++
++#include "base/containers/circular_deque.h"
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/timer/timer.h"
++#include "components/input/native_web_keyboard_event.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_widget_host.h"
++#include "content/public/browser/synthetic_input.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "third_party/blink/public/common/input/web_mouse_wheel_event.h"
++#include "third_party/blink/public/common/page/page_zoom.h"
++#include "ui/events/keycodes/dom/dom_code.h"
++#include "ui/events/keycodes/dom/dom_key.h"
++#include "ui/events/keycodes/dom/keycode_converter.h"
++#include "ui/latency/latency_info.h"
++namespace prts {
++namespace {
++using E = blink::WebInputEvent;
++int Modifiers(uint32_t m, uint32_t buttons) {
++  int out = 0;
++  const std::array flags = {E::kShiftKey, E::kControlKey, E::kAltKey,
++                            E::kMetaKey,  E::kCapsLockOn, E::kNumLockOn};
++  for (int i = 0; i < 6; ++i) {
++    if (m & (1u << i)) {
++      out |= flags[i];
++    }
++  }
++  const std::array mouse = {E::kLeftButtonDown, E::kRightButtonDown,
++                            E::kMiddleButtonDown, E::kBackButtonDown,
++                            E::kForwardButtonDown};
++  for (int i = 0; i < 5; ++i) {
++    if (buttons & (1u << i)) {
++      out |= mouse[i];
++    }
++  }
++  return out;
++}
++bool Text(const std::string& s) {
++  return s.size() <= 4096 && s.find('\0') == std::string::npos;
++}
++}  // namespace
++class PrtsInput::Impl : public content::WebContentsObserver {
++ public:
++  Impl(content::WebContents* contents, base::RepeatingClosure failed)
++      : WebContentsObserver(contents), failed_(std::move(failed)) {}
++  content::RenderWidgetHost* Root() {
++    return web_contents()
++               ? web_contents()->GetPrimaryMainFrame()->GetRenderWidgetHost()
++               : nullptr;
++  }
++  content::RenderWidgetHost* Focused() {
++    return content::FocusedSyntheticInputWidget(web_contents());
++  }
++
++  void Done() {
++    deadline_.Stop();
++    busy_ = false;
++    RunNext();
++  }
++  void RunNext() {
++    if (busy_ || queue_.empty()) {
++      return;
++    }
++    busy_ = true;
++    deadline_.Start(FROM_HERE, base::Seconds(5), failed_);
++    auto action = std::move(queue_.front());
++    queue_.pop_front();
++    std::move(action).Run();
++  }
++  void Enqueue(base::OnceClosure action) {
++    queue_.push_back(std::move(action));
++    RunNext();
++  }
++  base::OnceClosure Completion() {
++    return base::BindOnce(&Impl::Done, weak_.GetWeakPtr());
++  }
++  void Reset() {
++    deadline_.Stop();
++    weak_.InvalidateWeakPtrs();
++    queue_.clear();
++    busy_ = false;
++    ReleaseState();
++  }
++  void ReleaseState() {
++    auto keys = std::move(keys_);
++    keys_.clear();
++    if (auto* host = Focused()) {
++      for (auto& [vk, event] : keys) {
++        event.SetType(E::Type::kKeyUp);
++        event.SetModifiers(0);
++        host->ForwardKeyboardEvent(event);
++      }
++    }
++    if (auto* root = Root()) {
++      if (buttons_ && root->GetView()) {
++        for (int b = 1; b <= 5; ++b) {
++          const uint32_t bit = 1u << (b == 2 ? 2 : b == 3 ? 1 : b - 1);
++          if (!(buttons_ & bit)) {
++            continue;
++          }
++          buttons_ &= ~bit;
++          blink::WebMouseEvent event(E::Type::kMouseUp, Modifiers(0, buttons_),
++                                     base::TimeTicks::Now());
++          event.button = static_cast<blink::WebMouseEvent::Button>(b - 1);
++          event.click_count = 1;
++          event.SetPositionInWidget(point_);
++          content::RouteSyntheticMouse(web_contents(), event);
++        }
++      }
++      content::SetSyntheticPageFocus(web_contents(), false);
++    }
++    buttons_ = 0;
++  }
++  void DidFinishNavigation(content::NavigationHandle* nav) override {
++    if (nav->IsInPrimaryMainFrame() && nav->HasCommitted() &&
++        !nav->IsSameDocument()) {
++      Reset();
++    }
++  }
++  uint32_t Dispatch(uint16_t type, Decoder& d, uint32_t mods) {
++    if (queue_.size() >= 1024) {
++      return 5;
++    }
++    auto* root = Root();
++    if (type <= 0x203) {
++      const double x = std::bit_cast<double>(d.Int(8)),
++                   y = std::bit_cast<double>(d.Int(8));
++      double dx = 0, dy = 0;
++      uint64_t button = 0, buttons = 0, count = 0;
++      if (type == 0x203) {
++        dx = std::bit_cast<double>(d.Int(8));
++        dy = std::bit_cast<double>(d.Int(8));
++      }
++      if (type == 0x201 || type == 0x202) {
++        button = d.Int(1);
++      }
++      buttons = d.Int(4);
++      if (type == 0x201 || type == 0x202) {
++        count = d.Int(1);
++      }
++      if (!d.Done() || !std::isfinite(x) || !std::isfinite(y) ||
++          !std::isfinite(dx) || !std::isfinite(dy) ||
++          std::abs(x) > std::numeric_limits<float>::max() ||
++          std::abs(y) > std::numeric_limits<float>::max() ||
++          std::abs(dx) > std::numeric_limits<float>::max() ||
++          std::abs(dy) > std::numeric_limits<float>::max() || buttons > 31 ||
++          ((type == 0x201 || type == 0x202) &&
++           (button < 1 || button > 5 || count < 1 || count > 3))) {
++        return 1;
++      }
++      if (button) {
++        const uint32_t bit = 1u << (button == 2   ? 2
++                                    : button == 3 ? 1
++                                                  : button - 1);
++        if ((type == 0x201 && !(buttons & bit)) ||
++            (type == 0x202 && (buttons & bit))) {
++          return 1;
++        }
++      }
++      if (!root || !root->GetView()) {
++        return 0;
++      }
++
++      // Router coordinates are DIPs. Device emulation applies DPR in the
++      // renderer/compositor; multiplying by DPR here would apply it twice.
++      const float scale = content::SyntheticInputScale(web_contents());
++      const gfx::PointF point(x * scale, y * scale);
++      if (!std::isfinite(point.x()) || !std::isfinite(point.y())) {
++        return 1;
++      }
++
++      if (type == 0x203) {
++        blink::WebMouseWheelEvent event(E::Type::kMouseWheel,
++                                        Modifiers(mods, buttons),
++                                        base::TimeTicks::Now());
++        event.SetPositionInWidget(point);
++        event.delta_x = -dx;
++        event.delta_y = -dy;
++        event.wheel_ticks_x = dx == 0 ? 0 : dx > 0 ? -1 : 1;
++        event.wheel_ticks_y = dy == 0 ? 0 : dy > 0 ? -1 : 1;
++        event.delta_units = ui::ScrollGranularity::kScrollByPrecisePixel;
++        event.phase = blink::WebMouseWheelEvent::kPhaseBegan;
++        Enqueue(
++            base::BindOnce(&Impl::StartWheel, base::Unretained(this), event));
++      } else {
++        const auto kind = type == 0x200   ? E::Type::kMouseMove
++                          : type == 0x201 ? E::Type::kMouseDown
++                                          : E::Type::kMouseUp;
++        blink::WebMouseEvent event(kind, Modifiers(mods, buttons),
++                                   base::TimeTicks::Now());
++        event.SetPositionInWidget(point);
++        event.button =
++            button ? static_cast<blink::WebMouseEvent::Button>(button - 1)
++                   : blink::WebMouseEvent::Button::kNoButton;
++        event.click_count = count;
++        Enqueue(base::BindOnce(&Impl::Mouse, base::Unretained(this), event,
++                               static_cast<uint32_t>(buttons)));
++      }
++      return 0;
++    }
++    if (type == 0x207) {
++      auto focused = d.Int(1);
++      if (!d.Done() || focused > 1) {
++        return 1;
++      }
++      Enqueue(
++          base::BindOnce(&Impl::Focus, base::Unretained(this), focused != 0));
++      return 0;
++    }
++    if (type == 0x206) {
++      auto text = d.String();
++      if (!d.Done() || !Text(text)) {
++        return 1;
++      }
++      auto utf16 = base::UTF8ToUTF16(text);
++      auto* host = Focused();
++      if (!host) {
++        return 0;
++      }
++      // Character events preserve keypress for ordinary typing; longer/IME
++      // commits use Input.insertText's single text commit primitive.
++      if (utf16.empty()) {
++        return 0;
++      }
++      if (utf16.size() == 1) {
++        input::NativeWebKeyboardEvent event(E::Type::kChar, Modifiers(mods, 0),
++                                            base::TimeTicks::Now());
++        if (!utf16.empty()) {
++          event.text[0] = event.unmodified_text[0] = utf16[0];
++        }
++        event.skip_if_unhandled = true;
++        Enqueue(base::BindOnce(&Impl::Key, base::Unretained(this), event));
++      } else {
++        Enqueue(base::BindOnce(&Impl::Commit, base::Unretained(this), utf16));
++      }
++      return 0;
++    }
++    auto vk = d.Int(4);
++    auto code = d.String();
++    auto key = d.String();
++    auto text = d.String();
++    auto location = d.Int(1), repeat = d.Int(1), system = d.Int(1);
++    const auto dom_code = ui::KeycodeConverter::CodeStringToDomCode(code);
++    const auto dom_key = ui::KeycodeConverter::KeyStringToDomKey(key);
++    if (!d.Done() || vk > 255 || location > 3 || repeat > 1 || system > 1 ||
++        !Text(text) || code.find('\0') != std::string::npos ||
++        key.find('\0') != std::string::npos ||
++        (code.empty() && key != "Unidentified") ||
++        (!code.empty() && dom_code == ui::DomCode::NONE) ||
++        dom_key == ui::DomKey::NONE ||
++        (type == 0x205 && (!text.empty() || repeat))) {
++      return 1;
++    }
++    int modifiers = Modifiers(mods, 0);
++    if (repeat) {
++      modifiers |= E::kIsAutoRepeat;
++    }
++    if (location == 1) {
++      modifiers |= E::kIsLeft;
++    }
++    if (location == 2) {
++      modifiers |= E::kIsRight;
++    }
++    if (location == 3) {
++      modifiers |= E::kIsKeyPad;
++    }
++    input::NativeWebKeyboardEvent event(
++        type == 0x204 ? E::Type::kRawKeyDown : E::Type::kKeyUp, modifiers,
++        base::TimeTicks::Now());
++    event.windows_key_code = vk;
++    event.dom_code = static_cast<int>(dom_code);
++    event.dom_key = static_cast<int>(dom_key);
++    event.is_system_key = system;
++    event.skip_if_unhandled = true;
++    Enqueue(base::BindOnce(&Impl::Key, base::Unretained(this), event));
++    return 0;
++  }
++  void Focus(bool focused) {
++    if (!focused) {
++      ReleaseState();
++    } else {
++      content::SetSyntheticPageFocus(web_contents(), true);
++    }
++    Done();
++  }
++  void Mouse(blink::WebMouseEvent event, uint32_t buttons) {
++    buttons_ = buttons;
++    point_ = event.PositionInWidget();
++    content::SetSyntheticPageFocus(web_contents(), true);
++    content::RouteSyntheticMouse(web_contents(), event, Completion());
++  }
++  void Key(input::NativeWebKeyboardEvent event) {
++    if (event.GetType() == E::Type::kRawKeyDown) {
++      keys_.insert_or_assign(event.windows_key_code, event);
++    } else if (event.GetType() == E::Type::kKeyUp) {
++      keys_.erase(event.windows_key_code);
++    }
++    content::DispatchSyntheticKey(web_contents(), event, Completion());
++  }
++  void Commit(std::u16string text) {
++    if (auto* host = Focused()) {
++      host->Focus();
++      content::CommitSyntheticText(host, text, Completion());
++    } else {
++      Done();
++    }
++  }
++  void StartWheel(blink::WebMouseWheelEvent event) {
++    if (auto* root = Root()) {
++      root->InsertVisualStateCallback(
++          base::BindOnce(&Impl::Wheel, weak_.GetWeakPtr(), event));
++    } else {
++      Done();
++    }
++  }
++  void Wheel(blink::WebMouseWheelEvent event, bool success) {
++    if (!success || !Root()) {
++      Done();
++      return;
++    }
++    content::SetSyntheticPageFocus(web_contents(), true);
++    content::RouteSyntheticWheel(web_contents(), event, Completion());
++  }
++
++ private:
++  base::RepeatingClosure failed_;
++  base::OneShotTimer deadline_;
++  bool busy_ = false;
++  base::circular_deque<base::OnceClosure> queue_;
++  uint32_t buttons_ = 0;
++  gfx::PointF point_;
++  std::map<uint32_t, input::NativeWebKeyboardEvent> keys_;
++  base::WeakPtrFactory<Impl> weak_{this};
++};
++PrtsInput::PrtsInput(content::WebContents* c, base::RepeatingClosure failed)
++    : impl_(std::make_unique<Impl>(c, std::move(failed))) {}
++PrtsInput::~PrtsInput() = default;
++uint32_t PrtsInput::Dispatch(uint16_t t, Decoder& d, uint32_t m) {
++  return impl_->Dispatch(t, d, m);
++}
++void PrtsInput::Reset() {
++  impl_->Reset();
++}
++}  // namespace prts
+diff --git a/chrome/browser/prts/prts_input.h b/chrome/browser/prts/prts_input.h
+new file mode 100644
+index 0000000000..dd2b43a50a
+--- /dev/null
++++ b/chrome/browser/prts/prts_input.h
+@@ -0,0 +1,27 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_PRTS_PRTS_INPUT_H_
++#define CHROME_BROWSER_PRTS_PRTS_INPUT_H_
++#include <memory>
++
++#include "base/functional/callback.h"
++#include "chrome/browser/prts/prts_protocol.h"
++namespace content {
++class WebContents;
++}
++namespace prts {
++// UI sequence. One per WebContents, reset at stream/ownership boundaries.
++class PrtsInput {
++ public:
++  PrtsInput(content::WebContents* contents, base::RepeatingClosure failed);
++  ~PrtsInput();
++  uint32_t Dispatch(uint16_t type, Decoder& payload, uint32_t modifiers);
++  void Reset();
++
++ private:
++  class Impl;
++  std::unique_ptr<Impl> impl_;
++};
++}  // namespace prts
++#endif
+diff --git a/chrome/browser/prts/prts_sources.gni b/chrome/browser/prts/prts_sources.gni
+index 7d763a81e9..f58d0c890b 100644
+--- a/chrome/browser/prts/prts_sources.gni
++++ b/chrome/browser/prts/prts_sources.gni
+@@ -3,6 +3,8 @@
+ # found in the LICENSE file.
+ prts_browser_sources = [
+   "//chrome/browser/prts/prts_controller.cc",
++  "//chrome/browser/prts/prts_input.cc",
++  "//chrome/browser/prts/prts_input.h",
+   "//chrome/browser/prts/prts_target_registry.cc",
+   "//chrome/browser/prts/prts_target_registry.h",
+ ]
+diff --git a/chrome/browser/prts/prts_target_registry.cc b/chrome/browser/prts/prts_target_registry.cc
+index f6d1dc81ff..382a63863e 100644
+--- a/chrome/browser/prts/prts_target_registry.cc
++++ b/chrome/browser/prts/prts_target_registry.cc
+@@ -24,6 +24,7 @@
+ #include "chrome/browser/profiles/keep_alive/scoped_profile_keep_alive.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_manager.h"
++#include "chrome/browser/prts/prts_input.h"
+ #include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
+ #include "chrome/browser/ui/browser_window/public/create_browser_window.h"
+ #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+@@ -37,9 +38,13 @@
+ #include "content/public/browser/devtools_agent_host_client.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_widget_host.h"
++#include "content/public/browser/render_widget_host_cursor_observer.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_contents_observer.h"
+ #include "ui/base/base_window.h"
++#include "ui/base/cursor/cursor.h"
+ #include "ui/base/page_transition_types.h"
+ #include "ui/base/window_open_disposition.h"
+ #include "ui/gfx/geometry/rect.h"
+@@ -128,7 +133,13 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+                  public content::DevToolsAgentHostClient {
+    public:
+     Target(Impl* owner, content::WebContents* contents, uint64_t identity)
+-        : WebContentsObserver(contents), owner_(owner), id(identity) {
++        : WebContentsObserver(contents),
++          owner_(owner),
++          id(identity),
++          input(std::make_unique<prts::PrtsInput>(
++              contents,
++              base::BindRepeating(&Impl::InputFailed,
++                                  base::Unretained(owner)))) {
+       load = contents->IsLoading() ? 1 : 0;
+       auto* opener_contents =
+           contents->GetFirstWebContentsInLiveOriginalOpenerChain();
+@@ -153,6 +164,10 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+       }
+       // A discarded tab can replace WebContents without changing the logical
+       // tab. Detach from the retired contents before its destruction callback.
++      input->Reset();
++      input = std::make_unique<prts::PrtsInput>(
++          contents, base::BindRepeating(&Impl::InputFailed,
++                                        base::Unretained(owner_.get())));
+       Observe(contents);
+       load = contents->IsLoading() ? 1 : 0;
+       ++generation;
+@@ -161,6 +176,7 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+     }
+ 
+     void ApplySize() {
++      input->Reset();
+       auto* browser =
+           GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
+               web_contents());
+@@ -229,6 +245,7 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+     uint64_t opener = 0;
+     uint8_t kind = 1;
+     uint8_t load = 0;
++    std::unique_ptr<prts::PrtsInput> input;
+     Size size;
+     uint64_t generation = 1;
+     bool announced = false;
+@@ -239,7 +256,107 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+     int devtools_id_ = 0;
+   };
+ 
++  void Cursor(content::RenderWidgetHost* host, const ui::Cursor& cursor) {
++    auto it = targets_.find(active_);
++    if (it == targets_.end()) {
++      return;
++    }
++    auto& target = *it->second;
++    if (!target.announced ||
++        target.web_contents()->GetPrimaryMainFrame()->GetRenderWidgetHost() !=
++            host) {
++      return;
++    }
++    uint8_t shape = 0;
++    using C = ui::mojom::CursorType;
++    switch (cursor.type()) {
++      case C::kHand:
++        shape = 1;
++        break;
++      case C::kIBeam:
++        shape = 2;
++        break;
++      case C::kCross:
++        shape = 3;
++        break;
++      case C::kMove:
++        shape = 4;
++        break;
++      case C::kEastResize:
++      case C::kWestResize:
++      case C::kEastWestResize:
++        shape = 5;
++        break;
++      case C::kNorthResize:
++      case C::kSouthResize:
++      case C::kNorthSouthResize:
++        shape = 6;
++        break;
++      case C::kNone:
++        shape = 7;
++        break;
++      default:
++        break;  // Custom cursor feature is not advertised: use default.
++    }
++    prts::Encoder e;
++    e.Int(target.id, 8);
++    e.Int(target.generation, 8);
++    e.Int(shape, 1);
++    for (int i = 0; i < 5; ++i) {
++      e.Int(0, 4);
++    }
++    send_.Run(0x193, 0, std::move(e.data));
++  }
++  void InputFailed() {
++    prts::Encoder e;
++    e.Int(7, 4);
++    e.String("Input renderer acknowledgement timed out");
++    e.Int(1, 1);
++    send_.Run(8, 0, std::move(e.data));
++  }
++  void Input(uint16_t type, const std::vector<uint8_t>& bytes) {
++    prts::Decoder d(bytes);
++    auto id = d.Int(8), generation = d.Int(8), sequence = d.Int(8),
++         modifiers = d.Int(4);
++    auto fault = [&](uint32_t code) {
++      if (code == 10) {
++        auto now = base::TimeTicks::Now();
++        if (!last_stale_.is_null() && now - last_stale_ < base::Seconds(1)) {
++          return;
++        }
++        last_stale_ = now;
++      }
++      prts::Encoder e;
++      e.Int(code, 4);
++      e.String(code == 10  ? "Stale input state"
++               : code == 5 ? "Input queue capacity exceeded"
++                           : "Invalid input payload");
++      e.Int(code == 5, 1);
++      send_.Run(8, 0, std::move(e.data));
++    };
++    if (bytes.size() < 28 || modifiers > 63 || !sequence) {
++      fault(1);
++      return;
++    }
++    auto found = targets_.find(id);
++    if (sequence <= input_sequence_) {
++      fault(10);
++      return;
++    }
++    input_sequence_ = sequence;
++    if (found == targets_.end() || active_ != id ||
++        found->second->generation != generation ||
++        !found->second->close_requests.empty()) {
++      fault(10);
++      return;
++    }
++    if (auto code = found->second->input->Dispatch(type, d, modifiers)) {
++      fault(code);
++    }
++  }
+   void Prepare() {
++    cursor_subscription_ = content::ObserveSelectedCursor(
++        base::BindRepeating(&Impl::Cursor, base::Unretained(this)));
+     keep_alive_ = std::make_unique<ScopedKeepAlive>(
+         KeepAliveOrigin::HEADLESS_COMMAND, KeepAliveRestartOption::DISABLED);
+     observation_.Observe(GlobalBrowserCollection::GetInstance());
+@@ -346,6 +463,9 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+     if (active_ == target.id) {
+       return;
+     }
++    for (auto& [id, entry] : targets_) {
++      entry->input->Reset();
++    }
+     const uint64_t previous = std::exchange(active_, target.id);
+     if (target.announced) {
+       ++target.generation;
+@@ -361,6 +481,11 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+       auto* strip = browser->GetTabStripModel();
+       strip->ActivateTabAt(strip->GetIndexOfWebContents(target.web_contents()));
+     }
++    if (auto* host = target.web_contents()
++                         ->GetPrimaryMainFrame()
++                         ->GetRenderWidgetHost()) {
++      host->Focus();
++    }
+     Changed(target);
+   }
+ 
+@@ -618,6 +743,9 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+ 
+  private:
+   SendCallback send_;
++  base::CallbackListSubscription cursor_subscription_;
++  uint64_t input_sequence_ = 0;
++  base::TimeTicks last_stale_;
+   base::ScopedObservation<GlobalBrowserCollection, BrowserCollectionObserver>
+       observation_{this};
+   std::set<TabStripModel*> strips_;
+@@ -650,3 +778,8 @@ void PrtsTargetRegistry::Handle(uint16_t type,
+                                 const std::vector<uint8_t>& payload) {
+   impl_->Handle(type, request, payload);
+ }
++
++void PrtsTargetRegistry::Input(uint16_t type,
++                               const std::vector<uint8_t>& bytes) {
++  impl_->Input(type, bytes);
++}
+diff --git a/chrome/browser/prts/prts_target_registry.h b/chrome/browser/prts/prts_target_registry.h
+index 77914d96fc..35586ee719 100644
+--- a/chrome/browser/prts/prts_target_registry.h
++++ b/chrome/browser/prts/prts_target_registry.h
+@@ -31,6 +31,7 @@ class PrtsTargetRegistry {
+               uint64_t request_id,
+               const std::vector<uint8_t>& payload);
+   void Stop();
++  void Input(uint16_t type, const std::vector<uint8_t>& payload);
+ 
+  private:
+   class Impl;

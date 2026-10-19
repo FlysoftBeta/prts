@@ -268,6 +268,8 @@ struct Session {
     pid: u32,
     next_id: u64,
     outgoing: Option<SyncSender<Vec<u8>>>,
+    command_bytes: Arc<AtomicUsize>,
+    features: u32,
     incoming: Receiver<Incoming>,
     queued_bytes: Arc<AtomicUsize>,
     queued_messages: Arc<AtomicUsize>,
@@ -339,12 +341,15 @@ impl Session {
             }));
         }
         let (outgoing, writes) = mpsc::sync_channel::<Vec<u8>>(1024);
+        let command_bytes = Arc::new(AtomicUsize::new(0));
+        let command_budget = command_bytes.clone();
         threads.push(thread::spawn(move || {
             while let Ok(bytes) = writes.recv() {
                 if let Err(e) = command.write_all(&bytes) {
                     let _ = tx.try_send(Incoming::Failure(format!("Command pipe: {e}")));
                     break;
                 }
+                command_budget.fetch_sub(bytes.len(), Ordering::AcqRel);
             }
         }));
         raw.pid = 0; // Disarm raw launch RAII only after all resources have transferred.
@@ -353,6 +358,8 @@ impl Session {
             pid: unsafe { GetProcessId(handle(&raw.process)) },
             next_id: 1,
             outgoing: Some(outgoing),
+            command_bytes,
+            features: 0,
             incoming,
             queued_bytes,
             queued_messages,
@@ -420,6 +427,16 @@ impl Session {
             Ok(e) => e,
             Err(e) => return self.fail(e.to_string()),
         };
+        if matches!(
+            event,
+            Event::Cursor {
+                cursor: wire::Cursor { shape: 8, .. },
+                ..
+            }
+        ) && self.features & 2 == 0
+        {
+            return self.fail("Unnegotiated custom cursor");
+        }
         if let Event::Fault {
             fatal: true,
             ref message,
@@ -437,14 +454,10 @@ impl Session {
         self.events.push_back((event, size));
         Ok(())
     }
-    fn request(&mut self, kind: u16, payload: Vec<u8>, expected: u16) -> Result<Record> {
-        if let Some(e) = &self.failed {
-            bail!("Browser failed: {e}");
+    fn enqueue(&mut self, bytes: Vec<u8>) -> Result<()> {
+        if self.command_bytes.fetch_add(bytes.len(), Ordering::AcqRel) + bytes.len() > QUEUE_BYTES {
+            return self.fail("Command byte queue overflow");
         }
-        ensure!(!self.shutdown, "Browser shut down");
-        let id = self.next_id;
-        self.next_id = self.next_id.checked_add(2).context("Request ID overflow")?;
-        let bytes = Record { kind, id, payload }.encode()?;
         if self
             .outgoing
             .as_ref()
@@ -454,6 +467,17 @@ impl Session {
         {
             return self.fail("Command queue overflow/disconnect");
         }
+        Ok(())
+    }
+    fn request(&mut self, kind: u16, payload: Vec<u8>, expected: u16) -> Result<Record> {
+        if let Some(e) = &self.failed {
+            bail!("Browser failed: {e}");
+        }
+        ensure!(!self.shutdown, "Browser shut down");
+        let id = self.next_id;
+        self.next_id = self.next_id.checked_add(2).context("Request ID overflow")?;
+        let bytes = Record { kind, id, payload }.encode()?;
+        self.enqueue(bytes)?;
         self.last_request = Instant::now();
         let deadline = Instant::now() + DEADLINE;
         loop {
@@ -573,6 +597,7 @@ impl Browser {
                 && hello.features & !3 == 0,
             "Invalid HELLO_ACK capabilities"
         );
+        session.features = hello.features;
         let session = Arc::new(Mutex::new(session));
         let weak = Arc::downgrade(&session);
         let stop = Arc::new(AtomicBool::new(false));
@@ -618,6 +643,17 @@ impl Browser {
             .map_err(|_| anyhow!("Session poisoned"))?
             .request(kind, payload, expected)
     }
+    /// Ordered, bounded notification; failures are delivered as FAULT events.
+    pub fn input(&self, header: &wire::InputHeader, input: &wire::Input) -> Result<()> {
+        let bytes = input.record(header)?.encode()?;
+        let mut s = self
+            .session
+            .lock()
+            .map_err(|_| anyhow!("Session poisoned"))?;
+        ensure!(s.failed.is_none() && !s.shutdown, "Browser unavailable");
+        s.enqueue(bytes)
+    }
+
     pub fn create(&self, url: &str, size: Size, activate: bool) -> Result<Target> {
         let mut p = Vec::new();
         wire::string(url, &mut p)?;

@@ -1,0 +1,392 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 05:12:54 +0800
+Subject: [PATCH 8/9] Add generic synthetic widget input and selected cursor
+ adapters
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
+index 56de9c52be..6f5203698b 100644
+--- a/content/browser/BUILD.gn
++++ b/content/browser/BUILD.gn
+@@ -228,6 +228,7 @@ source_set("browser") {
+     "//content/common:mojo_bindings",
+     "//content/common/memory_coordinator/mojom",
+     "//content/public/browser:proto",
++    "//content/public/browser:synthetic_input",
+     "//content/public/common:buildflags",
+     "//content/public/common:common_sources",
+     "//content/public/common:content_descriptor_keys",
+@@ -1904,6 +1905,7 @@ source_set("browser") {
+     "renderer_host/spare_render_process_host_manager_impl.h",
+     "renderer_host/stored_page.cc",
+     "renderer_host/stored_page.h",
++    "renderer_host/synthetic_input.cc",
+     "renderer_host/subframe_history_navigation_throttle.cc",
+     "renderer_host/subframe_history_navigation_throttle.h",
+     "renderer_host/text_input_manager.cc",
+diff --git a/content/browser/renderer_host/render_widget_host_view_aura.cc b/content/browser/renderer_host/render_widget_host_view_aura.cc
+index 2c8b8a12a6..dccb33d0a8 100644
+--- a/content/browser/renderer_host/render_widget_host_view_aura.cc
++++ b/content/browser/renderer_host/render_widget_host_view_aura.cc
+@@ -4,6 +4,9 @@
+ 
+ #include "content/browser/renderer_host/render_widget_host_view_aura.h"
+ 
++#include "base/no_destructor.h"
++#include "content/public/browser/render_widget_host_cursor_observer.h"
++
+ #include <limits>
+ #include <memory>
+ #include <set>
+@@ -171,6 +174,19 @@ DEFINE_UI_CLASS_PROPERTY_KEY(InputScope,
+ #endif
+ 
+ namespace content {
++namespace {
++base::RepeatingCallbackList<void(RenderWidgetHost*, const ui::Cursor&)>&
++SelectedCursorObservers() {
++  static base::NoDestructor<base::RepeatingCallbackList<
++      void(RenderWidgetHost*, const ui::Cursor&)>> observers;
++  return *observers;
++}
++}  // namespace
++base::CallbackListSubscription ObserveSelectedCursor(
++    base::RepeatingCallback<void(RenderWidgetHost*, const ui::Cursor&)> callback) {
++  return SelectedCursorObservers().Add(std::move(callback));
++}
++
+ 
+ BASE_FEATURE(kPreventReentrantInternalSetBounds,
+              base::FEATURE_DISABLED_BY_DEFAULT);
+@@ -1045,6 +1061,7 @@ void RenderWidgetHostViewAura::UpdateCursor(const ui::Cursor& cursor) {
+ }
+ 
+ void RenderWidgetHostViewAura::DisplayCursor(const ui::Cursor& cursor) {
++  SelectedCursorObservers().Notify(GetRenderWidgetHost(), cursor);
+   current_cursor_ = WebCursor(cursor);
+   current_cursor_.UpdateDisplayInfoForWindow(window_);
+   UpdateCursorIfOverSelf();
+diff --git a/content/browser/renderer_host/synthetic_input.cc b/content/browser/renderer_host/synthetic_input.cc
+new file mode 100644
+index 0000000000..f50aa8612d
+--- /dev/null
++++ b/content/browser/renderer_host/synthetic_input.cc
+@@ -0,0 +1,227 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "content/public/browser/synthetic_input.h"
++
++#include "base/task/single_thread_task_runner.h"
++#include "components/input/cursor_manager.h"
++#include "components/input/native_web_keyboard_event.h"
++#include "components/input/render_widget_host_input_event_router.h"
++#include "content/browser/renderer_host/render_widget_host_delegate.h"
++#include "content/browser/renderer_host/render_widget_host_impl.h"
++#include "content/browser/renderer_host/render_widget_host_view_base.h"
++#include "content/browser/web_contents/web_contents_impl.h"
++#include "content/public/browser/render_widget_host_observer.h"
++#include "third_party/blink/public/common/page/page_zoom.h"
++#include "third_party/blink/public/mojom/input/input_handler.mojom.h"
++namespace content {
++namespace {
++RenderWidgetHostImpl* Root(WebContents* contents) {
++  return contents ? RenderWidgetHostImpl::From(
++                        contents->GetPrimaryMainFrame()->GetRenderWidgetHost())
++                  : nullptr;
++}
++// An injector must wait for renderer ACK before resolving focus for the next
++// event. Otherwise a key can overtake an asynchronously targeted mouse down.
++class InputAck final : public RenderWidgetHost::InputEventObserver,
++                       public RenderWidgetHostObserver {
++ public:
++  InputAck(RenderWidgetHostImpl* host,
++           const blink::WebInputEvent& event,
++           base::OnceClosure done)
++      : host_(host->GetWeakPtr()),
++        type_(event.GetType()),
++        timestamp_(event.TimeStamp()),
++        done_(std::move(done)) {
++    host->AddInputEventObserver(this);
++    host->AddObserver(this);
++    host->ForceFirstFrameAfterNavigationTimeout();
++  }
++  void OnInputEvent(const RenderWidgetHost&,
++                    const blink::WebInputEvent& event,
++                    InputEventSource) override {
++    if (event.GetType() == type_ && event.TimeStamp() == timestamp_) {
++      queued_ = true;
++    }
++  }
++  void OnInputEventAck(const RenderWidgetHost&,
++                       blink::mojom::InputEventResultSource,
++                       blink::mojom::InputEventResultState,
++                       const blink::WebInputEvent& event) override {
++    if (event.GetType() == type_ && event.TimeStamp() == timestamp_ &&
++        (event.GetModifiers() & blink::WebInputEvent::kFromDebugger)) {
++      Finish();
++    }
++  }
++  void RenderWidgetHostDestroyed(RenderWidgetHost*) override { Finish(); }
++  void Finish() {
++    if (host_) {
++      host_->RemoveInputEventObserver(this);
++      host_->RemoveObserver(this);
++    }
++    if (done_) {
++      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, std::move(done_));
++    }
++    delete this;
++  }
++  bool queued() const { return queued_; }
++  base::WeakPtr<InputAck> GetWeakPtr() { return weak_.GetWeakPtr(); }
++
++ private:
++  bool queued_ = false;
++  base::WeakPtr<RenderWidgetHostImpl> host_;
++  blink::WebInputEvent::Type type_;
++  base::TimeTicks timestamp_;
++  base::OnceClosure done_;
++
++  base::WeakPtrFactory<InputAck> weak_{this};
++};
++void InjectAtPoint(base::WeakPtr<RenderWidgetHostImpl> root,
++                   blink::WebMouseEvent event,
++                   base::OnceClosure done,
++                   base::WeakPtr<input::RenderWidgetHostViewInput> view,
++                   std::optional<gfx::PointF> point) {
++  if (!root || !view || !point || (done && done.IsCancelled())) {
++    if (done) {
++      std::move(done).Run();
++    }
++    return;
++  }
++  auto* target = static_cast<RenderWidgetHostViewBase*>(view.get());
++  auto* host = RenderWidgetHostImpl::From(target->GetRenderWidgetHost());
++  // Same root selection used by native routed mouse input, including OOPIFs.
++  if (root->GetView() && root->GetView()->GetCursorManager()) {
++    root->GetView()->GetCursorManager()->UpdateViewUnderCursor(view.get());
++  }
++  event.SetPositionInWidget(*point);
++  event.SetPositionInScreen(
++      *point + host->GetView()->GetViewBounds().OffsetFromOrigin());
++  event.SetModifiers(event.GetModifiers() |
++                     blink::WebInputEvent::kFromDebugger);
++  host->Focus();
++  auto* ack = new InputAck(host, event, std::move(done));
++  auto weak = ack->GetWeakPtr();
++  host->ForwardMouseEvent(event);
++  if (weak && !ack->queued()) {
++    ack->Finish();
++  }
++}
++void InjectWheelAtPoint(base::WeakPtr<RenderWidgetHostImpl> root,
++                        blink::WebMouseWheelEvent event,
++                        base::OnceClosure done,
++                        base::WeakPtr<input::RenderWidgetHostViewInput> view,
++                        std::optional<gfx::PointF> point) {
++  if (!root || !view || !point || (done && done.IsCancelled())) {
++    if (done) {
++      std::move(done).Run();
++    }
++    return;
++  }
++  auto* target = static_cast<RenderWidgetHostViewBase*>(view.get());
++  auto* host = RenderWidgetHostImpl::From(target->GetRenderWidgetHost());
++  event.SetPositionInWidget(*point);
++  event.SetPositionInScreen(*point +
++                            target->GetViewBounds().OffsetFromOrigin());
++  event.SetModifiers(event.GetModifiers() |
++                     blink::WebInputEvent::kFromDebugger);
++  host->Focus();
++  auto* ack = new InputAck(host, event, std::move(done));
++  auto weak = ack->GetWeakPtr();
++  auto host_weak = host->GetWeakPtr();
++  host->ForwardWheelEvent(event);
++  if (weak && !ack->queued()) {
++    ack->Finish();
++  }
++  if (!host_weak) {
++    return;
++  }
++  event.delta_x = event.delta_y = event.wheel_ticks_x = event.wheel_ticks_y = 0;
++  event.phase = blink::WebMouseWheelEvent::kPhaseEnded;
++  event.dispatch_type = blink::WebInputEvent::DispatchType::kEventNonBlocking;
++  host_weak->ForwardWheelEvent(event);
++}
++}  // namespace
++void RouteSyntheticMouse(WebContents* contents,
++                         const blink::WebMouseEvent& event,
++                         base::OnceClosure done) {
++  auto* root = Root(contents);
++  if (!root || !root->GetView() || !root->GetInputEventRouter()) {
++    if (done) {
++      std::move(done).Run();
++    }
++    return;
++  }
++  root->GetInputEventRouter()->GetRenderWidgetHostAtPointAsynchronously(
++      root->GetView(), event.PositionInWidget(),
++      base::BindOnce(&InjectAtPoint, root->GetWeakPtr(), event,
++                     std::move(done)));
++}
++void RouteSyntheticWheel(WebContents* contents,
++                         blink::WebMouseWheelEvent& event,
++                         base::OnceClosure done) {
++  auto* root = Root(contents);
++  if (!root || !root->GetView() || !root->GetInputEventRouter()) {
++    if (done) {
++      std::move(done).Run();
++    }
++    return;
++  }
++  root->GetInputEventRouter()->GetRenderWidgetHostAtPointAsynchronously(
++      root->GetView(), event.PositionInWidget(),
++      base::BindOnce(&InjectWheelAtPoint, root->GetWeakPtr(), event,
++                     std::move(done)));
++}
++void SetSyntheticPageFocus(WebContents* contents, bool focused) {
++  if (auto* root = Root(contents)) {
++    if (focused) {
++      root->Focus();
++    }
++    root->SetPageFocus(focused);
++  }
++}
++float SyntheticInputScale(WebContents* contents) {
++  auto* impl = static_cast<WebContentsImpl*>(contents);
++  auto* root = Root(contents);
++  return blink::ZoomLevelToZoomFactor(impl->GetPendingZoomLevel(root)) *
++         impl->GetPrimaryPage().GetPageScaleFactor();
++}
++RenderWidgetHost* FocusedSyntheticInputWidget(WebContents* contents) {
++  auto* root = Root(contents);
++  if (root && root->delegate()) {
++    if (auto* host = root->delegate()->GetFocusedRenderWidgetHost(root)) {
++      return host;
++    }
++  }
++  return root;
++}
++void CommitSyntheticText(RenderWidgetHost* host,
++                         const std::u16string& text,
++                         base::OnceClosure done) {
++  RenderWidgetHostImpl::From(host)->GetWidgetInputHandler()->ImeCommitText(
++      text, {}, gfx::Range::InvalidRange(), 0, blink::DOMNodeIdType(),
++      std::move(done));
++}
++void DispatchSyntheticKey(WebContents* contents,
++                          const input::NativeWebKeyboardEvent& original,
++                          base::OnceClosure done) {
++  auto* host =
++      RenderWidgetHostImpl::From(FocusedSyntheticInputWidget(contents));
++  if (!host || (done && done.IsCancelled())) {
++    if (done) {
++      std::move(done).Run();
++    }
++    return;
++  }
++  auto event = original;
++  event.SetModifiers(event.GetModifiers() |
++                     blink::WebInputEvent::kFromDebugger);
++  host->Focus();
++  auto* ack = new InputAck(host, event, std::move(done));
++  auto weak = ack->GetWeakPtr();
++  host->ForwardKeyboardEvent(event);
++  if (weak && !ack->queued()) {
++    ack->Finish();
++  }
++}
++}  // namespace content
+diff --git a/content/public/browser/BUILD.gn b/content/public/browser/BUILD.gn
+index 4ff52ee455..8ccddc64e7 100644
+--- a/content/public/browser/BUILD.gn
++++ b/content/public/browser/BUILD.gn
+@@ -809,3 +809,15 @@ if (is_android) {
+ proto_library("proto") {
+   sources = [ "google_streaming_api.proto" ]
+ }
++
++# Opt-in embedder input/cursor adapter, kept out of the common browser module.
++source_set("synthetic_input") {
++  sources = [
++    "render_widget_host_cursor_observer.h",
++    "synthetic_input.h",
++  ]
++  public_deps = [
++    "//base",
++    "//content:export",
++  ]
++}
+diff --git a/content/public/browser/render_widget_host_cursor_observer.h b/content/public/browser/render_widget_host_cursor_observer.h
+new file mode 100644
+index 0000000000..566d30ad7d
+--- /dev/null
++++ b/content/public/browser/render_widget_host_cursor_observer.h
+@@ -0,0 +1,19 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CONTENT_PUBLIC_BROWSER_RENDER_WIDGET_HOST_CURSOR_OBSERVER_H_
++#define CONTENT_PUBLIC_BROWSER_RENDER_WIDGET_HOST_CURSOR_OBSERVER_H_
++#include "base/callback_list.h"
++#include "content/common/content_export.h"
++namespace ui {
++class Cursor;
++}
++namespace content {
++class RenderWidgetHost;
++// UI sequence, Aura only. Reports the root view's selected cursor, including
++// cross-process child views. An empty observer list does no work.
++CONTENT_EXPORT base::CallbackListSubscription ObserveSelectedCursor(
++    base::RepeatingCallback<void(RenderWidgetHost*, const ui::Cursor&)>
++        callback);
++}  // namespace content
++#endif
+diff --git a/content/public/browser/synthetic_input.h b/content/public/browser/synthetic_input.h
+new file mode 100644
+index 0000000000..90d68413ca
+--- /dev/null
++++ b/content/public/browser/synthetic_input.h
+@@ -0,0 +1,38 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CONTENT_PUBLIC_BROWSER_SYNTHETIC_INPUT_H_
++#define CONTENT_PUBLIC_BROWSER_SYNTHETIC_INPUT_H_
++#include <string>
++
++#include "base/functional/callback.h"
++#include "content/common/content_export.h"
++namespace input {
++struct NativeWebKeyboardEvent;
++}
++namespace blink {
++class WebMouseEvent;
++class WebMouseWheelEvent;
++}  // namespace blink
++namespace content {
++class WebContents;
++class RenderWidgetHost;
++// UI-only helpers. Routes through the ordinary RWH input router (including
++// asynchronous OOPIF targeting and root cursor selection), never the OS.
++CONTENT_EXPORT void RouteSyntheticMouse(WebContents*,
++                                        const blink::WebMouseEvent&,
++                                        base::OnceClosure done = {});
++CONTENT_EXPORT void RouteSyntheticWheel(WebContents*,
++                                        blink::WebMouseWheelEvent&,
++                                        base::OnceClosure done = {});
++CONTENT_EXPORT void SetSyntheticPageFocus(WebContents*, bool);
++CONTENT_EXPORT float SyntheticInputScale(WebContents*);
++CONTENT_EXPORT RenderWidgetHost* FocusedSyntheticInputWidget(WebContents*);
++CONTENT_EXPORT void CommitSyntheticText(RenderWidgetHost*,
++                                        const std::u16string&,
++                                        base::OnceClosure done);
++CONTENT_EXPORT void DispatchSyntheticKey(WebContents*,
++                                         const input::NativeWebKeyboardEvent&,
++                                         base::OnceClosure done);
++}  // namespace content
++#endif

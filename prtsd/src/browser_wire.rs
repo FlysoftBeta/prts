@@ -22,6 +22,179 @@ pub const LIST_RESULT: u16 = 0x181;
 pub const CREATED: u16 = 0x190;
 pub const CLOSED: u16 = 0x191;
 pub const CHANGED: u16 = 0x192;
+pub const CURSOR_CHANGED: u16 = 0x193;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Cursor {
+    pub shape: u8,
+    pub hot_x: u32,
+    pub hot_y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub png: Vec<u8>,
+}
+#[derive(Clone, Debug)]
+pub struct InputHeader {
+    pub target: u64,
+    pub generation: u64,
+    pub sequence: u64,
+    pub modifiers: u32,
+}
+#[derive(Clone, Debug)]
+pub struct Key {
+    pub vk: u32,
+    pub code: String,
+    pub key: String,
+    pub text: String,
+    pub location: u8,
+    pub repeat: bool,
+    pub is_system: bool,
+}
+#[derive(Clone, Debug)]
+pub enum Input {
+    MouseMove {
+        x: f64,
+        y: f64,
+        buttons: u32,
+    },
+    MouseDown {
+        x: f64,
+        y: f64,
+        button: u8,
+        buttons: u32,
+        click_count: u8,
+    },
+    MouseUp {
+        x: f64,
+        y: f64,
+        button: u8,
+        buttons: u32,
+        click_count: u8,
+    },
+    Wheel {
+        x: f64,
+        y: f64,
+        delta_x: f64,
+        delta_y: f64,
+        buttons: u32,
+    },
+    KeyDown(Key),
+    KeyUp(Key),
+    Char(String),
+    Focus(bool),
+}
+impl Input {
+    pub fn record(&self, header: &InputHeader) -> Result<Record> {
+        ensure!(
+            header.target != 0
+                && header.generation != 0
+                && header.sequence != 0
+                && header.modifiers <= 63,
+            "Invalid input header"
+        );
+        let mut p = Vec::new();
+        p.extend(header.target.to_le_bytes());
+        p.extend(header.generation.to_le_bytes());
+        p.extend(header.sequence.to_le_bytes());
+        p.extend(header.modifiers.to_le_bytes());
+        let kind = match self {
+            Self::MouseMove { x, y, buttons }
+            | Self::MouseDown { x, y, buttons, .. }
+            | Self::MouseUp { x, y, buttons, .. }
+            | Self::Wheel { x, y, buttons, .. } => {
+                ensure!(
+                    x.is_finite() && y.is_finite() && *buttons <= 31,
+                    "Invalid mouse values"
+                );
+                p.extend(x.to_le_bytes());
+                p.extend(y.to_le_bytes());
+                let kind = match self {
+                    Self::MouseMove { .. } => 0x200,
+                    Self::MouseDown { .. } => 0x201,
+                    Self::MouseUp { .. } => 0x202,
+                    Self::Wheel {
+                        delta_x, delta_y, ..
+                    } => {
+                        ensure!(
+                            delta_x.is_finite() && delta_y.is_finite(),
+                            "Invalid wheel delta"
+                        );
+                        p.extend(delta_x.to_le_bytes());
+                        p.extend(delta_y.to_le_bytes());
+                        0x203
+                    }
+                    _ => unreachable!(),
+                };
+                if let Self::MouseDown {
+                    button,
+                    click_count,
+                    ..
+                }
+                | Self::MouseUp {
+                    button,
+                    click_count,
+                    ..
+                } = self
+                {
+                    ensure!(
+                        (1..=5).contains(button) && (1..=3).contains(click_count),
+                        "Invalid mouse transition"
+                    );
+                    p.push(*button);
+                }
+                p.extend(buttons.to_le_bytes());
+                if let Self::MouseDown { click_count, .. } | Self::MouseUp { click_count, .. } =
+                    self
+                {
+                    p.push(*click_count);
+                }
+                kind
+            }
+            Self::KeyDown(k) | Self::KeyUp(k) => {
+                ensure!(
+                    k.vk <= 255
+                        && k.location <= 3
+                        && (!k.code.is_empty() || k.key == "Unidentified"),
+                    "Invalid key"
+                );
+                ensure!(!k.code.contains('\0') && !k.key.contains('\0'), "NUL key");
+                if matches!(self, Self::KeyUp(_)) {
+                    ensure!(k.text.is_empty() && !k.repeat, "Invalid key up");
+                }
+                p.extend(k.vk.to_le_bytes());
+                string(&k.code, &mut p)?;
+                string(&k.key, &mut p)?;
+                input_text(&k.text, &mut p)?;
+                p.extend([k.location, k.repeat as u8, k.is_system as u8]);
+                if matches!(self, Self::KeyDown(_)) {
+                    0x204
+                } else {
+                    0x205
+                }
+            }
+            Self::Char(text) => {
+                input_text(text, &mut p)?;
+                0x206
+            }
+            Self::Focus(focused) => {
+                p.push(*focused as u8);
+                0x207
+            }
+        };
+        Ok(Record {
+            kind,
+            id: 0,
+            payload: p,
+        })
+    }
+}
+fn input_text(text: &str, p: &mut Vec<u8>) -> Result<()> {
+    ensure!(
+        text.len() <= 4096 && !text.contains('\0'),
+        "Invalid input text"
+    );
+    string(text, p)
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Size {
@@ -71,6 +244,11 @@ pub struct Target {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     Created(Target),
+    Cursor {
+        target: u64,
+        generation: u64,
+        cursor: Cursor,
+    },
     Changed(Target),
     Closed {
         target: u64,
@@ -83,7 +261,7 @@ pub enum Event {
     },
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Record {
     pub kind: u16,
     pub id: u64,
@@ -147,6 +325,53 @@ impl Record {
                 Event::Closed {
                     target,
                     reason: d.string()?,
+                }
+            }
+            CURSOR_CHANGED => {
+                let target = d.u64()?;
+                let generation = d.u64()?;
+                let shape = d.u8()?;
+                let hot_x = d.u32()?;
+                let hot_y = d.u32()?;
+                let width = d.u32()?;
+                let height = d.u32()?;
+                let n = d.u32()? as usize;
+                ensure!(
+                    target != 0
+                        && generation != 0
+                        && shape <= 8
+                        && n <= 32768
+                        && n <= d.data.len() - d.pos,
+                    "Invalid cursor"
+                );
+                let png = d.data[d.pos..d.pos + n].to_vec();
+                d.pos += n;
+                if shape == 8 {
+                    ensure!(
+                        (1..=128).contains(&width)
+                            && (1..=128).contains(&height)
+                            && hot_x < width
+                            && hot_y < height
+                            && png.starts_with(b"\x89PNG\r\n\x1a\n"),
+                        "Invalid custom cursor"
+                    );
+                } else {
+                    ensure!(
+                        width == 0 && height == 0 && hot_x == 0 && hot_y == 0 && png.is_empty(),
+                        "Invalid built-in cursor"
+                    );
+                }
+                Event::Cursor {
+                    target,
+                    generation,
+                    cursor: Cursor {
+                        shape,
+                        hot_x,
+                        hot_y,
+                        width,
+                        height,
+                        png,
+                    },
                 }
             }
             FAULT => {
@@ -308,5 +533,80 @@ mod tests {
             .event()
             .is_err()
         );
+    }
+    #[test]
+    fn input_rejects_bad_values_and_preserves_unicode() -> Result<()> {
+        let header = InputHeader {
+            target: 1,
+            generation: 2,
+            sequence: 3,
+            modifiers: 0,
+        };
+        assert!(
+            Input::MouseMove {
+                x: f64::NAN,
+                y: 0.,
+                buttons: 0
+            }
+            .record(&header)
+            .is_err()
+        );
+        assert!(Input::Char("bad\0text".into()).record(&header).is_err());
+        assert!(Input::Char("x".repeat(4097)).record(&header).is_err());
+        let text = "a\u{1f600}".to_owned();
+        let record = Input::Char(text.clone()).record(&header)?;
+        let mut decoder = Decoder::new(&record.payload);
+        assert_eq!(
+            (
+                decoder.u64()?,
+                decoder.u64()?,
+                decoder.u64()?,
+                decoder.u32()?
+            ),
+            (1, 2, 3, 0)
+        );
+        assert_eq!(decoder.string()?, text);
+        decoder.finish()?;
+        let key = Key {
+            vk: 65,
+            code: "KeyA".into(),
+            key: "a".into(),
+            text: "a".into(),
+            location: 0,
+            repeat: false,
+            is_system: false,
+        };
+        assert!(Input::KeyUp(key).record(&header).is_err());
+        Ok(())
+    }
+    #[test]
+    fn cursor_bounds_and_exact_consumption() -> Result<()> {
+        let mut payload = 1u64.to_le_bytes().to_vec();
+        payload.extend(2u64.to_le_bytes());
+        payload.push(1);
+        payload.extend([0; 20]);
+        let mut record = Record {
+            kind: CURSOR_CHANGED,
+            id: 0,
+            payload,
+        };
+        assert!(matches!(
+            record.event()?,
+            Event::Cursor {
+                cursor: Cursor { shape: 1, .. },
+                ..
+            }
+        ));
+        record.payload.push(0);
+        assert!(record.event().is_err());
+        record.payload.pop();
+        record.payload[17] = 1;
+        assert!(record.event().is_err());
+        record.payload[17] = 0;
+        record.payload[16] = 8;
+        assert!(record.event().is_err());
+        record.payload[16] = 9;
+        assert!(record.event().is_err());
+        Ok(())
     }
 }
