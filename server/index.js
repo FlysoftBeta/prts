@@ -193,7 +193,11 @@ daemon.ready.then(() => daemon.request('stats.configure', { interval_ms: 1000 })
 
 const port = Number(process.env.PORT ?? 8080);
 if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid PORT');
-server.listen(port, '127.0.0.1', () => console.log(`PRTS listening at http://127.0.0.1:${server.address().port}`));
+server.listen(port, '127.0.0.1', () => {
+  const url = `http://127.0.0.1:${server.address().port}`;
+  console.log(`PRTS listening at ${url}`);
+  process.send?.({ url, daemonPid: daemon.child.pid });
+});
 server.on('error', error => { console.error(error.message); daemon.stop(); process.exitCode = 1; });
 let shuttingDown = false;
 function shutdown() {
@@ -206,3 +210,5 @@ function shutdown() {
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+// A supervising Node process can close its IPC channel for graceful Windows shutdown.
+process.on('disconnect', shutdown);

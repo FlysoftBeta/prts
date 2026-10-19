@@ -174,3 +174,33 @@ and Windows 10 deployment have not been exercised in this job.
   Repeated invalid input closes the session; stale-state errors are rate limited.
 - No claim of exhaustive adversarial SDP fuzzing, browser codec interoperability,
   long-run resource/soak testing or precise glass-to-glass latency measurements.
+
+## Phase 1 part C: real browser integration
+
+The real release daemon now passes `cd server; npm run e2e` through the real
+Node control plane and frontend on Windows 11 with installed headless Microsoft
+Edge 155.0.4283.62 (no Chromium build). No Rust source changes were required.
+`cargo build --release` and all four `cargo test --release -- --nocapture`
+integration tests also pass in this integration job.
+
+The Puppeteer test verifies increasing decoded video frames, decoded white
+pointer/red click pixels and committed text pixels after trusted mouse/keyboard
+events through the frontend. It also exercises tab create/resize/switch/close on
+the same video track, two independent synthetic instances and three simultaneous
+viewers, including two viewers of one encoder. Actual receiver getStats fields
+and daemon encoder/frame/session stats must appear in the UI. A 50 kbps target
+cap reduced measured encoded bitrate from about 554 kbps to 123 kbps in one run;
+the test averages multiple complete intervals and requires a measured reduction
+of at least 20%, then confirms video frames still advance.
+
+OpenH264's target is not a strict bandwidth limit: at this very low cap the
+synthetic 720p source drops frames and overshoots the target. QP and true
+capture-to-display latency remain unavailable. Packet latency/loss shaping was
+not added; nonzero values still return unsupported, and no RTT/loss shaping
+claim is made. Windows 10 qualification, QSV and Chromium capture remain open.
+
+The test closes live instances through the UI, closes the browser and uses Node
+IPC disconnect to request graceful server shutdown on Windows. It verifies both
+server exit code zero and disappearance of the exact daemon PID, including on
+test failure. The screenshot is `docs/prts/phase1-e2e.png`; browser override and
+run instructions are in the root README and server notes.

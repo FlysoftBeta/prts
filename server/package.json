@@ -6,8 +6,16 @@
   "main": "index.js",
   "scripts": {
     "start": "node .",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "e2e": "node --test test/e2e.js"
   },
-  "engines": { "node": ">=22" },
-  "dependencies": { "ws": "^8.18.0" }
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.14.0"
+  }
 }

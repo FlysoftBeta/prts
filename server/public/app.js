@@ -41,6 +41,7 @@ function renderInstances() {
     select.onclick = run(() => selectInstance(instance.instance_id));
     const close = document.createElement('button'); close.textContent = 'Close';
     close.onclick = run(async () => {
+      if (viewer?.instance === instance.instance_id) await disconnect();
       await rpc('instance.close', { instance_id: instance.instance_id });
       instances.delete(instance.instance_id); renderInstances();
     });
@@ -155,8 +156,8 @@ async function connect() {
       input.channel = channel;
       channel.onclose = () => {
         if (viewer === state) {
-          report('Remote control channel closed; reconnect the viewer');
           void disconnect(); // End ownership so prtsd releases held keys/buttons.
+          $('session-state').textContent = 'Remote control channel closed; reconnect the viewer';
         }
       };
       channel.onmessage = event => {
@@ -233,6 +234,7 @@ ws.onmessage = e => {
   const instance = instances.get(data.instance_id);
   if (event === 'instance.ready') {
     if (instance) Object.assign(instance, { state: 'ready', active_target_id: data.active_target_id });
+    else run(refreshInstances)(); // Instances created by another operator need a full snapshot.
     if (selected === data.instance_id) run(async () => { await refreshTargets(); if (!viewer) await connect(); })();
   } else if (event === 'instance.failed') {
     if (instance) instance.state = 'failed';
@@ -253,7 +255,10 @@ ws.onmessage = e => {
         if (viewer.remoteIce.length >= 256) { report('Too many ICE candidates'); void disconnect(); return; }
         viewer.remoteIce.push(data.candidate);
       } else addRemoteIce(viewer, data.candidate).catch(report);
-    } else if (event === 'session.closed') { report(`Session closed: ${data.reason}`); void disconnect(); }
+    } else if (event === 'session.closed') {
+      if (data.reason !== 'requested') report(`Session closed: ${data.reason}`);
+      void disconnect();
+    }
   }
 };
 

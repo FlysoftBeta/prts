@@ -103,3 +103,42 @@ require end-to-end testing with the concurrent Rust implementation. The UI
 supports one video viewer at a time and manual reconnect; no TURN configuration
 UI or automatic ICE restart is provided (daemon-provided ice_servers are used).
 No changes to protocol.md were needed.
+
+## Phase 1 part C: integrated browser acceptance
+
+`npm run e2e` uses the new dev dependency `puppeteer-core` and launches the real
+release `prtsd.exe`, the real server on an ephemeral loopback port and an
+installed browser in headless mode. It never uses the mock and never downloads
+or builds Chromium. Build `prtsd` first, then `npm ci` in `server/`. Selection is
+`PRTS_BROWSER`, installed Chrome, installed Edge, then the existing Chromium
+`out/Default/chrome.exe`. The integrated run passed on Windows 11 with Microsoft
+Edge 155.0.4283.62. All seven existing Node tests and all four Rust integration
+tests also pass.
+
+Coverage includes increasing rendered frame counts and H264 getStats, actual
+mouse move/down/up and keyboard typing through the frontend handlers, decoded
+pointer/click/text pixels, tab creation/resize/switch/close, two instances and
+three simultaneous viewers (one sharing an existing instance view-only), UI
+RTT/FPS/bitrate/loss/jitter/decode stats, daemon encoder stats, and a measured
+encoder bitrate reduction after applying a cap. Very low encoder targets can
+overshoot; the test compares averaged measured output rather than expecting a
+hard packet bandwidth ceiling. Continued playback after the cap is checked.
+
+Integration fixes:
+
+- When another operator creates an instance, its ready event now refreshes the
+  full instance list. Previously existing pages silently omitted that instance.
+- Closing a selected instance first disconnects its local viewer; requested
+  session closure no longer appears as an error. A control-channel closure is
+  shown in session status, allowing later lifecycle events to clear it normally.
+- A server launched with Node IPC sends its URL and daemon PID to its supervisor
+  and shuts down on IPC disconnect. This gives the browser test a graceful
+  Windows shutdown path without adding an HTTP shutdown endpoint. The test
+  verifies exit code zero and that the exact daemon PID is gone, even on failure.
+
+Background pages can suspend animation-frame callbacks after their track closes.
+The test brings the closing page forward and polls lifecycle DOM state with a
+timer; video checks still require actual advancing video frames. It fails on
+browser exceptions or frontend errors and saves the small full-page PNG
+`docs/prts/phase1-e2e.png`. Packet delay/loss shaping remains explicitly
+unsupported; Windows 10 and remote-network/TURN qualification remain open.

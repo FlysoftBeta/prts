@@ -30,4 +30,49 @@ cr gen | build [out] [target] | run [out]
 2. `cr export`, then commit `patches/` (and `PIN` if changed) in this repo.
 3. Rebase onto newer upstream: `cr update`. If `git am` conflicts: fix in src, `git am --continue`, `cr export`.
 
+## PRTS Phase 1: how to run
+
+The synthetic source streams live OpenH264 video over WebRTC. It needs Node.js
+22+, Rust stable MSVC and Visual Studio C++ tools/Windows SDK on Windows x64.
+No Chromium build is needed for Phase 1.
+
+From the repository root in PowerShell:
+
+```powershell
+cd prtsd
+cargo build --release
+cd ../server
+npm ci
+cd ..
+node server
+```
+
+Open `http://127.0.0.1:8080`, create a synthetic instance, and click the video
+to type or move/click the pointer. The stream displays that input. Use New tab,
+the tab buttons and Resize to manage targets. A second browser tab can create
+another instance or view an existing one; uncheck Request control to share an
+instance already controlled by another viewer. Receiver and encoder stats appear
+below the video. Network simulation supports a bitrate target cap; packet delay
+and loss are currently unsupported and return an explicit error.
+
+Run the automated real-daemon/browser test (build prtsd first):
+
+```powershell
+cd server
+npm run e2e
+```
+
+It uses installed Chrome/Edge or `C:/src/chromium/src/out/Default/chrome.exe`
+headlessly. Set `$env:PRTS_BROWSER` to override the browser executable. It starts
+its own server on a free loopback port, verifies decoded video/input, stats,
+multiple instances/viewers and bitrate changes, saves
+`docs/prts/phase1-e2e.png`, and verifies server/daemon shutdown. `npm test` runs
+the separate mock/unit suite; `cargo test --release` in `prtsd/` runs the Rust
+integration suite. If PATH is stale, prepend `C:/Program Files/nodejs` and
+`$env:USERPROFILE/.cargo/bin`.
+
+Chromium capture, D3D11 shared textures, QSV and Windows process isolation are
+later phases. See [the plan](docs/prts/PLAN.md) and the
+[server](docs/prts/server-notes.md) / [daemon](docs/prts/prtsd-notes.md) notes.
+
 Branch `main` in src always equals `PIN`; `work` = `main` + patches. `sync` refuses to run with uncommitted changes.
