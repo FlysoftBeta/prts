@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Wed, 21 Oct 2026 01:23:29 +0800
-Subject: [PATCH 24/25] WIP: track owned headless popup hosts and expose
+Subject: [PATCH 24/26] WIP: track owned headless popup hosts and expose
  lifecycle probes
 
 Observe creation readiness, ownership, visibility and stacking without starting popup capture. Placement and composition are unqualified; keep this commit on wip/mvp-flyouts until the complete gates pass.

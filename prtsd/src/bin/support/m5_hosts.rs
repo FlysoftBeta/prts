@@ -54,6 +54,12 @@ impl Client {
             });
         }
         self.menu_button = Some(read_rect(&mut d)?);
+        self.menu_items.clear();
+        let count = d.u32()?;
+        ensure!(count <= 4096, "Unbounded menu geometry probe");
+        for _ in 0..count {
+            self.menu_items.push((d.u32()?, read_rect(&mut d)?));
+        }
         d.finish()?;
         Ok(hosts)
     }
@@ -92,7 +98,7 @@ fn host_gate(c: &mut Client, id: u64) -> Result<()> {
                 // MenuButtonController intentionally rejects clicks for 100ms
                 // after a menu closes. Respect Chrome's debounce before the
                 // measured opening action; never retry a failed click.
-                thread::sleep(Duration::from_millis(150));
+                c.pump_for(Duration::from_millis(150))?;
                 let button = c.menu_button.clone().context("Missing app-menu geometry")?;
                 println!("APP MENU BUTTON {width}x{height}@{dpr}: {button:?}");
                 ensure!(

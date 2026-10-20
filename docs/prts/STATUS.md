@@ -1,14 +1,19 @@
 # PRTS status
 
 ## Current state
-- **Active WIP: `wip/mvp-flyouts` in both repos**, not merged into main. Initial host observer/tracker
-  and real app-menu ownership/lifecycle gate implemented; incremental chrome build4 and Rust checks pass.
-  Placement fixes now PASS nine real app-menu cycles at DSF1/2/1.25, including real toolbar clicks,
-  physical canvas containment and cross-owner exclusion (build12). Existing M5 GPU/CPU capture/input
-  gates pass build11. Build13 final host and existing M5 GPU/CPU capture/input reruns PASS. Exact resume point is
-  [mvp-flyouts-wip.md](mvp-flyouts-wip.md): scene/pool/alpha/composition and further popup input gates.
-  No flyout pixel qualification claimed; initial popup input routing remains WIP.
-  Current chrome binary is built from WIP, while source `work` remains qualified5a7769bea8.
+- **Active WIP: `wip/mvp-flyouts` in both repos**, not merged into main. Chromium `7da2e4f41e`
+  (build29, exported26 patches) adds owned-layer scenes, fair two-resource alpha capture and correct
+  Aura mouse-release flags for Views buttons. Daemon CPU/GPU composition and512MiB bounded caches
+  are implemented. Dedicated `-Suite flyouts` PASS11 gates: ordinary checks, nine host cycles, Intel
+  GPU/reference pixels, and CPU/software + GPU/QSV with HELLO inflight1/2, each DSF1/2/1.25. Decoded
+  app-menu pixels/alpha/close restoration and actual pointer selection creating a new tab all pass;
+  unchanged100ms missing-layer/250ms appearance gates pass. Other flyout types remain unqualified.
+  Launcher disables Views UI GPU raster only to avoid cold shader stalls; page GPU/composition stay
+  enabled. **Full regression29 finds black tab-strip ROI after1001x777@1.25 resize on both M5 paths**;
+  M1/M2 and dedicated flyout gates pass, remaining broad gates running. Pending comparison adds
+  `--run-all-compositor-stages-before-draw`; not yet rebuilt/tested. Exact resume point:
+  [mvp-flyouts-wip.md](mvp-flyouts-wip.md), latest journal-mvp.md. Source `work` remains5a7769bea8;
+  current chrome binary is WIP. No full flyout signoff.
 - **Next action: continue MVP (PLAN priority 2), M5b steps 4-5**: host-family tracking and GPU/CPU
   flyout composition/input (menus, context menus, omnibox dropdown, bubbles, tooltips, dialogs,
   permission/select/extension popups). Then step 6 per-window streams, touch input and remaining cleanup.

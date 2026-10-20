@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Wed, 21 Oct 2026 01:51:32 +0800
-Subject: [PATCH 25/25] WIP: correct virtual flyout geometry and route owned
+Subject: [PATCH 25/26] WIP: correct virtual flyout geometry and route owned
  popup input
 
 Real app-menu containment and toolbar clicks pass at DSF 1, 2 and 1.25. Popup composition and full popup input qualification remain pending.

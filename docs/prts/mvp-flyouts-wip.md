@@ -1,130 +1,116 @@
-# M5b flyouts WIP: resume here
+﻿# M5b flyouts WIP: resume here
 
-Both repositories are on `wip/mvp-flyouts`. Nothing in this unfinished feature
-has been merged into main. Main's completed GPU/MF milestone is `c445ddd`, with
-checkpoint `e015ae6`; Chromium `work` remains `5a7769bea8` (23 baseline patches).
-The current `out/Default/chrome.exe` was incrementally built from the flyout WIP,
-not the qualified main source. No browser/daemon is left running.
+Both repositories use `wip/mvp-flyouts`. Nothing from this unfinished feature
+has merged to main. Qualified Chromium `work` stays `5a7769bea8` (23 baseline
+patches). `out/Default/chrome.exe` is currently **WIP build29**, not main.
 
-## Implemented so far
+## Current checkpoint (2026-10-21)
 
-- Generic opt-in Views observer in `desktop_headless_input.h` and
-  `desktop_window_tree_host_win.cc`: copied creation metadata, explicit widget
-  readiness, and StackAbove/StackAtTop notifications. No observer runs outside
-  the existing headless input opt-in.
-- `chrome/browser/prts/prts_host_tracker.{h,cc}`: weak root/widget/parent/context
-  identities, widget and Env lifetime observation, visible owned host snapshots,
-  logical source IDs, owner ancestry/context/parent/bubble anchor/transient
-  resolution, actual transparency, parent source and virtual restack ordering.
-- Registry installs/removes that observer and exposes test-only request `0x42c`
-  -> reply `0x48c` (requires `--prts-test-hooks`). Probe includes logical IDs,
-  widget client screen bounds, root screen bounds, host client pixels, owner
-  client pixels, type, event policy and transparency.
-- Rust `support/m5_hosts.rs`, included by `browser_m5`, runs with
-  `PRTS_M5_HOSTS=1`. It opens the real app menu with Aura Alt+F, checks ownership,
-  positive ready geometry, cross-window exclusion, closes with Aura Escape and
-  repeats. The final gate also requires the menu to fit its owner's stream.
-  Rust decoder accepts the exact new test reply type.
-- `cr export [branch]` can export the WIP branch without moving the qualified
-  Chromium `work` ref. Default export and sync still use `work`.
-
-## Placement checkpoint (resumed 2026-10-21)
-
-Incremental build12 and the strengthened nine-cycle host gate PASS at
-960x640@1, 960x640@2 and 961x641@1.25. Each scale includes a real toolbar click
-located through test-only Views geometry, Alt+F/Escape churn, physical canvas
-containment and cross-owner exclusion. The click respects Chrome's existing
-100ms MenuButton debounce before the opening action; no failed click is retried.
-Build11 also passes the existing M5 capture/input gates on GPU and CPU paths.
-Build13 includes formatting/include cleanup; host and existing M5 GPU/CPU reruns PASS.
-
-Placement fixes: headless client insets now compare native rectangles in the
-same screen coordinate system; monitor emulation looks up physical rectangles;
-nearest-display squared distance uses 64-bit multiplication (a 48192px gap
-previously overflowed negative); DIPToScreenRect scales size independently of
-its rounded origin; opt-in menu placement includes border/shadow within the
-owner's actual logical canvas. Source regressions were added for overflow and
-fractional conversion, but Chromium unit-test targets were not built under the
-chrome-only incremental build rule. Runtime host gates cover both regressions.
-
-The input router now chooses owned captured/hit popup roots and their focused
-key/text clients, using weak event destinations. This is an initial scaffold:
-popup selection, hover exits, captured-state cancellation, target destruction
-and dialog text need additional acceptance. No popup pixels are captured or
-composed, and no flyout signoff is claimed.
-
-Exact next step: checkpoint export25 (Chromium5c7c15f4be), then implement fair two-resource scheduling across owned sources,
-premultiplied alpha, bounded scene caches and GPU/CPU composition below. Keep
-the daemon's auxiliary-layer rejection until composition actually exists.
-
-Logs: `C:/src/chromium/prts-flyouts-placement12-hosts.*`,
-`prts-flyouts-regression11-m5-{gpu,cpu}.*`, `prts-mvp-flyouts-build{12,13}-chrome.*`.
-
-### Original blocker (resolved above)
-
-Incremental chrome build4 PASSED, release `browser_m5` build PASSED,
-Clippy all targets with warnings denied and fmt PASSED. Initial ownership-only
-gate passed three real menu open/close cycles, cross-owner exclusion and desktop
-hidden/cloaked/taskbar checks. That is **not** flyout signoff.
-
-The mandatory placement assertion now FAILS reproducibly: the menu's widget,
-Aura root and native host all report `[-32178,-68,390,608]`; its owner client
-canvas is `[32768,0,960,640]`. This is actual host placement, not a difference
-between the coordinate APIs. No compositor should silently clip this menu or
-reinterpret the ownership-only pass as usability.
-
-Next: trace the menu anchor/work-area/InitParams bounds before creation. Inspect
-the headless screen position client, virtual display mapping and menu bounds
-calculation. Correct placement relative to the owning virtual display, keeping
-edge/nested menus usable, then make the unchanged containment gate pass. The
-observed x difference is 65,536 pixels (twice owner origin); this is diagnostic
-evidence, **not** justification for an ad-hoc coordinate offset.
-
-Reproduce from repo root (no capture/input full gates implied):
+Owned-host scenes, fair two-resource capture, premultiplied CPU/GPU composition,
+and actual app-menu pointer selection work. The dedicated one-command suite
+passes all11 gates:
 
 ```powershell
-cargo build --manifest-path prtsd/Cargo.toml --release --bin browser_m5
-$env:PRTS_M5_HOSTS='1'
-# Only for this disconnected session; connected desktop qualification remains open:
-$env:PRTS_M1_ALLOW_DISCONNECTED_DESKTOP='1'
-./prtsd/target/release/browser_m5.exe
+powershell -File scripts/test.ps1 -Suite flyouts -AllowDisconnectedDesktop
 ```
 
-Run it with a 180-second external deadline, using the `Gate` function in
-`scripts/test.ps1` as in journal-mvp.md. The failing output is
-`C:/src/chromium/prts-mvp-flyouts-placement-m5-hosts.log`; error details are in
-the adjacent `.err.log`. Earlier owner-only passes are `host2` / `host3` logs.
-Build logs: `C:/src/chromium/prts-mvp-flyouts-build4-chrome.*` (exit0).
+The desktop override applies only to this disconnected session. Connected
+foreground/physical-cursor qualification is still open. Existing gates verify
+hidden/cloaked windows, taskbar exclusion and native cursor-write counters.
 
-## Remaining implementation (do not relax these requirements)
+Evidence: `C:/src/chromium/prts-flyouts-qualified1-*` (build29). This covers
+Rust release/tests/Clippy/fmt, Node unit tests, nine real host cycles, Intel
+GPU/reference alpha/mask/shadow composition, and four decoded app-menu gates:
+CPU/software and GPU/QSV, each HELLO inflight1/2, each DSF1/2/1.25. App menu
+opens by real toolbar click; decoded appearance stays <=250ms, missing-layer
+100ms diagnostics stay zero, alpha is preserved and close restores exact page
+pixels. A second real menu click selects New tab and requires a new selected
+tab before cleanup. This is **partial M5b qualification**, not all-flyout signoff.
 
-The registry still emits a **base-only scene**. The daemon still explicitly
-rejects auxiliary-layer scenes. No flyout pixels are captured/composed yet.
-After placement is correct, follow phase2-m5-design.md steps4-5:
+Chromium source checkpoint `7da2e4f41e` is committed and exported as26 patches;
+infra checkpoint is pending. Full regression currently running with prefix
+`C:/src/chromium/prts-flyouts-regression29-*`:
 
-1. Complete owned-host scene snapshots, readiness/destruction reconciliation,
-   unknown-owner diagnostics, parent/descendant ordering and input hit testing
-   shared with virtual headless screen queries. Observe Aura reparent/stacking
-   changes too; the current tracker primarily observes Widget events.
-2. Extend capture with fair bounded source scheduling. Current `PrtsCapture`
-   admits only two sources and keeps two source-specific resources; it cannot
-   simply admit arbitrary popups without retirement/fairness changes. Preserve
-   existing v1 gates and the one-credit progress requirement.
-3. Preserve premultiplied alpha for layers. Current CPU publication forcibly
-   writes alpha255 and resources validate opaque format1 only. Add negotiated
-   layer format/alpha handling, masks/shadows and CPU/GPU equivalent composition
-   before NV12. Keep caches bounded and compose each update from a fresh base.
-4. Add decoded pixel gates for all required flyouts, popup-only updates, close
-   restoration, latency, resize/DSF, nested menus, dialogs and permission prompts;
-   require GPU/QSV plus CPU/software paths and desktop checks. Do not remove the
-   daemon's auxiliary-layer rejection before composition actually exists.
+```powershell
+powershell -File scripts/test.ps1 -Suite full -AllowDisconnectedDesktop
+```
 
-The initial host gate uses Alt+F; final qualification must additionally open the
-app menu by a real toolbar click located through stable Views geometry.
-`ToolbarView::GetAppMenuControl()->GetFocusablePaneView()` supplies the button
-view; include `app_menu_control.h` when adding the geometry probe.
+Regression29 already finds black decoded tab-strip ROI at1001x777@1.25 on both
+existing M5 capture paths. M1/M2 and the dedicated flyout gates pass. Pending
+launcher comparison adds `--run-all-compositor-stages-before-draw` so CPU UI
+tiles finish before draw; this edit is not yet rebuilt/tested. Exact next step:
+let the bounded suite finish and inspect exit/done files, then rebuild Rust and
+rerun unchanged M5 CPU/GPU gates with that flag. Fix failures without relaxing
+assertions. Rerun dedicated flyouts and production Intel GPU evidence after the
+launcher change, then checkpoint/push WIP only. Main must wait for all required
+flyout, input and lifecycle gates.
 
-Then implement M5 step6 per-window streams, touch input and remaining cleanup.
-oneVPL/NVENC and paused isolation remain lower priorities. Never merge this WIP
-into main until all its acceptance gates pass. Export its Chromium commits with
-`./cr.cmd export wip/mvp-flyouts` before committing the infra WIP snapshot.
+## Implemented behavior
+
+- `prts_host_tracker.*`: opt-in Views host/widget lifecycle tracking, stable
+  source identities, owner ancestry/context/parent/bubble-anchor/transient
+  resolution, ready geometry, transparency, parent sources and virtual order.
+- `prts_window_registry.cc`: owned-layer snapshots and capture epochs,
+  automatic visible-host subscriptions, v2 feature29. Test-only host probe0x42c
+  includes menu bounds; modern ChroMenu New tab uses a block Button with a
+  localized accessible name including its shortcut, rather than MenuItemView.
+- `prts_capture.*`: preserved alpha format2; eager registration and fair
+  scheduling recycle <=2 resources across sources. Actual one-credit HELLO
+  progresses with static base and popup. Legacy v1 behavior remains covered.
+- `scene_frames.rs`: private per-source caches (512MiB aggregate bound),
+  generation/revision invalidation, owner-dirty output, popup-only updates,
+  missing-layer diagnostics and exact restoration. Browser credits are returned
+  after private copies, never retained by caches.
+- `composition.rs`, `composition.hlsl`, `d3d_composition.rs`: premultiplied
+  reference CPU and D3D11 ONE/INV_SRC_ALPHA composition, masks, shadows,
+  clipping/scaling/opacity. Intel GPU/reference gate agrees within one byte;
+  all-GPU composition performs no CPU readback.
+- Popup-aware Aura routing already chooses captured/hit owned roots and weak
+  dispatch destinations. Build29 fixes release flags: Aura mouse-up includes
+  the changed button, while wire `buttons` retains its post-event held state.
+  Without this, Views buttons see the correct press/release but reject clicks.
+
+## Measured latency fix
+
+The previous 100ms missing-layer failure was cold **browser UI GPU raster shader
+work**, not resource registration or readback. Trace4 shows a copy waiting106ms
+behind Graphite raster flush/Dawn compiler tasks; readback itself takes4ms.
+Ganesh alone was intermittent. The production Rust headless launcher sets
+`--disable-features=UiGpuRasterization`: Views tiles rasterize on CPU, while page
+GPU raster, hardware compositing, WebGL and DXGI capture stay enabled. The
+production hardware adapter gate must still pass. Unsuccessful eager startup
+refresh retries and temporary low-level diagnostics were removed.
+
+`PRTS_M5_TRACE=1` on the standalone flyout driver uses test-only request0x429
+and saves `C:/src/chromium/prts-flyouts-copy.json`. Startup trace switches did
+not produce a file. Historical logs and investigation are in journal-mvp.md.
+
+## Placement already qualified (do not redo)
+
+Build12/13 nine-cycle host tests passed toolbar-click and Alt+F/Escape at
+960x640@1, 960x640@2 and961x641@1.25, physical containment and cross-owner
+exclusion. Fixed headless client insets, physical monitor lookup, 64-bit
+nearest-display distance (previously overflowed at48192px), independent size
+scaling for DIPToScreenRect and menu border/shadow containment. Chromium source
+regressions exist but unit-test binaries were not built under the chrome-only
+incremental-build rule; runtime gates cover the regressions.
+
+## Remaining work in priority order
+
+1. Extend real decoded/input gates and fix required flyouts: right-click context
+   menu, select popup/change selection, omnibox suggestions, bubbles, tooltip,
+   JavaScript dialogs, secure-origin permission prompts (no auto-accept flags),
+   nested edge menus, extension/profile popups. Require GPU/QSV and CPU/software,
+   alpha/ROI/close restoration, popup-only updates, three DSFs and no desktop UI.
+2. Finish shared hit-test/restack policy, Aura reparent/stack observers,
+   unknown-owner diagnostics, hover exits, held-state cancellation across popup
+   capture/focus/destruction and dialog text acceptance. Exercise cache/credit
+   bounds, slow viewers, repeated popup churn and lifetime/recovery gates.
+3. M5 step6: independent per-window videos/tracks/encoders and frontend cards.
+4. End-to-end multi-touch/tap/scroll/pinch and remaining codebase cleanup.
+5. Only after MVP: oneVPL/NVENC, then paused isolation.
+
+Never merge partial flyouts to main. Chromium commits need the required
+coauthor trailer, then `./cr.cmd export wip/mvp-flyouts` before committing infra
+patches. Keep the qualified source `work` ref unchanged. Don't commit build
+outputs or trace artifacts.
