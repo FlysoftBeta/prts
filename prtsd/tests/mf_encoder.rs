@@ -148,14 +148,13 @@ fn hardware_live_bitrate_cap_is_effective() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Strict resource-lifetime gate. Currently exposes a preexisting Intel MFT
-/// registry watcher leak (one key/event/wait packet per activation on UHD630).
+/// Strict resource-lifetime gate for real hardware activation and teardown.
 #[test]
-#[ignore = "requires Intel QSV; known driver lifetime failure tracked in phase2-m4.md"]
+#[ignore = "requires Intel QSV; run --ignored --nocapture"]
 fn hardware_encoder_creation_does_not_leak_handles() -> anyhow::Result<()> {
     use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
     let mut counts = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..20 {
         drop(MfEncoder::new(640, 480, 2_000_000, 30)?);
         let mut minimum = u32::MAX;
         for _ in 0..20 {
@@ -170,7 +169,7 @@ fn hardware_encoder_creation_does_not_leak_handles() -> anyhow::Result<()> {
     }
     eprintln!("QSV create/close settled process handles: {counts:?}");
     anyhow::ensure!(
-        counts[2] <= counts[0] + 2,
+        counts.iter().all(|count| *count <= counts[0] + 2),
         "Hardware MFT handle growth: {counts:?}"
     );
     Ok(())

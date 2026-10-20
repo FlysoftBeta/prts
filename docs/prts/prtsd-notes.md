@@ -426,3 +426,22 @@ the protocol; physical device removal has not been injected.
 Qualification commands and measurements: `phase2-m4.md`. Intel UHD 630 native
 capture logs vendor 8086/device 9bc5, hardware enabled, SwiftShader false, LUID
 0x000000000000e369 matching prtsd on this boot. No other vendor is qualified.
+
+MF activation lifetime fix (2026-10-20): hardware-only MFTEnumEx still chooses
+the encoder, but its MFT_TRANSFORM_CLSID_Attribute is instantiated with
+CoCreateInstance rather than ActivateObject. CDB traced the former +3 handles
+per encoder/restart to mfplat's CoRegisterDeviceCatalog path and combase's WIL
+registry watcher on the adapter Classes key; matching catalog revoke calls and
+all MFT shutdown variants did not reclaim it. Raw activation grows through 20
+cycles even without a DXGI manager or media types. Direct CLSID creation is
+flat, and the full encoder lifetime test passes 20 cycles at exactly 299 handles.
+This removes growth across resize, bitrate restart and reconnect without a
+pool or a relaxed handle gate. Low-latency codec settings and software fallback
+remain. A driver whose hardware CLSID cannot be created directly reports an
+initialization error and falls back to software; no ActivateObject retry is
+made. Other vendors/device-only COM registration remain unqualified. See
+phase2-m4.md for the runtime versions, stack, differential probe and results.
+The unchanged browser_m4 strict three-cycle gate passes at 392/391/391 handles;
+QSV browser E2E passes with gpu-texture and d3d11-zero-copy. Release build,
+16 ordinary tests, all three opt-in hardware tests, all-target Clippy with
+warnings denied and fmt check pass. No Chromium change or rebuild was needed.

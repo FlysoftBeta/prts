@@ -1,8 +1,9 @@
 ﻿# Phase 2/3 M4: D3D11 texture capture and QSV input
 
-Implemented fast path; **acceptance signoff is blocked by a preexisting Intel
-MFT handle leak**. Three complete GPU capture/QSV/teardown cycles succeed, but
-the strict process-handle check fails (360 → 363 → 366). Do not call M4 done.
+Implemented fast path. The Intel activation handle leak is fixed by creating the
+enumerated hardware CLSID directly; the focused lifetime gate now passes 20
+cycles with exactly 299 handles. See the handle-lifetime results below for the
+cause, compatibility limits, and subsequent browser qualification.
 
 ## Design
 
@@ -98,7 +99,7 @@ browser_m4, browser_m4_recovery, browser_m4_bench; hardware lifetime regression;
 Node browser E2E actual-path assertions and optional process measurements;
 protocol/hooks/component notes, this document, journal and STATUS. Staged only.
 
-## Qualification commands and results
+## Earlier qualification commands and results (before activation fix)
 
 All commands use release binaries for browser/encoder acceptance. Logs are in
 `C:/src/chromium/prts-m4-*`; the append-only journal records individual runs.
@@ -175,31 +176,101 @@ The CPU1080p run lowered its target to332110 bps via REMB; Intel emitted1074000
 bps and the existing measured guard switched to software. Its CPU figures are
 not a native-QSV comparison. Both complete measurement E2Es passed (~40/42 s).
 
-## Blocking handle-lifetime result and exact next step
+## Handle lifetime: root cause and fix (2026-10-20)
 
-The failure is real: do not raise the tolerance or claim leak-free acceptance.
-A focused MFT-create/drop test reproduces +3 handles even without frames. Native
-handle-type/name diagnostics show one registry key under the Intel display
-adapter's `Control/Class/{4d36e968-e325-11ce-bfc1-08002be10318}/0000/Classes`, one
-event and one wait-completion packet per hardware activation. Registry watchers
-survive successful IMFShutdown, IMFActivate::ShutdownObject and manager detach.
-Same-thread reactivation also leaks. MFStartup-only, DXGI-manager-only, and
-MFTEnumEx-only loops stay flat after initialization. Exact pre-M4 HEAD module
-also leaks (250/253/256/259/262), establishing that GPU import did not introduce
-this failure. Temporary diagnostic code/Wdk features were removed; logs remain.
+The earlier +3-handle result was real and also reproduced with the exact pre-M4
+encoder. NtQuery handle enumeration identified one registry key under the Intel
+adapter's `Control/Class/{4d36e968-e325-11ce-bfc1-08002be10318}/0000/Classes`, an
+unnamed event and an unnamed WaitCompletionPacket per activation. Raw activation
+without media types, frames or a DXGI manager still grows through 20 cycles:
+316 to 371 (three per cycle with two unrelated handles closing late). Reusing
+the same IMFActivate while calling ShutdownObject each cycle does not bound it.
+MFStartup-only, DXGI-manager-only and MFTEnumEx-only were flat. Same-thread COM,
+IMFShutdown, flush/end-streaming, manager detach and balanced MF shutdown had
+already failed to fix it; these hypotheses were not repeated.
 
-A focused reproducible gate is retained:
+CDB breakpoints on NtNotifyChangeKey identify the owner precisely:
+
+```text
+mfplat!CMFTransformActivate::InstantiateTransform
+  combase!CoRegisterDeviceCatalog
+    combase!DeviceCatalogs::AddCatalog
+      combase!DeviceCatalog::StartChangeNotification
+        combase!wil::registry_watcher_t<...>::create_common
+          KERNELBASE!RegNotifyChangeKeyValue
+            ntdll!NtNotifyChangeKey
+```
+
+The watcher is created by **combase.dll**, requested by **mfplat.dll**, before
+the Intel transform is configured. A second CDB experiment observed matching
+CoRegisterDeviceCatalog/CoRevokeDeviceCatalog calls (20 of each) on raw activation,
+yet handles continued growing. This isolates a runtime device-catalog watcher
+lifetime defect on this host; it is not evidence that an Intel DLL directly
+opens the leaked key. Tested versions: mfplat.dll 10.0.26100.9278 and combase.dll
+10.0.26100.8875. The Intel MFT is mfx_mft_h264ve_64.dll from the installed
+iigd_dch driver package. Logs: `C:/src/chromium/prts-m4leak-watch2.log` and
+`prts-m4leak-catalog.log`; earlier NtQuery type/name logs are `prts-m4-mf-handles-*`.
+The later `prts-m4leak-names.log` confirms the associated event is unnamed and
+auto-reset and the WaitCompletionPackets have no names.
+
+The fix retains hardware-only MFTEnumEx enumeration and Intel preference, reads
+MFT_TRANSFORM_CLSID_Attribute, and uses CoCreateInstance(CLSCTX_INPROC_SERVER)
+instead of IMFActivate::ActivateObject. The CLSID is discovered, not hardcoded
+(on this host: 4BE8D3C0-0515-4A37-AD55-E4BAE19AF471). This bypasses the leaking
+device-catalog registration path. No activation object is activated, so no
+ShutdownObject call is needed. Transform flush/end-streaming/IMFShutdown and
+COM/MF balance remain. Low latency, CBR, baseline, zero B pictures, IDR, GPU
+manager/samples and bitrate restart behavior remain intact.
+
+No pool, process-lifetime retained encoders, warmup allowance or gate relaxation
+is required. If the enumerated CLSID cannot be created directly on another
+driver/system, hardware initialization reports that error and existing software
+fallback applies; it does not retry the leaking ActivateObject path. Device-only
+COM registration and other vendors remain unqualified. This fix avoids the
+runtime defect; it does not repair Windows' ActivateObject implementation.
+
+Reproduce the raw differential with the ignored diagnostic test:
+`PRTS_MF_PROBE=activate|cocreate cargo test --release --test mf_activation_diagnostic -- --ignored --nocapture`.
+Use PowerShell environment assignment on Windows. This isolated test deliberately
+prints raw counts rather than serving as an acceptance gate. CoCreateInstance
+is flat for all 20 cycles (305, then 303 after unrelated cleanup).
+
+The strict gate is
 `cargo test --release --test mf_encoder hardware_encoder_creation_does_not_leak_handles -- --ignored --nocapture`.
-First resolve the Intel activation/driver registry-watcher lifetime (or qualify
-an updated driver), then rerun this gate and all three browser_m4 cycles. Two
-functional hardware tests remain independent of this failing lifetime test.
-No speculative encoder pool or relaxed acceptance threshold was introduced.
+It now checks **every one of 20 cycles** against the first sample with the
+original +2 tolerance. Full encoder creation/drop passed with **299 on all 20
+cycles**. Both hardware functional regressions also passed: 90/90 decoded,
+requested nonperiodic IDR, native bitrate restart to 999998 bps at a 1 Mbps
+target, and existing low-cap software fallback at 155057 bps, 150/150 decoded.
+Log: `C:/src/chromium/prts-m4leak-mf-tests.log`.
+
+The unchanged release `PRTS_FRAME_MODE=gpu browser_m4` strict three-cycle gate
+also passes: **392 / 391 / 391 handles**, with 30/30 decoded QSV D3D11 samples
+per cycle (8.32 / 8.32 / 8.08 ms averages), exact page color, two targets,
+resize/DPR2, pacing, credit/resource/memory bounds and clean shutdown. Log:
+`C:/src/chromium/prts-m4leak-browser.log`. No warmup allowance was added.
+
+`PRTS_FRAME_MODE=gpu PRTS_TEST_ENCODER=qsv npm run e2e:browser` passes both
+tests in 13.60 s with actual **gpu-texture + d3d11-zero-copy** stats, decoded
+pixels/input, navigation, DPR2, target switching, two instances, async startup
+failure and exact daemon cleanup. Log: `C:/src/chromium/prts-m4leak-e2e.log`.
+The disconnected-desktop override was used; foreground focus is still
+unverified. Chromium was neither modified nor rebuilt for this fix.
+
+Final Rust checks after the fix: `cargo build --release --bins`, `cargo test`
+(16 ordinary tests passed, five opt-in tests ignored by default),
+`cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check` all pass.
+All three hardware tests were separately executed and passed as described above;
+the additional ignored raw probe was executed in both modes. Logs are
+`C:/src/chromium/prts-m4leak-release.log`, `prts-m4leak-cargo-test.log`, and
+`prts-m4leak-clippy.log`. Source, tests, notes and journal are staged only;
+no commit or Chromium rebuild was made. Both strict lifetime gates now pass.
 
 Other gaps: physical device-removal injection; acquired-mutex/device-loss still
 requires protocol restart; connected-desktop focus; Windows10/other-GPU and
 AppContainer qualification; asynchronous browser GPU completion.
 
-## Final cleanup verification
+## Earlier cleanup verification (before the activation fix)
 
 After removing temporary diagnostics, `cargo build --release --bins` passed
 (release-final.log), final `cargo test` passed16 ordinary/four ignored, all-target
@@ -212,7 +283,5 @@ rejection, exact CPU generation3 pixels and shutdown. Final auto/QSV E2E passed
 with actual GPU/zero-copy assertions. Final focused hardware lifetime test
 remains FAIL (see prts-m4-final-lifetime.log). No signoff, no threshold increase.
 
-Final next step: resolve the Intel hardware activation registry watcher lifetime,
-then rerun the two strict lifetime gates. All source edits are compiling and
-infra changes staged; no PRTS browser/daemon or build remains running. Detailed
-checkpoint and exact log paths are in journal-m4.md.
+These failures are historical; the activation fix and new verification are
+recorded above and in journal-m4.md.

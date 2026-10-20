@@ -143,7 +143,6 @@ impl Drop for MfEncoder {
 }
 
 struct Hardware {
-    activation: IMFActivate,
     manager: Option<IMFDXGIDeviceManager>,
     mft: IMFTransform,
     events: IMFMediaEventGenerator,
@@ -170,10 +169,6 @@ impl Hardware {
             if let Ok(shutdown) = self.mft.cast::<IMFShutdown>() {
                 let _ = shutdown.Shutdown();
             }
-            // Match ActivateObject with ShutdownObject as well as releasing COM
-            // interfaces. The Intel registry watcher leak is tracked by M4's
-            // lifetime acceptance; these successful calls do not resolve it.
-            let _ = self.activation.ShutdownObject();
         }
     }
     fn reconfigure_bitrate(&mut self, bps: u32) -> Result<()> {
@@ -236,7 +231,6 @@ impl Hardware {
                     Ok(hw) => return Ok(hw),
                     Err(e) => {
                         errors.push(format!("{name}: {e:#}"));
-                        let _ = activate.ShutdownObject();
                     }
                 }
             }
@@ -252,7 +246,15 @@ impl Hardware {
         fps: u32,
     ) -> Result<Self> {
         unsafe {
-            let mft: IMFTransform = activate.ActivateObject()?;
+            // ActivateObject registers the adapter's COM device catalog on every
+            // call. On this Windows runtime each registration retains a registry
+            // watcher (Key/Event/WaitCompletionPacket) after ShutdownObject.
+            // Instantiate the hardware CLSID selected by MFTEnumEx directly to
+            // avoid that registration path. Failure still uses software fallback;
+            // do not retry ActivateObject and reintroduce unbounded growth.
+            let clsid = activate.GetGUID(&MFT_TRANSFORM_CLSID_Attribute)?;
+            let mft: IMFTransform = CoCreateInstance(&clsid, None, CLSCTX_INPROC_SERVER)
+                .context("instantiate enumerated hardware MFT CLSID")?;
             let attrs = mft.GetAttributes()?;
             ensure!(
                 attrs.GetUINT32(&MF_TRANSFORM_ASYNC)? != 0,
@@ -286,7 +288,6 @@ impl Hardware {
                 None
             };
             let mut hw = Self {
-                activation: activate.clone(),
                 manager,
                 mft,
                 events,
