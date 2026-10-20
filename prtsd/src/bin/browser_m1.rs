@@ -235,7 +235,8 @@ mod acceptance {
         }
         let mut raw = ready(path)?;
         let mut record = hello();
-        record.payload[..8].copy_from_slice(&[2, 0, 0, 0, 2, 0, 0, 0]);
+        // Both v1 and v2 are supported during the M5 migration.
+        record.payload[..8].copy_from_slice(&[3, 0, 0, 0, 3, 0, 0, 0]);
         record.write(&mut raw.command)?;
         let response = receive(&mut raw)?;
         ensure!(

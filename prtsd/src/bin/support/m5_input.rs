@@ -20,12 +20,26 @@ impl InputFixture {
             while !flag.load(std::sync::atomic::Ordering::Relaxed) {
                 if let Ok((mut stream, _)) = listener.accept() {
                     workers.push(thread::spawn(move || {
+                    // Winsock accept inherits the listener's nonblocking mode.
+                    // Wait for complete HTTP headers instead of dropping a
+                    // connection on WSAEWOULDBLOCK before request bytes arrive.
+                    if let Err(error) = stream.set_nonblocking(false) {
+                        eprintln!("M5 fixture blocking mode failed: {error:?}");
+                        return;
+                    }
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
                     let mut request = [0; 8192];
                     let mut n=0;
                     while !request[..n].windows(4).any(|v|v==b"\r\n\r\n") {
                       if n==request.len(){return;}
-                      match stream.read(&mut request[n..]){Ok(0)|Err(_)=>return,Ok(count)=>n+=count}
+                      match stream.read(&mut request[n..]){
+                        Ok(0)=>return,
+                        Err(error)=>{eprintln!("M5 fixture HTTP read failed after {n} bytes: {error:?}");return;},
+                        Ok(count)=>n+=count
+                      }
+                    }
+                    if std::env::var_os("PRTS_M5_FIXTURE_LOG").is_some() {
+                        eprintln!("M5 fixture port={port} request={}", String::from_utf8_lossy(&request[..n]).lines().next().unwrap_or(""));
                     }
                     let blue = String::from_utf8_lossy(&request[..n]).contains("/blue");
                     let iframe=child_port.map_or(String::new(),|p|format!("<iframe onload='this.contentWindow.postMessage(1,\"*\")' style='position:absolute;left:320px;top:0;width:280px;height:280px;border:0' src='http://127.0.0.2:{p}/child'></iframe>"));
@@ -48,7 +62,9 @@ function report(){{s.keys=[...held];s.scroll=scrollY;s.dpr=devicePixelRatio;s.fo
                         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
-                    let _ = stream.write_all(response.as_bytes());
+                    if let Err(error) = stream.write_all(response.as_bytes()) {
+                        eprintln!("M5 fixture HTTP write failed: {error:?}");
+                    }
                     let _ = stream.shutdown(std::net::Shutdown::Write);
                     }));
                 } else {

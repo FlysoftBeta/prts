@@ -98,6 +98,10 @@ PRTS (custom headless Chromium)  --anonymous pipes-->  prtsd (Rust, windows-rs)
 3. Integrate: zero-copy texture -> QSV encode; isolation (Job Object + AppContainer) with GPU verified.
 4. Polish: network simulation, quality stats, multi-instance, docs (README with run steps).
 
+**Priority order (user, 2026-10-20):** finish m5a2 -> ISOLATION (Job Object + AppContainer/LPAC,
+GPU verified, per isolation.md) -> m5b (popups + per-window streams) -> polish -> encoder
+backends LAST (oneVPL QSV, NVENC, MF kept as fallback, benchmark).
+
 Definition of "usable": `node server` -> open frontend -> create instance -> see the PRTS page
 rendering live via WebRTC, click/type into it, open a 2nd instance, see stats.
 

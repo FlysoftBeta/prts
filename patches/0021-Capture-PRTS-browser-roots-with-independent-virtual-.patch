@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
-Date: Tue, 20 Oct 2026 14:54:34 +0800
-Subject: [PATCH 23/38] WIP: capture PRTS v2 browser roots with independent
- headless displays
+Date: Tue, 20 Oct 2026 19:38:18 +0800
+Subject: [PATCH 21/23] Capture PRTS browser roots with independent virtual
+ display sizing and DSF
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 
@@ -184,10 +184,23 @@ index aba82f3986..18f659efbd 100644
                   uint64_t target,
                   uint64_t generation,
 diff --git a/chrome/browser/prts/prts_controller.cc b/chrome/browser/prts/prts_controller.cc
-index 1f3e10fb33..338200d2ac 100644
+index 1f3e10fb33..2b28069bda 100644
 --- a/chrome/browser/prts/prts_controller.cc
 +++ b/chrome/browser/prts/prts_controller.cc
-@@ -144,7 +144,7 @@ void PrtsController::Receive(Record record) {
+@@ -136,7 +136,11 @@ void PrtsController::Receive(Record record) {
+   if (ready_ && record.type >= 0x200 && record.type <= 0x207 &&
+       record.id == 0) {
+     if (major_ == 2) {
+-      Error(0, 4, "Window input is not enabled");
++      Encoder fault;
++      fault.Int(4, 4);
++      fault.String("Window input is not enabled");
++      fault.Int(0, 1);
++      Send(8, 0, std::move(fault.data));
+     } else {
+       targets_->Input(record.type, record.payload);
+     }
+@@ -144,7 +148,7 @@ void PrtsController::Receive(Record record) {
    }
    if (ready_ && (((record.type == 7 || record.type == 3) && !(record.id & 1)) ||
                   record.type == 0x320)) {
@@ -196,7 +209,7 @@ index 1f3e10fb33..338200d2ac 100644
        Failed();
      }
      return;
-@@ -222,7 +222,7 @@ void PrtsController::Receive(Record record) {
+@@ -222,7 +226,7 @@ void PrtsController::Receive(Record record) {
      ack.Int(8192, 4);
      ack.Int(8192, 4);
      ack.Int(64000000, 4);
@@ -205,7 +218,7 @@ index 1f3e10fb33..338200d2ac 100644
      // Enqueue ACK before enabling any target notifications on the same writer.
      if (!pipe_.Send(2, record.id, std::move(ack.data))) {
        Failed();
-@@ -235,7 +235,7 @@ void PrtsController::Receive(Record record) {
+@@ -235,7 +239,7 @@ void PrtsController::Receive(Record record) {
        targets_->SetWindowMode();
        windows_ = std::make_unique<PrtsWindowRegistry>(base::BindRepeating(
            &PrtsController::Send, weak_factory_.GetWeakPtr()));
@@ -214,7 +227,7 @@ index 1f3e10fb33..338200d2ac 100644
      }
      return;
    }
-@@ -281,7 +281,7 @@ void PrtsController::Receive(Record record) {
+@@ -281,7 +285,7 @@ void PrtsController::Receive(Record record) {
        Failed();
      }
    } else if (record.type == 0x321 || record.type == 0x322) {
@@ -224,7 +237,7 @@ index 1f3e10fb33..338200d2ac 100644
      }
    } else {
 diff --git a/chrome/browser/prts/prts_window_registry.cc b/chrome/browser/prts/prts_window_registry.cc
-index 7a6b5e2426..323211bd63 100644
+index 7a6b5e2426..e49921d062 100644
 --- a/chrome/browser/prts/prts_window_registry.cc
 +++ b/chrome/browser/prts/prts_window_registry.cc
 @@ -18,6 +18,7 @@
@@ -235,10 +248,20 @@ index 7a6b5e2426..323211bd63 100644
  #include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
  #include "chrome/browser/ui/browser_window/public/create_browser_window.h"
  #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
-@@ -29,20 +30,33 @@
+@@ -25,24 +26,43 @@
+ #include "chrome/browser/ui/navigator/browser_navigator_params.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
++#include "chrome/browser/ui/views/frame/browser_view.h"
++#include "chrome/browser/ui/views/frame/contents_web_view.h"
++#include "chrome/browser/ui/views/location_bar/location_bar_view.h"
++#include "chrome/browser/ui/views/tabs/tab_strip.h"
++#include "chrome/browser/ui/views/toolbar/toolbar_view.h"
+ #include "content/public/browser/navigation_controller.h"
  #include "content/public/browser/navigation_handle.h"
  #include "content/public/browser/web_contents.h"
  #include "content/public/browser/web_contents_observer.h"
++#include "ui/aura/headless_root_size.h"
 +#include "ui/aura/window.h"
 +#include "ui/aura/window_tree_host.h"
  #include "ui/base/base_window.h"
@@ -270,7 +293,7 @@ index 7a6b5e2426..323211bd63 100644
      }
    }
    struct Size {
-@@ -55,6 +69,10 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -55,6 +75,10 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
      Size size;
      uint64_t generation = 1;
      bool announced = false, closing = false;
@@ -281,7 +304,7 @@ index 7a6b5e2426..323211bd63 100644
    };
    class Tab : public content::WebContentsObserver {
     public:
-@@ -75,7 +93,10 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -75,7 +99,10 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
      const uint64_t id;
      uint64_t opener = 0;
    };
@@ -293,7 +316,7 @@ index 7a6b5e2426..323211bd63 100644
      observation_.Observe(GlobalBrowserCollection::GetInstance());
      prts::Encoder e;
      for (uint32_t v : {2u, 0u, 256u, 2u}) {
-@@ -108,6 +129,9 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -108,6 +135,9 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
          FROM_HERE, base::BindOnce(&Impl::Reconcile, weak_.GetWeakPtr()));
    }
    Tab* Find(content::WebContents* contents) {
@@ -303,7 +326,7 @@ index 7a6b5e2426..323211bd63 100644
      for (auto& [id, t] : tabs_) {
        if (t->web_contents() == contents) {
          return t.get();
-@@ -171,7 +195,83 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -171,7 +201,108 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
        send_.Run(w.announced ? 0x491 : 0x490, 0, std::move(bytes));
        w.announced = true;
      }
@@ -324,6 +347,8 @@ index 7a6b5e2426..323211bd63 100644
 +    if (!root) {
 +      return;
 +    }
++    root->SetProperty(aura::kHeadlessRootSizeKey,
++                      new gfx::Size(w.size.width, w.size.height));
 +    // Each Browser owns a separate synthetic monitor. This mutates headless
 +    // Screen only; it never changes physical Windows display configuration.
 +    display::Display monitor(w.display);
@@ -336,6 +361,29 @@ index 7a6b5e2426..323211bd63 100644
 +      w.display = display::HeadlessScreenManager::Get()->AddDisplay(monitor);
 +    }
 +    root->GetHost()->SetBoundsInPixels(pixels);
++    // DesktopWindowTreeHostWin passes outer bounds into its HWND handler,
++    // while GetBoundsInPixels reports the client. Headless custom frames still
++    // have invisible resize insets. Measure these after moving to the display
++    // (the insets depend on DSF), then correct the outer rectangle.
++    gfx::Rect outer = pixels;
++    for (int attempt = 0; attempt < 3; ++attempt) {
++      auto client = root->GetHost()->GetBoundsInPixels();
++      if (client == pixels) {
++        break;
++      }
++      outer.Offset(pixels.x() - client.x(), pixels.y() - client.y());
++      outer.set_size(
++          gfx::Size(outer.width() + pixels.width() - client.width(),
++                    outer.height() + pixels.height() - client.height()));
++      root->GetHost()->SetBoundsInPixels(outer);
++    }
++    // Aura normally encloses physical pixels back to integer DIPs. At a
++    // fractional scale that can add one logical pixel to the requested size.
++    // Retain the protocol's logical canvas; the compositor still allocates
++    // ceil(DIP * DSF) device pixels.
++    root->SetBounds(gfx::Rect(w.size.width, w.size.height));
++    w.browser->GetWindow()->GetNativeWindow()->SetBounds(
++        gfx::Rect(w.size.width, w.size.height));
 +  }
 +  void Scene(Window& w) {
 +    prts::Encoder e;
@@ -366,7 +414,7 @@ index 7a6b5e2426..323211bd63 100644
 +    }
 +    e.Int(0, 1);
 +    send_.Run(0x493, 0, std::move(e.data));
-+  }
+   }
 +  void Configure(Window& w) {
 +    Scene(w);
 +    capture_.ConfigureRoot(Root(w), w.source, w.source_generation,
@@ -382,12 +430,12 @@ index 7a6b5e2426..323211bd63 100644
 +        return;
 +      }
 +    }
-   }
++  }
 +  bool Frame(const prts::Record& record) { return capture_.Receive(record); }
    void Reconcile() {
      pending_ = false;
      if (mutating_) {
-@@ -186,6 +286,9 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -186,6 +317,9 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
        }
      }
      for (auto& [id, w] : windows_) {
@@ -397,7 +445,7 @@ index 7a6b5e2426..323211bd63 100644
        Publish(w);
      }
    }
-@@ -208,6 +311,11 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -208,6 +342,11 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
        browser->GetTabStripModel()->RemoveObserver(this);
        auto id = it->first;
        bool announced = it->second.announced;
@@ -409,7 +457,7 @@ index 7a6b5e2426..323211bd63 100644
        windows_.erase(it);
        snapshots_.erase(id);
        if (input_ == id) {
-@@ -289,6 +397,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -289,6 +428,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
        for (auto& [id, w] : windows_) {
          if (w.browser == browser) {
            w.size = size;
@@ -417,10 +465,56 @@ index 7a6b5e2426..323211bd63 100644
            if (activate) {
              input_ = id;
            }
-@@ -301,6 +410,57 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -301,6 +441,103 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
        return;
      }
      auto id = d.Int(8);
++    if (r.type == 0x42d &&
++        base::CommandLine::ForCurrentProcess()->HasSwitch("prts-test-hooks")) {
++      if (!d.Done()) {
++        Error(r.id, 1, "Invalid geometry probe");
++        return;
++      }
++      auto it = windows_.find(id);
++      if (it == windows_.end()) {
++        Error(r.id, 2, "Unknown probe window");
++        return;
++      }
++      auto& w = it->second;
++      auto* root = Root(w);
++      auto* view = BrowserView::GetBrowserViewForBrowser(w.browser);
++      prts::Encoder e;
++      auto* host = root->GetHost();
++      e.Int(host->compositor()->size().width(), 4);
++      e.Int(host->compositor()->size().height(), 4);
++      e.Int(std::bit_cast<uint64_t>(
++                static_cast<double>(host->device_scale_factor())),
++            8);
++      auto origin = root->GetBoundsInScreen().origin();
++      auto bounds = [&](views::View* v) {
++        auto rect = v ? v->GetBoundsInScreen() : gfx::Rect();
++        rect.Offset(-origin.x(), -origin.y());
++        for (double value :
++             {static_cast<double>(rect.x()), static_cast<double>(rect.y()),
++              static_cast<double>(rect.width()),
++              static_cast<double>(rect.height())}) {
++          e.Int(std::bit_cast<uint64_t>(value), 8);
++        }
++      };
++      bounds(view->tab_strip_view());
++      bounds(view->toolbar());
++      bounds(view->GetLocationBarView());
++      bounds(view->contents_web_view_for_testing());
++      auto* strip = view->horizontal_tab_strip_for_testing();
++      e.Int(strip ? strip->GetTabCount() : 0, 4);
++      if (strip) {
++        for (int i = 0; i < strip->GetTabCount(); ++i) {
++          bounds(strip->tab_at(i));
++        }
++      }
++      send_.Run(0x48f, r.id, std::move(e.data));
++      return;
++    }
 +    if (r.type == 0x403 || r.type == 0x410 || r.type == 0x411) {
 +      Size size;
 +      bool valid = true;
@@ -475,7 +569,7 @@ index 7a6b5e2426..323211bd63 100644
      // Standalone acceptance driver only. These invoke real TabStripModel
      // operations, including its replacement and cross-window detach observers.
      if ((r.type == 0x42e || r.type == 0x42f) &&
-@@ -445,6 +605,9 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -445,6 +682,9 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
  
   private:
    PrtsTargetRegistry::SendCallback send_;
@@ -485,7 +579,7 @@ index 7a6b5e2426..323211bd63 100644
    uint64_t next_ = 0, input_ = 0;
    bool pending_ = false, mutating_ = false;
    std::map<uint64_t, Window> windows_;
-@@ -457,8 +620,11 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -457,8 +697,11 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
  PrtsWindowRegistry::PrtsWindowRegistry(PrtsTargetRegistry::SendCallback send)
      : impl_(std::make_unique<Impl>(std::move(send))) {}
  PrtsWindowRegistry::~PrtsWindowRegistry() = default;
@@ -513,3 +607,238 @@ index 111ac6784f..2718153776 100644
    void Handle(const prts::Record& record);
  
   private:
+diff --git a/ui/aura/BUILD.gn b/ui/aura/BUILD.gn
+index b3c6d5f588..7a5c33c542 100644
+--- a/ui/aura/BUILD.gn
++++ b/ui/aura/BUILD.gn
+@@ -33,6 +33,7 @@ component("aura") {
+     "env_observer.h",
+     "event_injector.h",
+     "host_frame_rate_throttler.h",
++    "headless_root_size.h",
+     "input_state_lookup.h",
+     "layout_manager.h",
+     "native_window_occlusion_tracker.h",
+diff --git a/ui/aura/headless_root_size.h b/ui/aura/headless_root_size.h
+new file mode 100644
+index 0000000000..6aee61c4d5
+--- /dev/null
++++ b/ui/aura/headless_root_size.h
+@@ -0,0 +1,14 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef UI_AURA_HEADLESS_ROOT_SIZE_H_
++#define UI_AURA_HEADLESS_ROOT_SIZE_H_
++#include "ui/aura/client/aura_constants.h"
++
++namespace aura {
++// Optional logical canvas on a headless root. Keeps inverse pixel enclosure
++// from adding a DIP at fractional scales; compositor allocation remains
++// physical.
++AURA_EXPORT extern const WindowProperty<gfx::Size*>* const kHeadlessRootSizeKey;
++}  // namespace aura
++#endif
+diff --git a/ui/aura/window_tree_host.cc b/ui/aura/window_tree_host.cc
+index 9596b0ed52..4e1e3e1e99 100644
+--- a/ui/aura/window_tree_host.cc
++++ b/ui/aura/window_tree_host.cc
+@@ -25,6 +25,7 @@
+ #include "ui/aura/client/capture_client.h"
+ #include "ui/aura/client/cursor_client.h"
+ #include "ui/aura/env.h"
++#include "ui/aura/headless_root_size.h"
+ #include "ui/aura/host_frame_rate_throttler.h"
+ #include "ui/aura/native_window_occlusion_tracker.h"
+ #include "ui/aura/scoped_keyboard_hook.h"
+@@ -57,6 +58,7 @@
+ #endif  // BUILDFLAG(IS_WIN)
+ 
+ namespace aura {
++DEFINE_OWNED_UI_CLASS_PROPERTY_KEY(gfx::Size, kHeadlessRootSizeKey)
+ 
+ namespace {
+ 
+@@ -174,14 +176,16 @@ void WindowTreeHost::SetRootTransform(const gfx::Transform& transform) {
+ gfx::Transform WindowTreeHost::GetInverseRootTransform() const {
+   gfx::Transform invert;
+   gfx::Transform transform = GetRootTransform();
+-  if (!transform.GetInverse(&invert))
++  if (!transform.GetInverse(&invert)) {
+     return transform;
++  }
+   return invert;
+ }
+ 
+ void WindowTreeHost::SetDisplayTransformHint(gfx::OverlayTransform transform) {
+-  if (compositor()->display_transform_hint() == transform)
++  if (compositor()->display_transform_hint() == transform) {
+     return;
++  }
+ 
+   compositor()->SetDisplayTransformHint(transform);
+   UpdateCompositorScaleAndSize(GetBoundsInPixels().size());
+@@ -196,8 +200,9 @@ gfx::Transform WindowTreeHost::GetInverseRootTransformForLocalEventCoordinates()
+     const {
+   gfx::Transform invert;
+   gfx::Transform transform = GetRootTransformForLocalEventCoordinates();
+-  if (!transform.GetInverse(&invert))
++  if (!transform.GetInverse(&invert)) {
+     return transform;
++  }
+   return invert;
+ }
+ 
+@@ -266,8 +271,9 @@ void WindowTreeHost::OnCursorVisibilityChanged(bool show) {
+     ui::EventDispatchDetails details = dispatcher()->DispatchMouseExitAtPoint(
+         nullptr, dispatcher()->GetLastMouseLocationInRoot(),
+         ui::EF_CURSOR_HIDE);
+-    if (details.dispatcher_destroyed)
++    if (details.dispatcher_destroyed) {
+       return;
++    }
+   }
+ 
+   OnCursorVisibilityChangedNative(show);
+@@ -313,8 +319,9 @@ ui::EventDispatchDetails WindowTreeHost::DispatchKeyEventPostIME(
+   // We should bypass event rewriters here as they've been tried before.
+   ui::EventDispatchDetails dispatch_details =
+       GetEventSink()->OnEventFromSource(event);
+-  if (!dispatch_details.dispatcher_destroyed)
++  if (!dispatch_details.dispatcher_destroyed) {
+     dispatcher_->set_skip_ime(false);
++  }
+   return dispatch_details;
+ }
+ 
+@@ -355,11 +362,13 @@ gfx::Rect WindowTreeHost::GetBoundsInAcceleratedWidgetPixelCoordinates() {
+ std::unique_ptr<ScopedKeyboardHook> WindowTreeHost::CaptureSystemKeyEvents(
+     std::optional<base::flat_set<ui::DomCode>> dom_codes) {
+   // TODO(joedow): Remove the simple hook class/logic once this flag is removed.
+-  if (!base::FeatureList::IsEnabled(features::kSystemKeyboardLock))
++  if (!base::FeatureList::IsEnabled(features::kSystemKeyboardLock)) {
+     return std::make_unique<ScopedSimpleKeyboardHook>(std::move(dom_codes));
++  }
+ 
+-  if (CaptureSystemKeyEventsImpl(std::move(dom_codes)))
++  if (CaptureSystemKeyEventsImpl(std::move(dom_codes))) {
+     return std::make_unique<ScopedKeyboardHook>(weak_factory_.GetWeakPtr());
++  }
+   return nullptr;
+ }
+ 
+@@ -405,6 +414,9 @@ void WindowTreeHost::UpdateRootWindowSize() {
+ }
+ 
+ gfx::Rect WindowTreeHost::CalculateRootWindowBounds() const {
++  if (const auto* logical = window()->GetProperty(kHeadlessRootSizeKey)) {
++    return gfx::Rect(*logical);
++  }
+   return GetTransformedRootWindowBoundsFromPixelSize(
+       GetBoundsInPixels().size());
+ }
+@@ -440,8 +452,9 @@ void WindowTreeHost::UnlockMouse(Window* window) {
+   DCHECK(root_window);
+   Window::ScopedDeleteBlocker blocker(root_window);
+ 
+-  if (window->HasCapture())
++  if (window->HasCapture()) {
+     window->ReleaseCapture();
++  }
+ 
+   auto* cursor_client = client::GetCursorClient(root_window);
+   if (cursor_client) {
+@@ -483,8 +496,9 @@ WindowTreeHost::WindowTreeHost(std::unique_ptr<Window> window)
+ }
+ 
+ void WindowTreeHost::UpdateCompositorVisibility(bool visible) {
+-  if (!compositor())
++  if (!compositor()) {
+     return;
++  }
+ 
+   if (NativeOcclusionAffectsThrottle()) {
+     // If NativeOcclusionAffectsThrottle() is true, then this function should
+@@ -500,8 +514,9 @@ void WindowTreeHost::UpdateCompositorVisibility(bool visible) {
+ }
+ 
+ void WindowTreeHost::DestroyCompositor() {
+-  if (!compositor_)
++  if (!compositor_) {
+     return;
++  }
+ 
+   HostFrameRateThrottler::GetInstance().RemoveHost(this);
+ 
+@@ -530,8 +545,9 @@ void WindowTreeHost::DestroyDispatcher() {
+ }
+ 
+ void WindowTreeHost::OnAcceleratedWidgetMadeVisible(bool value) {
+-  if (accelerated_widget_made_visible_ == value)
++  if (accelerated_widget_made_visible_ == value) {
+     return;
++  }
+ 
+   accelerated_widget_made_visible_ = value;
+   // Always update the compositor (ignoring occlusion-state) as it is entirely
+@@ -596,8 +612,9 @@ void WindowTreeHost::OnHostResizedInPixels(
+   // The compositor is deleted from WM_DESTROY, but we don't delete things until
+   // WM_NCDESTROY, and it must be possible to still get some messages between
+   // these two.
+-  if (!compositor_)
++  if (!compositor_) {
+     return;
++  }
+ 
+   // If we don't have the actual preferred scale, don't overwrite the scale
+   // factor with the default value. See https://crbug.com/1285476 for details.
+@@ -639,11 +656,13 @@ void WindowTreeHost::OnHostLostWindowCapture() {
+   // root window has already been destroyed (e.g. when the ui::PlatformWindow is
+   // destroyed, and during destruction, it loses capture. See more details in
+   // http://crbug.com/770670)
+-  if (!window())
++  if (!window()) {
+     return;
++  }
+   Window* capture_window = client::GetCaptureWindow(window());
+-  if (capture_window && capture_window->GetRootWindow() == window())
++  if (capture_window && capture_window->GetRootWindow() == window()) {
+     capture_window->ReleaseCapture();
++  }
+ }
+ 
+ void WindowTreeHost::OnDisplayMetricsChanged(const display::Display& display,
+@@ -658,8 +677,9 @@ void WindowTreeHost::OnDisplayMetricsChanged(const display::Display& display,
+ // do for other OSes.
+ #if !BUILDFLAG(IS_CHROMEOS)
+   if (metrics & DISPLAY_METRIC_DEVICE_SCALE_FACTOR &&
+-      display.id() == GetDisplayId())
++      display.id() == GetDisplayId()) {
+     OnHostResizedInPixels(GetBoundsInPixels().size());
++  }
+ #endif
+ }
+ 
+@@ -813,8 +833,9 @@ void WindowTreeHost::OnCompositingAckDeprecated(ui::Compositor* compositor) {
+   // Currently, input is only throttled on ash and is not well supported on
+   // other platforms. See crbug.com/41359082.
+ #if BUILDFLAG(IS_CHROMEOS)
+-  if (!holding_pointer_moves_)
++  if (!holding_pointer_moves_) {
+     return;
++  }
+ 
+   dispatcher_->ReleasePointerMoves();
+   holding_pointer_moves_ = false;
+@@ -825,8 +846,10 @@ void WindowTreeHost::OnCompositingChildResizing(ui::Compositor* compositor) {
+   // Currently, input is only throttled on ash and is not well supported on
+   // other platforms. See crbug.com/41359082.
+ #if BUILDFLAG(IS_CHROMEOS)
+-  if (!Env::GetInstance()->throttle_input_on_resize() || holding_pointer_moves_)
++  if (!Env::GetInstance()->throttle_input_on_resize() ||
++      holding_pointer_moves_) {
+     return;
++  }
+   dispatcher_->HoldPointerMoves();
+   holding_pointer_moves_ = true;
+ #endif

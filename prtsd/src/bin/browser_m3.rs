@@ -60,6 +60,11 @@ mod acceptance {
         let browser = Browser::launch(
             std::env::var("PRTS_CHROME_PATH").unwrap_or_else(|_| DEFAULT_CHROME.into()),
         )?;
+        ensure!(
+            browser.hello.frame_modes == 2,
+            "M3 requires CPU transport; run with PRTS_FRAME_MODE=cpu (negotiated modes={})",
+            browser.hello.frame_modes
+        );
         let a = browser.create(
             "data:text/html,<body style='margin:0;background:rgb(220,30,60)'>",
             Size {

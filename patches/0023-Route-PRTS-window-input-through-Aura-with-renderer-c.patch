@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
-Date: Tue, 20 Oct 2026 15:40:04 +0800
-Subject: [PATCH 31/38] WIP: route PRTS window input through Aura with observed
- renderer completion
+Date: Tue, 20 Oct 2026 19:38:18 +0800
+Subject: [PATCH 23/23] Route PRTS window input through Aura with renderer
+ completion barriers
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 
@@ -34,12 +34,24 @@ index ce541aacd8..e353f93fda 100644
 +  "//chrome/browser/prts/prts_window_input.cc",
 +  "//chrome/browser/prts/prts_window_input.h",
  ]
+diff --git a/chrome/browser/prts/prts_target_registry.cc b/chrome/browser/prts/prts_target_registry.cc
+index 523404530b..f8dd762dff 100644
+--- a/chrome/browser/prts/prts_target_registry.cc
++++ b/chrome/browser/prts/prts_target_registry.cc
+@@ -386,6 +386,7 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+     }
+     profile_ = startup_profile->GetOriginalProfile();
+     startup_profile->GetPrefs()->SetBoolean(prefs::kPrintingEnabled, false);
++    profile_->GetPrefs()->SetBoolean(prefs::kPrintingEnabled, false);
+     off_the_record_ = startup_profile->IsOffTheRecord();
+     profile_keep_alive_ = ScopedProfileKeepAlive::TryAcquire(
+         profile_, ProfileKeepAliveOrigin::kHeadlessCommand);
 diff --git a/chrome/browser/prts/prts_window_input.cc b/chrome/browser/prts/prts_window_input.cc
 new file mode 100644
-index 0000000000..18292c9bdc
+index 0000000000..8494397f47
 --- /dev/null
 +++ b/chrome/browser/prts/prts_window_input.cc
-@@ -0,0 +1,431 @@
+@@ -0,0 +1,450 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -129,7 +141,7 @@ index 0000000000..18292c9bdc
 +  }
 +  views::Widget* Widget() {
 +    if (root_) {
-+      for (auto* child : root_->children()) {
++      for (auto child : root_->children()) {
 +        if (auto* widget = views::Widget::GetWidgetForNativeWindow(child)) {
 +          return widget;
 +        }
@@ -179,10 +191,16 @@ index 0000000000..18292c9bdc
 +      return;
 +    }
 +    auto stamp = event->time_stamp();
-+    content::DispatchWithAuraInputBarrier(
++    auto weak = weak_.GetWeakPtr();
++    auto cancel = content::DispatchWithAuraInputBarrier(
 +        contents_.Run(), stamp,
 +        base::BindOnce(&Impl::SendNow, weak_.GetWeakPtr(), std::move(event)),
 +        std::move(done));
++    if (weak) {
++      cancel_ = std::move(cancel);
++    } else if (cancel) {
++      std::move(cancel).Run();
++    }
 +  }
 +  void SendNow(std::unique_ptr<ui::Event> event) {
 +    if (!root_) {
@@ -192,6 +210,9 @@ index 0000000000..18292c9bdc
 +  }
 +  void Reset() {
 +    weak_.InvalidateWeakPtrs();
++    if (cancel_) {
++      std::move(cancel_).Run();
++    }
 +    deadline_.Stop();
 +    queue_.clear();
 +    busy_ = false;
@@ -199,6 +220,10 @@ index 0000000000..18292c9bdc
 +      return;
 +    }
 +    auto* host = root_->GetHost();
++    if (auto* capture = views::DesktopCaptureClient::GetCaptureWindowGlobal();
++        capture && capture->GetRootWindow() == root_) {
++      capture->ReleaseCapture();
++    }
 +    for (const auto& [vk, key] : keys_) {
 +      ui::KeyEvent release(ui::EventType::kKeyReleased, key.key_code(),
 +                           key.code(), ui::EF_IS_SYNTHESIZED, key.GetDomKey(),
@@ -209,7 +234,7 @@ index 0000000000..18292c9bdc
 +    for (uint32_t bit = 1; bit <= 16; bit <<= 1) {
 +      if (buttons_ & bit) {
 +        buttons_ &= ~bit;
-+        gfx::PointF point = point_;
++        gfx::PointF point(-1, -1);
 +        host->ConvertDIPToPixels(&point);
 +        ui::MouseEvent up(ui::EventType::kMouseReleased, point, point, Stamp(),
 +                          Flags(0, buttons_), Flags(0, bit));
@@ -310,9 +335,7 @@ index 0000000000..18292c9bdc
 +    if (repeat) {
 +      flags |= ui::EF_IS_REPEAT;
 +    }
-+    if (location == 3) {
-+      flags |= ui::EF_NUMPAD_KEY;
-+    }
++
 +    ui::KeyEvent event(type == 0x204 ? ui::EventType::kKeyPressed
 +                                     : ui::EventType::kKeyReleased,
 +                       static_cast<ui::KeyboardCode>(vk), dom_code, flags,
@@ -378,8 +401,9 @@ index 0000000000..18292c9bdc
 +    }
 +    Done();
 +  }
-+  void Key(ui::KeyEvent event) {
-+    event.set_time_stamp(Stamp());
++  void Key(ui::KeyEvent queued) {
++    ui::KeyEvent event(queued.type(), queued.key_code(), queued.code(),
++                       queued.flags(), queued.GetDomKey(), Stamp());
 +    if (event.type() == ui::EventType::kKeyPressed) {
 +      keys_.insert_or_assign(event.key_code(), event);
 +    } else {
@@ -420,12 +444,18 @@ index 0000000000..18292c9bdc
 +      auto event = ui::KeyEvent::FromCharacter(
 +          text[0], enter ? ui::VKEY_RETURN : ui::VKEY_UNKNOWN,
 +          ui::DomCode::NONE, Flags(modifiers, 0), Stamp());
-+      content::DispatchWithAuraInputBarrier(
++      auto weak = weak_.GetWeakPtr();
++      auto cancel = content::DispatchWithAuraInputBarrier(
 +          contents_.Run(), event.time_stamp(),
 +          base::BindOnce([](ui::TextInputClient* target,
 +                            ui::KeyEvent event) { target->InsertChar(event); },
 +                         base::Unretained(client), event),
 +          base::BindOnce(&Impl::Done, weak_.GetWeakPtr()));
++      if (weak) {
++        cancel_ = std::move(cancel);
++      } else if (cancel) {
++        std::move(cancel).Run();
++      }
 +    } else {
 +      client->InsertText(
 +          text,
@@ -452,6 +482,7 @@ index 0000000000..18292c9bdc
 +  bool busy_ = false, hover_ = false;
 +  base::TimeTicks last_stamp_;
 +  base::OneShotTimer deadline_;
++  base::OnceClosure cancel_;
 +  base::WeakPtrFactory<Impl> weak_{this};
 +};
 +PrtsWindowInput::PrtsWindowInput(
@@ -509,10 +540,10 @@ index 0000000000..c12a606157
 +}  // namespace prts
 +#endif
 diff --git a/chrome/browser/prts/prts_window_registry.cc b/chrome/browser/prts/prts_window_registry.cc
-index 2322068153..2eb2552dda 100644
+index 2322068153..cc0647956b 100644
 --- a/chrome/browser/prts/prts_window_registry.cc
 +++ b/chrome/browser/prts/prts_window_registry.cc
-@@ -19,6 +19,7 @@
+@@ -19,33 +19,40 @@
  #include "chrome/browser/profiles/profile.h"
  #include "chrome/browser/profiles/profile_manager.h"
  #include "chrome/browser/prts/prts_capture.h"
@@ -520,7 +551,23 @@ index 2322068153..2eb2552dda 100644
  #include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
  #include "chrome/browser/ui/browser_window/public/create_browser_window.h"
  #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
-@@ -39,6 +40,7 @@
+ #include "chrome/browser/ui/navigator/browser_navigator.h"
+ #include "chrome/browser/ui/navigator/browser_navigator_params.h"
++#include "chrome/browser/ui/omnibox/omnibox_view.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
+ #include "chrome/browser/ui/views/frame/browser_view.h"
+ #include "chrome/browser/ui/views/frame/contents_web_view.h"
+ #include "chrome/browser/ui/views/location_bar/location_bar_view.h"
++#include "chrome/browser/ui/views/omnibox/omnibox_view_views.h"
+ #include "chrome/browser/ui/views/tabs/tab_strip.h"
+ #include "chrome/browser/ui/views/toolbar/toolbar_view.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_contents_observer.h"
+ #include "ui/aura/headless_root_size.h"
  #include "ui/aura/window.h"
  #include "ui/aura/window_tree_host.h"
  #include "ui/base/base_window.h"
@@ -528,15 +575,16 @@ index 2322068153..2eb2552dda 100644
  #include "ui/base/page_transition_types.h"
  #include "ui/base/window_open_disposition.h"
  #include "ui/compositor/compositor.h"
-@@ -46,6 +48,7 @@
+ #include "ui/display/display.h"
  #include "ui/display/headless/headless_screen_manager.h"
  #include "ui/display/screen.h"
++#include "ui/views/focus/focus_manager.h"
  #include "ui/views/widget/desktop_aura/desktop_headless_input.h"
 +#include "ui/views/widget/widget.h"
  #include "url/gurl.h"
  
  class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
-@@ -57,6 +60,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -57,6 +64,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
                   base::BindRepeating(&Impl::Fallback, base::Unretained(this))) {
    }
    ~Impl() override {
@@ -544,20 +592,41 @@ index 2322068153..2eb2552dda 100644
      observation_.Reset();
      for (const auto& [id, w] : windows_) {
        capture_.Remove(w.source);
-@@ -80,6 +84,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -80,27 +88,55 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
      uint64_t source_generation = 1, revision = 0;
      uint32_t fps = 0, inflight = 0, mode = 0;
      bool gpu_failed = false;
 +    std::unique_ptr<prts::PrtsWindowInput> input = nullptr;
++    base::CallbackListSubscription close_cancelled = {};
++    int display_slot = -1;
    };
    class Tab : public content::WebContentsObserver {
     public:
-@@ -88,7 +93,11 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
-     void DidStartLoading() override { owner->Schedule(); }
-     void DidStopLoading() override { owner->Schedule(); }
+     Tab(Impl* owner, content::WebContents* contents, uint64_t id)
+-        : WebContentsObserver(contents), owner(owner), id(id) {}
+-    void DidStartLoading() override { owner->Schedule(); }
+-    void DidStopLoading() override { owner->Schedule(); }
++        : WebContentsObserver(contents), owner(owner), id(id) {
++      load = contents->IsLoading() ? 1 : 2;
++    }
++    void DidStartLoading() override {
++      load = 1;
++      owner->Schedule();
++    }
++    void DidStopLoading() override {
++      if (load != 3) {
++        load = 2;
++      }
++      owner->Schedule();
++    }
      void TitleWasSet(content::NavigationEntry*) override { owner->Schedule(); }
 -    void DidFinishNavigation(content::NavigationHandle*) override {
 +    void DidFinishNavigation(content::NavigationHandle* nav) override {
++      if (nav->IsInPrimaryMainFrame() &&
++          (nav->IsErrorPage() ||
++           (!nav->HasCommitted() && nav->GetNetErrorCode() != 0))) {
++        load = 3;
++      }
 +      if (nav->IsInPrimaryMainFrame() && nav->HasCommitted() &&
 +          !nav->IsSameDocument()) {
 +        owner->Navigated(web_contents());
@@ -565,8 +634,18 @@ index 2322068153..2eb2552dda 100644
        owner->Schedule();
      }
      void WebContentsDestroyed() override {
-@@ -101,6 +110,8 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+       Observe(nullptr);
+       owner->Schedule();
+     }
+-    void Replace(content::WebContents* contents) { Observe(contents); }
++    void Replace(content::WebContents* contents) {
++      Observe(contents);
++      load = contents->IsLoading() ? 1 : 2;
++    }
+     raw_ptr<Impl> owner;
+     const uint64_t id;
      uint64_t opener = 0;
++    uint8_t load = 0;
    };
    void Start(uint64_t gpu_luid, uint32_t frame_limit) {
 +    views::SetHeadlessCursorObserver(
@@ -574,7 +653,18 @@ index 2322068153..2eb2552dda 100644
      frame_limit_ = std::min(2u, frame_limit);
      capture_.SetLimit(frame_limit_);
      gpu_enabled_ = gpu_luid && capture_.EnableGpu(gpu_luid);
-@@ -127,6 +138,159 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -111,8 +147,8 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+     }
+     e.Int(512ull * 1024 * 1024, 8);
+     e.Int(512ull * 1024 * 1024, 8);
+-    e.Int(1, 4);
+-    e.Int(1, 4);
++    e.Int(640, 4);
++    e.Int(480, 4);
+     send_.Run(0x494, 0, std::move(e.data));
+     GlobalBrowserCollection::GetInstance()->ForEach(
+         [this](BrowserWindowInterface* browser) {
+@@ -127,6 +163,164 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
      e.Int(0, 1);
      send_.Run(3, request, std::move(e.data));
    }
@@ -598,7 +688,12 @@ index 2322068153..2eb2552dda 100644
 +    if (!w.input && Root(w)) {
 +      w.input = std::make_unique<prts::PrtsWindowInput>(
 +          Root(w),
-+          base::BindRepeating(&Impl::Contents, weak_.GetWeakPtr(), w.id),
++          base::BindRepeating(
++              [](base::WeakPtr<Impl> owner,
++                 uint64_t id) -> content::WebContents* {
++                return owner ? owner->Contents(id) : nullptr;
++              },
++              weak_.GetWeakPtr(), w.id),
 +          base::BindRepeating(&Impl::Fault, weak_.GetWeakPtr()));
 +    }
 +  }
@@ -652,7 +747,7 @@ index 2322068153..2eb2552dda 100644
 +    }
 +    auto& w = it->second;
 +    if (type == 0x207) {
-+      prts::Decoder focus(base::span(payload).subspan(28));
++      prts::Decoder focus(base::span(payload).subspan(size_t{28}));
 +      auto value = focus.Int(1);
 +      if (!focus.Done() || value > 1) {
 +        Fault(1);
@@ -734,7 +829,72 @@ index 2322068153..2eb2552dda 100644
    void Schedule() {
      if (pending_) {
        return;
-@@ -343,6 +507,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -170,14 +364,19 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+         base::TruncateUTF8ToByteSize(contents->GetVisibleURL().spec(), 65536));
+     e.String(base::TruncateUTF8ToByteSize(
+         base::UTF16ToUTF8(contents->GetTitle()), 65536));
+-    e.Int(contents->IsLoading() ? 1 : 2, 1);
++    e.Int(t->load, 1);
+     e.Int(w.browser->GetTabStripModel()->GetActiveWebContents() == contents, 1);
+   }
+   std::vector<uint8_t> Snapshot(Window& w) {
+     auto* strip = w.browser->GetTabStripModel();
+     prts::Encoder e;
+     e.Int(w.id, 8);
+-    e.Int(w.browser->GetType() == BrowserWindowInterface::TYPE_NORMAL ? 1 : 2,
++    auto kind = w.browser->GetType();
++    e.Int(kind == BrowserWindowInterface::TYPE_NORMAL ? 1
++          : (kind == BrowserWindowInterface::TYPE_POPUP ||
++             kind == BrowserWindowInterface::TYPE_APP_POPUP)
++              ? 2
++              : 3,
+           1);
+     e.Int(0, 8);
+     e.Int(w.size.width, 4);
+@@ -224,7 +423,19 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+     // Each Browser owns a separate synthetic monitor. This mutates headless
+     // Screen only; it never changes physical Windows display configuration.
+     display::Display monitor(w.display);
+-    const int x = static_cast<int>(w.id) * 32768;
++    if (w.display_slot < 0) {
++      std::set<int> used;
++      for (const auto& [id, other] : windows_) {
++        if (other.display_slot >= 0) {
++          used.insert(other.display_slot);
++        }
++      }
++      w.display_slot = 0;
++      while (used.contains(w.display_slot)) {
++        ++w.display_slot;
++      }
++    }
++    const int x = (w.display_slot + 1) * 32768;
+     const gfx::Rect pixels(gfx::Point(x, 0), DeviceSize(w));
+     monitor.SetScaleAndBounds(w.size.dpr, pixels);
+     if (w.display) {
+@@ -332,6 +543,21 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+     }
+     uint64_t id = ++next_, source = ++next_;
+     windows_.emplace(id, Window{id, source, browser, {}});
++    windows_.at(id).close_cancelled =
++        browser->RegisterBrowserCloseCancelled(base::BindRepeating(
++            [](base::WeakPtr<Impl> owner, uint64_t id, BrowserWindowInterface*,
++               BrowserWindowInterface::ClosingStatus) {
++              if (!owner) {
++                return;
++              }
++              auto it = owner->windows_.find(id);
++              if (it == owner->windows_.end()) {
++                return;
++              }
++              it->second.closing = false;
++              owner->Publish(it->second);
++            },
++            weak_.GetWeakPtr(), id));
+     browser->GetTabStripModel()->AddObserver(this);
+     Schedule();
+   }
+@@ -343,6 +569,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
        browser->GetTabStripModel()->RemoveObserver(this);
        auto id = it->first;
        bool announced = it->second.announced;
@@ -742,7 +902,20 @@ index 2322068153..2eb2552dda 100644
        capture_.Remove(it->second.source);
        if (it->second.display) {
          display::HeadlessScreenManager::Get()->RemoveDisplay(
-@@ -431,7 +596,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -377,9 +604,10 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+     size.width = d.Int(4);
+     size.height = d.Int(4);
+     size.dpr = std::bit_cast<double>(d.Int(8));
+-    return size.width && size.width <= 8192 && size.height &&
++    return size.width >= 640 && size.width <= 8192 && size.height >= 480 &&
+            size.height <= 8192 && std::isfinite(size.dpr) && size.dpr >= .5 &&
+-           size.dpr <= 4 &&
++           size.dpr <= 4 && std::ceil(size.width * size.dpr) <= 16384 &&
++           std::ceil(size.height * size.dpr) <= 16384 &&
+            std::ceil(size.width * size.dpr) *
+                    std::ceil(size.height * size.dpr) <=
+                64000000;
+@@ -431,7 +659,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
            w.size = size;
            ApplySize(w);
            if (activate) {
@@ -751,17 +924,46 @@ index 2322068153..2eb2552dda 100644
            }
            Reconcile();
            send_.Run(0x480, r.id, Snapshot(w));
-@@ -496,6 +661,9 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
-       bool valid = true;
-       uint64_t mode = 0, limit = 0, fps = 0;
+@@ -476,7 +704,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+       };
+       bounds(view->tab_strip_view());
+       bounds(view->toolbar());
+-      bounds(view->GetLocationBarView());
++      bounds(view->GetLocationBarView()->omnibox_view());
+       bounds(view->contents_web_view_for_testing());
+       auto* strip = view->horizontal_tab_strip_for_testing();
+       e.Int(strip ? strip->GetTabCount() : 0, 4);
+@@ -488,6 +716,19 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+       e.Int(views::DesktopHeadlessInputEnabled(), 1);
+       e.Int(views::BlockedHeadlessNativeCursorCalls(), 8);
+       e.Int(views::NativeCursorWriteCalls(), 8);
++      std::set<content::RenderWidgetHost*> widgets;
++      if (auto* contents = Contents(id)) {
++        contents->GetPrimaryMainFrame()->ForEachRenderFrameHost(
++            [&](content::RenderFrameHost* frame) {
++              widgets.insert(frame->GetRenderWidgetHost());
++            });
++      }
++      e.Int(widgets.size(), 4);
++      e.String(base::UTF16ToUTF8(
++          view->GetLocationBarView()->GetOmniboxView()->GetText()));
++      auto* focused = view->GetWidget()->GetFocusManager()->GetFocusedView();
++      e.String(focused ? focused->GetClassName() : "none");
++      e.Int(view->GetWidget()->IsActive(), 1);
+       send_.Run(0x48f, r.id, std::move(e.data));
+       return;
+     }
+@@ -521,6 +762,9 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+         return;
+       }
        if (r.type == 0x403) {
 +        if (w.input) {
 +          w.input->Reset();
 +        }
-         valid = ReadSize(d, size);
-       }
-       if (r.type == 0x410) {
-@@ -672,6 +840,9 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+         w.size = size;
+         ++w.generation;
+         ++w.source_generation;
+@@ -672,6 +916,9 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
      }
      auto& w = it->second;
      if (r.type == 0x401) {
@@ -771,7 +973,7 @@ index 2322068153..2eb2552dda 100644
        w.closing = true;
        Publish(w);
        auto* browser = w.browser.get();
-@@ -679,7 +850,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -679,7 +926,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
        browser->GetWindow()->Close();
        return;
      }
@@ -780,7 +982,7 @@ index 2322068153..2eb2552dda 100644
      Reconcile();
      send_.Run(0x480, r.id, Snapshot(w));
    }
-@@ -690,6 +861,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -690,6 +937,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
    uint32_t frame_limit_ = 2;
    bool gpu_enabled_ = false;
    uint64_t next_ = 0, input_ = 0;
@@ -788,7 +990,7 @@ index 2322068153..2eb2552dda 100644
    bool pending_ = false, mutating_ = false;
    std::map<uint64_t, Window> windows_;
    std::map<uint64_t, std::unique_ptr<Tab>> tabs_;
-@@ -707,6 +879,10 @@ void PrtsWindowRegistry::Start(uint64_t gpu_luid, uint32_t frame_limit) {
+@@ -707,6 +955,10 @@ void PrtsWindowRegistry::Start(uint64_t gpu_luid, uint32_t frame_limit) {
  bool PrtsWindowRegistry::Frame(const prts::Record& record) {
    return impl_->Frame(record);
  }
@@ -825,10 +1027,10 @@ index 6f5203698b..63b17354af 100644
      "renderer_host/text_input_manager.cc",
 diff --git a/content/browser/renderer_host/aura_input_barrier.cc b/content/browser/renderer_host/aura_input_barrier.cc
 new file mode 100644
-index 0000000000..9e2171c3a8
+index 0000000000..5a4a3692c3
 --- /dev/null
 +++ b/content/browser/renderer_host/aura_input_barrier.cc
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,202 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -838,6 +1040,7 @@ index 0000000000..9e2171c3a8
 +#include <set>
 +
 +#include "base/functional/bind.h"
++#include "base/logging.h"
 +#include "base/task/single_thread_task_runner.h"
 +#include "base/timer/timer.h"
 +#include "components/input/render_widget_host_input_event_router.h"
@@ -860,13 +1063,20 @@ index 0000000000..9e2171c3a8
 +              base::TimeTicks stamp,
 +              base::OnceCallback<void(bool)> done)
 +      : WebContentsObserver(contents), stamp_(stamp), done_(std::move(done)) {
-+    contents->ForEachRenderFrameHost([&](RenderFrameHost* frame) {
-+      auto* host = frame->GetRenderWidgetHost();
-+      if (hosts_.insert(host).second) {
-+        host->AddInputEventObserver(this);
-+        host->AddObserver(this);
-+      }
-+    });
++    contents->GetPrimaryMainFrame()->ForEachRenderFrameHost(
++        [&](RenderFrameHost* frame) {
++          auto* host = frame->GetRenderWidgetHost();
++          if (hosts_.insert(host).second) {
++            // As in the legacy injector: an explicit remote action targets the
++            // new document, not a retained paint-holding snapshot that drops
++            // its first press. This changes readiness only, never injects a
++            // renderer event.
++            RenderWidgetHostImpl::From(host)
++                ->ForceFirstFrameAfterNavigationTimeout();
++            host->AddInputEventObserver(this);
++            host->AddObserver(this);
++          }
++        });
 +    timeout_.Start(
 +        FROM_HERE, base::Seconds(5),
 +        base::BindOnce(&AuraBarrier::Finish, weak_.GetWeakPtr(), false));
@@ -884,11 +1094,19 @@ index 0000000000..9e2171c3a8
 +      PostPoll();
 +    }
 +  }
++  base::OnceClosure Cancellation() {
++    return base::BindOnce(&AuraBarrier::Finish, weak_.GetWeakPtr(), true);
++  }
 +  void OnInputEvent(const RenderWidgetHost& host,
 +                    const blink::WebInputEvent& event,
 +                    InputEventSource) override {
 +    if (event.TimeStamp() == stamp_) {
++      VLOG(1) << "Aura barrier forwarded type="
++              << static_cast<int>(event.GetType()) << " stamp=" << stamp_;
 +      saw_dispatch_ = true;
++      needs_state_ |=
++          event.GetType() == blink::WebInputEvent::Type::kMouseDown ||
++          blink::WebInputEvent::IsKeyboardEventType(event.GetType());
 +      ++pending_[{&host, event.GetType()}];
 +    }
 +  }
@@ -899,6 +1117,8 @@ index 0000000000..9e2171c3a8
 +    if (event.TimeStamp() != stamp_) {
 +      return;
 +    }
++    VLOG(1) << "Aura barrier ACK type=" << static_cast<int>(event.GetType())
++            << " stamp=" << stamp_;
 +    auto it = pending_.find({&host, event.GetType()});
 +    if (it != pending_.end() && --it->second == 0) {
 +      pending_.erase(it);
@@ -912,7 +1132,7 @@ index 0000000000..9e2171c3a8
 +      return entry.first.first == host;
 +    });
 +  }
-+  void WebContentsDestroyed() override { Finish(false); }
++  void WebContentsDestroyed() override { Finish(true); }
 +  void PostPoll() {
 +    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
 +        FROM_HERE, base::BindOnce(&AuraBarrier::Poll, weak_.GetWeakPtr()),
@@ -933,7 +1153,7 @@ index 0000000000..9e2171c3a8
 +      PostPoll();
 +      return;
 +    }
-+    if (!saw_dispatch_) {
++    if (!saw_dispatch_ || !needs_state_) {
 +      Finish(true);
 +      return;
 +    }  // Views consumed / target lost.
@@ -956,6 +1176,11 @@ index 0000000000..9e2171c3a8
 +        base::BindOnce(&AuraBarrier::Finish, weak_.GetWeakPtr()));
 +  }
 +  void Finish(bool success) {
++    if (!success) {
++      LOG(WARNING) << "Aura barrier incomplete stamp=" << stamp_
++                   << " pending=" << pending_.size()
++                   << " forwarded=" << saw_dispatch_;
++    }
 +    timeout_.Stop();
 +    if (done_) {
 +      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
@@ -972,21 +1197,25 @@ index 0000000000..9e2171c3a8
 +           size_t>
 +      pending_;
 +  bool saw_dispatch_ = false;
++  bool needs_state_ = false;
 +  base::OneShotTimer timeout_;
 +  base::WeakPtrFactory<AuraBarrier> weak_{this};
 +};
 +}  // namespace
-+void DispatchWithAuraInputBarrier(WebContents* contents,
-+                                  base::TimeTicks stamp,
-+                                  base::OnceClosure dispatch,
-+                                  base::OnceCallback<void(bool)> done) {
++base::OnceClosure DispatchWithAuraInputBarrier(
++    WebContents* contents,
++    base::TimeTicks stamp,
++    base::OnceClosure dispatch,
++    base::OnceCallback<void(bool)> done) {
 +  if (!contents) {
 +    std::move(dispatch).Run();
 +    std::move(done).Run(true);
-+    return;
++    return {};
 +  }
-+  (new AuraBarrier(contents, stamp, std::move(done)))
-+      ->Begin(std::move(dispatch));
++  auto* barrier = new AuraBarrier(contents, stamp, std::move(done));
++  auto cancel = barrier->Cancellation();
++  barrier->Begin(std::move(dispatch));
++  return cancel;
 +}
 +bool IsAuraContentTextClient(WebContents* contents,
 +                             const ui::TextInputClient* client) {
@@ -1004,6 +1233,323 @@ index 0000000000..9e2171c3a8
 +  }
 +}
 +}  // namespace content
+diff --git a/content/browser/renderer_host/render_widget_host_view_event_handler.cc b/content/browser/renderer_host/render_widget_host_view_event_handler.cc
+index 225224a587..d32d98635f 100644
+--- a/content/browser/renderer_host/render_widget_host_view_event_handler.cc
++++ b/content/browser/renderer_host/render_widget_host_view_event_handler.cc
+@@ -25,6 +25,7 @@
+ #include "content/public/browser/render_widget_host.h"
+ #include "ui/aura/client/cursor_client.h"
+ #include "ui/aura/client/focus_client.h"
++#include "ui/aura/headless_root_size.h"
+ #include "ui/aura/scoped_keyboard_hook.h"
+ #include "ui/aura/window.h"
+ #include "ui/aura/window_delegate.h"
+@@ -91,15 +92,17 @@ void MarkUnchangedTouchPointsAsStationary(blink::WebTouchEvent* event,
+   if (event->GetType() == blink::WebInputEvent::Type::kTouchMove ||
+       event->GetType() == blink::WebInputEvent::Type::kTouchCancel) {
+     for (size_t i = 0; i < event->touches_length; ++i) {
+-      if (event->touches[i].id != changed_touch_id)
++      if (event->touches[i].id != changed_touch_id) {
+         event->touches[i].state = blink::WebTouchPoint::State::kStateStationary;
++      }
+     }
+   }
+ }
+ 
+ bool NeedsInputGrab(content::RenderWidgetHostViewBase* view) {
+-  if (!view)
++  if (!view) {
+     return false;
++  }
+   return view->GetWidgetType() == content::WidgetType::kPopup;
+ }
+ 
+@@ -138,25 +141,32 @@ void RenderWidgetHostViewEventHandler::ResetHost() {
+ blink::mojom::PointerLockResult RenderWidgetHostViewEventHandler::LockPointer(
+     bool request_unadjusted_movement) {
+   aura::Window* root_window = window_->GetRootWindow();
+-  if (!root_window)
++  if (!root_window) {
+     return blink::mojom::PointerLockResult::kWrongDocument;
++  }
++  if (root_window->GetProperty(aura::kHeadlessRootSizeKey)) {
++    return blink::mojom::PointerLockResult::kUnsupportedOptions;
++  }
+ 
+-  if (mouse_locked_)
++  if (mouse_locked_) {
+     return blink::mojom::PointerLockResult::kSuccess;
++  }
+ 
+   if (request_unadjusted_movement && window_->GetHost()) {
+     mouse_locked_unadjusted_movement_ =
+         window_->GetHost()->RequestUnadjustedMovement();
+-    if (!mouse_locked_unadjusted_movement_)
++    if (!mouse_locked_unadjusted_movement_) {
+       return blink::mojom::PointerLockResult::kUnsupportedOptions;
++    }
+   }
+   mouse_locked_ = true;
+ 
+   aura::Window::ScopedDeleteBlocker delete_blocker(window_);
+   window_->GetHost()->LockMouse(window_);
+ 
+-  if (ShouldMoveToCenter(unlocked_global_mouse_position_))
++  if (ShouldMoveToCenter(unlocked_global_mouse_position_)) {
+     MoveCursorToCenter(nullptr);
++  }
+ 
+   delegate_->SetTooltipsEnabled(false);
+   return blink::mojom::PointerLockResult::kSuccess;
+@@ -166,14 +176,16 @@ blink::mojom::PointerLockResult
+ RenderWidgetHostViewEventHandler::ChangePointerLock(
+     bool request_unadjusted_movement) {
+   aura::Window* root_window = window_->GetRootWindow();
+-  if (!root_window || !window_->GetHost())
++  if (!root_window || !window_->GetHost()) {
+     return blink::mojom::PointerLockResult::kWrongDocument;
++  }
+ 
+   // If lock was lost before completing this change request
+   // it was because the user hit escape or navigated away
+   // from the page.
+-  if (!mouse_locked_)
++  if (!mouse_locked_) {
+     return blink::mojom::PointerLockResult::kUserRejected;
++  }
+ 
+   if (!request_unadjusted_movement) {
+     mouse_locked_unadjusted_movement_.reset();
+@@ -188,8 +200,9 @@ RenderWidgetHostViewEventHandler::ChangePointerLock(
+   mouse_locked_unadjusted_movement_ =
+       window_->GetHost()->RequestUnadjustedMovement();
+ 
+-  if (!mouse_locked_unadjusted_movement_)
++  if (!mouse_locked_unadjusted_movement_) {
+     return blink::mojom::PointerLockResult::kUnsupportedOptions;
++  }
+ 
+   return blink::mojom::PointerLockResult::kSuccess;
+ }
+@@ -228,8 +241,9 @@ void RenderWidgetHostViewEventHandler::UnlockPointer() {
+ bool RenderWidgetHostViewEventHandler::LockKeyboard(
+     std::optional<base::flat_set<ui::DomCode>> codes) {
+   aura::Window* root_window = window_->GetRootWindow();
+-  if (!root_window)
++  if (!root_window) {
+     return false;
++  }
+ 
+   // Remove existing hook, if registered.
+   UnlockKeyboard();
+@@ -251,8 +265,9 @@ void RenderWidgetHostViewEventHandler::OnKeyEvent(ui::KeyEvent* event) {
+ 
+   if (NeedsInputGrab(popup_child_host_view_)) {
+     popup_child_event_handler_->OnKeyEvent(event);
+-    if (event->handled())
++    if (event->handled()) {
+       return;
++    }
+   }
+ 
+   if (event->key_code() == ui::VKEY_RETURN) {
+@@ -275,14 +290,16 @@ void RenderWidgetHostViewEventHandler::OnKeyEvent(ui::KeyEvent* event) {
+ 
+   // If the key has been reserved as part of the active KeyboardLock request,
+   // then we want to mark it as such so it is not intercepted by the browser.
+-  if (IsKeyLocked(*event))
++  if (IsKeyLocked(*event)) {
+     webkit_event.skip_if_unhandled = true;
++  }
+ 
+   bool mark_event_as_handled = true;
+   delegate_->ForwardKeyboardEventWithLatencyInfo(
+       webkit_event, *event->latency(), &mark_event_as_handled);
+-  if (mark_event_as_handled)
++  if (mark_event_as_handled) {
+     event->SetHandled();
++  }
+ }
+ 
+ void RenderWidgetHostViewEventHandler::HandleMouseWheelEvent(
+@@ -337,8 +354,9 @@ void RenderWidgetHostViewEventHandler::OnMouseEvent(ui::MouseEvent* event) {
+ 
+   // CrOS will send a mouse exit event to update hover state when mouse is
+   // hidden which we want to filter out in renderer. crbug.com/723535.
+-  if (event->flags() & ui::EF_CURSOR_HIDE)
++  if (event->flags() & ui::EF_CURSOR_HIDE) {
+     return;
++  }
+ 
+   ForwardMouseEventToParent(event);
+   // Forwarding the event may have resulted in the view or window being
+@@ -380,7 +398,6 @@ void RenderWidgetHostViewEventHandler::OnMouseEvent(ui::MouseEvent* event) {
+     bool is_selection_popup = NeedsInputGrab(popup_child_host_view_);
+     if (CanRendererHandleEvent(event, mouse_locked_, is_selection_popup) &&
+         !(event->flags() & ui::EF_FROM_TOUCH)) {
+-
+       // Confirm existing composition text on mouse press, to make sure
+       // the input caret won't be moved with an ongoing composition text.
+       if (event->type() == ui::EventType::kMousePressed) {
+@@ -413,15 +430,17 @@ void RenderWidgetHostViewEventHandler::OnMouseEvent(ui::MouseEvent* event) {
+       window_->SetCapture();
+       break;
+     case ui::EventType::kMouseReleased:
+-      if (!delegate_->NeedsMouseCapture())
++      if (!delegate_->NeedsMouseCapture()) {
+         window_->ReleaseCapture();
++      }
+       break;
+     default:
+       break;
+   }
+ 
+-  if (!ShouldGenerateAppCommand(event))
++  if (!ShouldGenerateAppCommand(event)) {
+     event->SetHandled();
++  }
+ }
+ 
+ void RenderWidgetHostViewEventHandler::OnScrollEvent(ui::ScrollEvent* event) {
+@@ -446,8 +465,9 @@ void RenderWidgetHostViewEventHandler::OnScrollEvent(ui::ScrollEvent* event) {
+ #if !BUILDFLAG(IS_WIN)
+     // TODO(ananta)
+     // Investigate if this is true for Windows 8 Metro ASH as well.
+-    if (event->finger_count() != 2)
++    if (event->finger_count() != 2) {
+       return;
++    }
+ #endif
+     blink::WebMouseWheelEvent mouse_wheel_event =
+         ui::MakeWebMouseWheelEvent(*event);
+@@ -520,13 +540,16 @@ void RenderWidgetHostViewEventHandler::OnTouchEvent(ui::TouchEvent* event) {
+   }
+   pointer_state_.CleanupRemovedTouchPoints(*event);
+ 
+-  if (handled)
++  if (handled) {
+     return;
++  }
+ 
+-  if (had_no_pointer)
++  if (had_no_pointer) {
+     delegate_->selection_controller_client()->OnTouchDown();
+-  if (!pointer_state_.GetPointerCount())
++  }
++  if (!pointer_state_.GetPointerCount()) {
+     delegate_->selection_controller_client()->OnTouchUp();
++  }
+ 
+   // It is important to always mark events as being handled asynchronously when
+   // they are forwarded. This ensures that the current event does not get
+@@ -564,8 +587,9 @@ void RenderWidgetHostViewEventHandler::OnGestureEvent(ui::GestureEvent* event) {
+   }
+ 
+   HandleGestureForTouchSelection(event);
+-  if (event->handled())
++  if (event->handled()) {
+     return;
++  }
+ 
+   // Confirm existing composition text on TAP gesture, to make sure the input
+   // caret won't be moved with an ongoing composition text.
+@@ -649,14 +673,16 @@ bool RenderWidgetHostViewEventHandler::CanRendererHandleEvent(
+   }
+ 
+   if (event->type() == ui::EventType::kMouseExited) {
+-    if (mouse_locked || selection_popup)
++    if (mouse_locked || selection_popup) {
+       return false;
++    }
+ #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+     // Don't forward the mouse leave message which is received when the context
+     // menu is displayed by the page. This confuses the page and causes state
+     // changes.
+-    if (host_->delegate() && host_->delegate()->IsShowingContextMenuOnPage())
++    if (host_->delegate() && host_->delegate()->IsShowingContextMenuOnPage()) {
+       return false;
++    }
+ #endif
+     return true;
+   }
+@@ -713,11 +739,13 @@ void RenderWidgetHostViewEventHandler::ForwardMouseEventToParent(
+   // note that it might be something other than a WebContentsViewAura instance.
+   // TODO(pkotwicz): Find a better way of doing this.
+ 
+-  if (event->flags() & ui::EF_FROM_TOUCH)
++  if (event->flags() & ui::EF_FROM_TOUCH) {
+     return;
++  }
+ 
+-  if (!window_->parent() || !window_->parent()->delegate())
++  if (!window_->parent() || !window_->parent()->delegate()) {
+     return;
++  }
+ 
+   // Take a copy of |event|, to avoid ConvertLocationToTarget mutating the
+   // event.
+@@ -725,8 +753,9 @@ void RenderWidgetHostViewEventHandler::ForwardMouseEventToParent(
+   ui::MouseEvent* mouse_event = static_cast<ui::MouseEvent*>(event_copy.get());
+   mouse_event->ConvertLocationToTarget(window_.get(), window_->parent());
+   window_->parent()->delegate()->OnMouseEvent(mouse_event);
+-  if (mouse_event->handled())
++  if (mouse_event->handled()) {
+     event->SetHandled();
++  }
+ }
+ 
+ void RenderWidgetHostViewEventHandler::HandleGestureForTouchSelection(
+@@ -832,8 +861,9 @@ void RenderWidgetHostViewEventHandler::HandleMouseEventWhileLocked(
+       MoveCursorToCenter(event);
+     }
+   }
+-  if (!ShouldGenerateAppCommand(event))
++  if (!ShouldGenerateAppCommand(event)) {
+     event->SetHandled();
++  }
+ }
+ 
+ void RenderWidgetHostViewEventHandler::ModifyEventMovementAndCoords(
+@@ -927,12 +957,14 @@ bool RenderWidgetHostViewEventHandler::ShouldMoveToCenter(
+   // Do not need to move to center in unadjusted movement mode as
+   // the movement value are directly from OS.
+ #if BUILDFLAG(IS_WIN)
+-  if (mouse_locked_unadjusted_movement_)
++  if (mouse_locked_unadjusted_movement_) {
+     return false;
++  }
+ #endif
+ 
+-  if (window_->GetHost()->SupportsMouseLock())
++  if (window_->GetHost()->SupportsMouseLock()) {
+     return false;
++  }
+ 
+   gfx::Rect rect = window_->bounds();
+   rect = delegate_->ConvertRectToScreen(rect);
+@@ -953,8 +985,9 @@ bool RenderWidgetHostViewEventHandler::ShouldRouteEvents() const {
+   // Do not route events that are currently targeted to page popups such as
+   // <select> element drop-downs, since these cannot contain cross-process
+   // frames.
+-  if (!host_->delegate()->IsWidgetForPrimaryMainFrame(host_))
++  if (!host_->delegate()->IsWidgetForPrimaryMainFrame(host_)) {
+     return false;
++  }
+ 
+   return !!host_->GetInputEventRouter();
+ }
+@@ -982,8 +1015,9 @@ bool RenderWidgetHostViewEventHandler::IsKeyLocked(const ui::KeyEvent& event) {
+   // Note: We never consider 'ESC' to be locked as we don't want to prevent it
+   // from being handled by the browser.  Doing so would have adverse effects
+   // such as the user being unable to exit fullscreen mode.
+-  if (!IsKeyboardLocked() || event.code() == ui::DomCode::ESCAPE)
++  if (!IsKeyboardLocked() || event.code() == ui::DomCode::ESCAPE) {
+     return false;
++  }
+ 
+   return scoped_keyboard_hook_->IsKeyLocked(event.code());
+ }
 diff --git a/content/public/browser/BUILD.gn b/content/public/browser/BUILD.gn
 index 8ccddc64e7..f63c905cbe 100644
 --- a/content/public/browser/BUILD.gn
@@ -1018,10 +1564,10 @@ index 8ccddc64e7..f63c905cbe 100644
      "//base",
 diff --git a/content/public/browser/aura_input_barrier.h b/content/public/browser/aura_input_barrier.h
 new file mode 100644
-index 0000000000..ae72bddb50
+index 0000000000..b8e92aef96
 --- /dev/null
 +++ b/content/public/browser/aura_input_barrier.h
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,26 @@
 +// Copyright 2026 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
@@ -1037,7 +1583,8 @@ index 0000000000..ae72bddb50
 +class WebContents;
 +// Observes a normal Aura dispatch, including asynchronous OOPIF targeting and
 +// renderer ACKs. Never injects a second renderer event. UI sequence only.
-+CONTENT_EXPORT void DispatchWithAuraInputBarrier(
++// Returns cancellation for callers that invalidate their input epoch.
++CONTENT_EXPORT base::OnceClosure DispatchWithAuraInputBarrier(
 +    WebContents*,
 +    base::TimeTicks,
 +    base::OnceClosure dispatch,
@@ -1047,3 +1594,105 @@ index 0000000000..ae72bddb50
 +CONTENT_EXPORT void FinishAuraTextCommit(WebContents*, base::OnceClosure done);
 +}  // namespace content
 +#endif
+diff --git a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+index 62eea1434a..a5d86d909d 100644
+--- a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
++++ b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+@@ -7,6 +7,7 @@
+ #include <dwmapi.h>
+ 
+ #include <algorithm>
++#include <map>
+ #include <string_view>
+ #include <utility>
+ #include <vector>
+@@ -90,6 +91,7 @@ struct HeadlessInputState {
+   uint64_t blocked = 0;
+   uint64_t writes = 0;
+   HeadlessCursorObserver cursor;
++  std::map<aura::WindowTreeHost*, ui::Cursor> cursors;
+ };
+ HeadlessInputState& HeadlessState() {
+   static base::NoDestructor<HeadlessInputState> state;
+@@ -134,6 +136,9 @@ const int kMouseCaptureRegionBorder = 5;
+ 
+ // Updates the cursor clip region. Used for mouse locking.
+ void UpdateMouseLockRegion(aura::Window* window, bool locked) {
++  if (DesktopHeadlessInputEnabled()) {
++    return;
++  }
+   if (!locked) {
+     ::ClipCursor(nullptr);
+     return;
+@@ -234,6 +239,7 @@ DesktopWindowTreeHostWin::DesktopWindowTreeHostWin(
+       is_modal_(native_widget_delegate_->IsModal()) {}
+ 
+ DesktopWindowTreeHostWin::~DesktopWindowTreeHostWin() {
++  HeadlessState().cursors.erase(this);
+   ClearBackgroundPaintBrush();
+   desktop_native_widget_aura_->OnDesktopWindowTreeHostDestroyed(this);
+   // Normally HandleDestroying() destroys the compositor (which is called
+@@ -914,6 +920,9 @@ void DesktopWindowTreeHostWin::ReleaseCapture() {
+ 
+ bool DesktopWindowTreeHostWin::CaptureSystemKeyEventsImpl(
+     std::optional<base::flat_set<ui::DomCode>> dom_codes) {
++  if (DesktopHeadlessInputEnabled()) {
++    return false;
++  }
+   // Only one KeyboardHook should be active at a time, otherwise there will be
+   // problems with event routing (i.e. which Hook takes precedence) and
+   // destruction ordering.
+@@ -941,6 +950,7 @@ DesktopWindowTreeHostWin::GetKeyboardLayoutMap() {
+ 
+ void DesktopWindowTreeHostWin::SetCursorNative(gfx::NativeCursor cursor) {
+   if (SuppressHeadlessNativeCursorCall()) {
++    HeadlessState().cursors.insert_or_assign(this, cursor);
+     if (HeadlessState().cursor) {
+       HeadlessState().cursor.Run(this, cursor, is_cursor_visible_);
+     }
+@@ -957,11 +967,11 @@ void DesktopWindowTreeHostWin::OnCursorVisibilityChangedNative(bool show) {
+   if (SuppressHeadlessNativeCursorCall()) {
+     is_cursor_visible_ = show;
+     if (HeadlessState().cursor) {
+-      HeadlessState().cursor.Run(
+-          this,
+-          ui::Cursor(show ? ui::mojom::CursorType::kPointer
+-                          : ui::mojom::CursorType::kNone),
+-          show);
++      HeadlessState().cursor.Run(this,
++                                 show
++                                     ? HeadlessState().cursors[this]
++                                     : ui::Cursor(ui::mojom::CursorType::kNone),
++                                 show);
+     }
+     return;
+   }
+@@ -1532,9 +1542,11 @@ void DesktopWindowTreeHostWin::HandleTouchEvent(ui::TouchEvent* event) {
+     // mouse pointer. If the user has their mouse outside of the window when
+     // this sync happens, when they move their mouse again it will show up in
+     // it's original location.
+-    if (touch_drag_cursor_sync && !window) {
++    if (touch_drag_cursor_sync && !window &&
++        !SuppressHeadlessNativeCursorCall()) {
+       POINT event_point(event->location().x(), event->location().y());
+       ::ClientToScreen(GetHWND(), &event_point);
++      RecordNativeCursorWrite();
+       ::SetCursorPos(event_point.x, event_point.y);
+     }
+   }
+diff --git a/ui/views/win/hwnd_message_handler.cc b/ui/views/win/hwnd_message_handler.cc
+index 8bc517f7e9..f222cbeee6 100644
+--- a/ui/views/win/hwnd_message_handler.cc
++++ b/ui/views/win/hwnd_message_handler.cc
+@@ -2922,7 +2922,10 @@ LRESULT HWNDMessageHandler::OnSetCursor(UINT message,
+       // Use the default value, IDC_ARROW.
+       break;
+   }
+-  ::SetCursor(LoadCursor(nullptr, cursor));
++  if (!SuppressHeadlessNativeCursorCall()) {
++    RecordNativeCursorWrite();
++    ::SetCursor(LoadCursor(nullptr, cursor));
++  }
+   return 1;
+ }
+ 

@@ -635,3 +635,25 @@ an offscreen output-device change: P1/P7/P8 remain separate future work.
   into the existing M4 Node/media API. Binary negotiation is exact2.0 and source
   frames are mapped to their validated owning Window scene. The native v2 Node
   API and simultaneous per-window workers remain step6, outside M5a scope.
+- The step3 completion adapter observes timestamp-matched normal Aura dispatch
+  and final renderer ACKs, checks the production router's pending-dispatch
+  predicate, then waits for input processing/visual state for pointer-down and
+  key events. Views-consumed events and pointer motion do not await a visual
+  change. Epoch cancellation handles navigation, owner loss and destruction.
+  It also releases post-navigation paint holding before explicit remote input,
+  as the existing v1 injector does; runtime traces showed the first DSF2
+  mouse-down could otherwise be dropped while its mouse-up was delivered.
+- Virtual-display management remains inside `prts_window_registry.*`, and the
+  base-only Aura router is in `prts_window_input.*`. Separate-host popup capture,
+  virtual stacking and popup-aware input routing still belong to steps4/5.
+- M5a2 qualification corrected two legacy harness assumptions without changing
+  Chromium production code: unsupported-version probing must offer3.0 because
+  2.0 is now supported, and the CPU-only M3 test must negotiate CPU rather than
+  inherit the preceding GPU run. The reproducible final runner explicitly pairs
+  GPU/QSV and CPU/software E2E and serializes strict hardware lifetime tests.
+- Final reruns exposed an M5 fixture HTTP defect: Windows accepted streams
+  inherited the listener's nonblocking mode, so a read could immediately fail
+  with WSAEWOULDBLOCK despite its timeout and silently drop an iframe request.
+  A standalone delayed-request probe and actual driver HTTP diagnostics
+  reproduced it. Accepted fixture streams are now explicitly blocking before
+  bounded full-header reads; no input, readiness or pixel assertions changed.
