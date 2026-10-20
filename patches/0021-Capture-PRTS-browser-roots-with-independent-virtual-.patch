@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Tue, 20 Oct 2026 19:38:18 +0800
-Subject: [PATCH 21/24] Capture PRTS browser roots with independent virtual
+Subject: [PATCH 21/25] Capture PRTS browser roots with independent virtual
  display sizing and DSF
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

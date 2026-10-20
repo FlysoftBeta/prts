@@ -53,6 +53,7 @@ impl Client {
                 ],
             });
         }
+        self.menu_button = Some(read_rect(&mut d)?);
         d.finish()?;
         Ok(hosts)
     }
@@ -77,57 +78,80 @@ fn host_gate(c: &mut Client, id: u64) -> Result<()> {
         c.request(WINDOW_ACTIVATE, id.to_le_bytes().to_vec())?.kind == WINDOW_RESULT,
         "activate failed"
     );
-    let w = c
-        .list()?
-        .into_iter()
-        .find(|w| w.id == id)
-        .context("Host gate window missing")?;
-    c.send(&w, v1::Input::Focus(true), 0)?;
-    c.wait_hosts(id, false)?;
-    for cycle in 0..3 {
-        c.key(&w, 18, "AltLeft", "Alt", 4, true)?;
-        c.key(&w, 70, "KeyF", "f", 4, true)?;
-        c.key(&w, 70, "KeyF", "f", 4, false)?;
-        c.key(&w, 18, "AltLeft", "Alt", 0, false)?;
-        let hosts = c.wait_hosts(id, true)?;
-        let mut sources = std::collections::BTreeSet::new();
-        for host in &hosts {
+    for (width, height, dpr) in [(960, 640, 1.), (960, 640, 2.), (961, 641, 1.25)] {
+        let mut resize = id.to_le_bytes().to_vec();
+        Size { width, height, dpr }.encode(&mut resize)?;
+        let reply = c.request(WINDOW_RESIZE, resize)?;
+        ensure!(reply.kind == WINDOW_RESULT, "Host gate resize failed");
+        let w = Window::decode(&reply.payload)?;
+        c.geometry(id)?;
+        c.send(&w, v1::Input::Focus(true), 0)?;
+        c.wait_hosts(id, false)?;
+        for cycle in 0..3 {
+            if cycle == 0 {
+                // MenuButtonController intentionally rejects clicks for 100ms
+                // after a menu closes. Respect Chrome's debounce before the
+                // measured opening action; never retry a failed click.
+                thread::sleep(Duration::from_millis(150));
+                let button = c.menu_button.clone().context("Missing app-menu geometry")?;
+                println!("APP MENU BUTTON {width}x{height}@{dpr}: {button:?}");
+                ensure!(
+                    button.width > 0. && button.height > 0.,
+                    "Empty app-menu button"
+                );
+                c.click(
+                    &w,
+                    button.x + button.width / 2.,
+                    button.y + button.height / 2.,
+                )?;
+            } else {
+                c.key(&w, 18, "AltLeft", "Alt", 4, true)?;
+                c.key(&w, 70, "KeyF", "f", 4, true)?;
+                c.key(&w, 70, "KeyF", "f", 4, false)?;
+                c.key(&w, 18, "AltLeft", "Alt", 0, false)?;
+            }
+            let hosts = c.wait_hosts(id, true)?;
+            let mut sources = std::collections::BTreeSet::new();
+            for host in &hosts {
+                ensure!(
+                    host.owner == id && sources.insert(host.source) && host.generation > 0,
+                    "Invalid host identity/owner: {host:?}"
+                );
+                ensure!(
+                    host.bounds[2] > 0 && host.bounds[3] > 0,
+                    "Unready host geometry: {host:?}"
+                );
+                // Read all diagnostic properties so output can diagnose wrong
+                // native-widget type, event policy or transparency classification.
+                println!(
+                    "HOST kind={} input={} translucent={} root={:?} host_px={:?} owner_px={:?} {host:?}",
+                    host.kind,
+                    host.input,
+                    host.translucent,
+                    host.root_bounds,
+                    host.host_pixels,
+                    host.owner_pixels
+                );
+                ensure!(
+                    host.host_pixels[0] >= host.owner_pixels[0]
+                        && host.host_pixels[1] >= host.owner_pixels[1]
+                        && host.host_pixels[0] + host.host_pixels[2]
+                            <= host.owner_pixels[0] + host.owner_pixels[2]
+                        && host.host_pixels[1] + host.host_pixels[3]
+                            <= host.owner_pixels[1] + host.owner_pixels[3],
+                    "Owned menu lies outside the streamed owner canvas: {host:?}"
+                );
+            }
             ensure!(
-                host.owner == id && sources.insert(host.source) && host.generation > 0,
-                "Invalid host identity/owner: {host:?}"
+                c.hosts(other.id)?.is_empty(),
+                "A's menu leaked into B's owned host family"
             );
-            ensure!(
-                host.bounds[2] > 0 && host.bounds[3] > 0,
-                "Unready host geometry: {host:?}"
-            );
-            // Read all diagnostic properties so output can diagnose wrong
-            // native-widget type, event policy or transparency classification.
+            c.press(&w, 27, "Escape", "Escape")?;
+            c.wait_hosts(id, false)?;
             println!(
-                "HOST kind={} input={} translucent={} root={:?} host_px={:?} owner_px={:?} {host:?}",
-                host.kind,
-                host.input,
-                host.translucent,
-                host.root_bounds,
-                host.host_pixels,
-                host.owner_pixels
-            );
-            ensure!(
-                host.host_pixels[0] >= host.owner_pixels[0]
-                    && host.host_pixels[1] >= host.owner_pixels[1]
-                    && host.host_pixels[0] + host.host_pixels[2]
-                        <= host.owner_pixels[0] + host.owner_pixels[2]
-                    && host.host_pixels[1] + host.host_pixels[3]
-                        <= host.owner_pixels[1] + host.owner_pixels[3],
-                "Owned menu lies outside the streamed owner canvas: {host:?}"
+                "PASS owned real app-menu {width}x{height}@{dpr} cycle {cycle}, containment/cross-owner exclusion"
             );
         }
-        ensure!(
-            c.hosts(other.id)?.is_empty(),
-            "A's menu leaked into B's owned host family"
-        );
-        c.press(&w, 27, "Escape", "Escape")?;
-        c.wait_hosts(id, false)?;
-        println!("PASS owned real app-menu open/close cycle {cycle}, cross-owner exclusion");
     }
     ensure!(
         c.request(WINDOW_CLOSE, other.id.to_le_bytes().to_vec())?

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Tue, 20 Oct 2026 10:43:07 +0800
-Subject: [PATCH 15/24] Add native GMB capture and keyed D3D11 texture export
+Subject: [PATCH 15/25] Add native GMB capture and keyed D3D11 texture export
  for PRTS
 
 Keep the bounded CPU pool and passive refresh recovery; isolate Viz key-0 mutex ownership from wire key-0/1 textures and recover rejected imports per target.

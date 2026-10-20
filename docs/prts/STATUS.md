@@ -3,9 +3,11 @@
 ## Current state
 - **Active WIP: `wip/mvp-flyouts` in both repos**, not merged into main. Initial host observer/tracker
   and real app-menu ownership/lifecycle gate implemented; incremental chrome build4 and Rust checks pass.
-  Mandatory placement gate FAILS: native menu `[-32178,-68,390,608]` is outside owner `[32768,0,960,640]`.
-  Exact resume point is [mvp-flyouts-wip.md](mvp-flyouts-wip.md): trace anchor/work-area/InitParams and fix
-  placement, then scene/pool/alpha/composition/input work. No flyout pixel qualification claimed.
+  Placement fixes now PASS nine real app-menu cycles at DSF1/2/1.25, including real toolbar clicks,
+  physical canvas containment and cross-owner exclusion (build12). Existing M5 GPU/CPU capture/input
+  gates pass build11. Build13 final host and existing M5 GPU/CPU capture/input reruns PASS. Exact resume point is
+  [mvp-flyouts-wip.md](mvp-flyouts-wip.md): scene/pool/alpha/composition and further popup input gates.
+  No flyout pixel qualification claimed; initial popup input routing remains WIP.
   Current chrome binary is built from WIP, while source `work` remains qualified5a7769bea8.
 - **Next action: continue MVP (PLAN priority 2), M5b steps 4-5**: host-family tracking and GPU/CPU
   flyout composition/input (menus, context menus, omnibox dropdown, bubbles, tooltips, dialogs,

@@ -32,6 +32,7 @@ mod acceptance {
         faults: Vec<u32>,
         cursors: Vec<(u64, u64, u8)>,
         widget_count: u32,
+        menu_button: Option<DipRect>,
     }
     impl Client {
         fn start() -> Result<Self> {
@@ -82,6 +83,7 @@ mod acceptance {
                 faults: vec![],
                 cursors: vec![],
                 widget_count: 0,
+                menu_button: None,
             };
             hello(1, luid, if luid != 0 { 3 } else { 2 }, 2).write(&mut c.raw.command)?;
             let ack = c.receive()?;

@@ -28,7 +28,39 @@ not the qualified main source. No browser/daemon is left running.
 - `cr export [branch]` can export the WIP branch without moving the qualified
   Chromium `work` ref. Default export and sync still use `work`.
 
-## Current failing gate and next action
+## Placement checkpoint (resumed 2026-10-21)
+
+Incremental build12 and the strengthened nine-cycle host gate PASS at
+960x640@1, 960x640@2 and 961x641@1.25. Each scale includes a real toolbar click
+located through test-only Views geometry, Alt+F/Escape churn, physical canvas
+containment and cross-owner exclusion. The click respects Chrome's existing
+100ms MenuButton debounce before the opening action; no failed click is retried.
+Build11 also passes the existing M5 capture/input gates on GPU and CPU paths.
+Build13 includes formatting/include cleanup; host and existing M5 GPU/CPU reruns PASS.
+
+Placement fixes: headless client insets now compare native rectangles in the
+same screen coordinate system; monitor emulation looks up physical rectangles;
+nearest-display squared distance uses 64-bit multiplication (a 48192px gap
+previously overflowed negative); DIPToScreenRect scales size independently of
+its rounded origin; opt-in menu placement includes border/shadow within the
+owner's actual logical canvas. Source regressions were added for overflow and
+fractional conversion, but Chromium unit-test targets were not built under the
+chrome-only incremental build rule. Runtime host gates cover both regressions.
+
+The input router now chooses owned captured/hit popup roots and their focused
+key/text clients, using weak event destinations. This is an initial scaffold:
+popup selection, hover exits, captured-state cancellation, target destruction
+and dialog text need additional acceptance. No popup pixels are captured or
+composed, and no flyout signoff is claimed.
+
+Exact next step: checkpoint export25 (Chromium5c7c15f4be), then implement fair two-resource scheduling across owned sources,
+premultiplied alpha, bounded scene caches and GPU/CPU composition below. Keep
+the daemon's auxiliary-layer rejection until composition actually exists.
+
+Logs: `C:/src/chromium/prts-flyouts-placement12-hosts.*`,
+`prts-flyouts-regression11-m5-{gpu,cpu}.*`, `prts-mvp-flyouts-build{12,13}-chrome.*`.
+
+### Original blocker (resolved above)
 
 Incremental chrome build4 PASSED, release `browser_m5` build PASSED,
 Clippy all targets with warnings denied and fmt PASSED. Initial ownership-only

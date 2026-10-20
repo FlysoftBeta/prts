@@ -1,0 +1,1188 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Wed, 21 Oct 2026 01:51:32 +0800
+Subject: [PATCH 25/25] WIP: correct virtual flyout geometry and route owned
+ popup input
+
+Real app-menu containment and toolbar clicks pass at DSF 1, 2 and 1.25. Popup composition and full popup input qualification remain pending.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_window_input.cc b/chrome/browser/prts/prts_window_input.cc
+index 8494397f47..2b3c572a09 100644
+--- a/chrome/browser/prts/prts_window_input.cc
++++ b/chrome/browser/prts/prts_window_input.cc
+@@ -70,8 +70,12 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+  public:
+   Impl(aura::Window* root,
+        base::RepeatingCallback<content::WebContents*()> contents,
+-       base::RepeatingCallback<void(uint32_t)> fault)
+-      : root_(root), contents_(std::move(contents)), fault_(std::move(fault)) {
++       base::RepeatingCallback<void(uint32_t)> fault,
++       base::RepeatingCallback<std::vector<OwnedHost>()> hosts)
++      : root_(root),
++        contents_(std::move(contents)),
++        fault_(std::move(fault)),
++        hosts_(std::move(hosts)) {
+     root_->AddObserver(this);
+   }
+   ~Impl() override {
+@@ -101,10 +105,36 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+     return last_stamp_;
+   }
+   ui::TextInputClient* Client() {
+-    return root_ && root_->GetHost()->GetInputMethod()
+-               ? root_->GetHost()->GetInputMethod()->GetTextInputClient()
++    auto* target = KeyRoot();
++    return target && target->GetHost()->GetInputMethod()
++               ? target->GetHost()->GetInputMethod()->GetTextInputClient()
+                : nullptr;
+   }
++  bool Owns(aura::Window* target) {
++    if (target == root_) {
++      return true;
++    }
++    for (const auto& host : hosts_.Run()) {
++      if (host.root == target) {
++        return true;
++      }
++    }
++    return false;
++  }
++  aura::Window* KeyRoot() {
++    if (auto* captured = views::DesktopCaptureClient::GetCaptureWindowGlobal();
++        captured && Owns(captured->GetRootWindow())) {
++      return captured->GetRootWindow();
++    }
++    auto hosts = hosts_.Run();
++    for (auto it = hosts.rbegin(); it != hosts.rend(); ++it) {
++      auto* widget = views::Widget::GetTopLevelWidgetForNativeView(it->root);
++      if (it->accepts_input && widget && widget->IsActive()) {
++        return it->root;
++      }
++    }
++    return root_;
++  }
+   void Done(bool success = true) {
+     deadline_.Stop();
+     busy_ = false;
+@@ -131,8 +161,10 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+     Next();
+   }
+   void Send(std::unique_ptr<ui::Event> event,
+-            base::OnceCallback<void(bool)> done) {
+-    if (!root_) {
++            base::OnceCallback<void(bool)> done,
++            aura::Window* target = nullptr) {
++    target = target ? target : root_.get();
++    if (!target) {
+       std::move(done).Run(false);
+       return;
+     }
+@@ -140,7 +172,8 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+     auto weak = weak_.GetWeakPtr();
+     auto cancel = content::DispatchWithAuraInputBarrier(
+         contents_.Run(), stamp,
+-        base::BindOnce(&Impl::SendNow, weak_.GetWeakPtr(), std::move(event)),
++        base::BindOnce(&Impl::SendNow, weak_.GetWeakPtr(),
++                       target->GetWeakPtrAsWindow(), std::move(event)),
+         std::move(done));
+     if (weak) {
+       cancel_ = std::move(cancel);
+@@ -148,11 +181,12 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+       std::move(cancel).Run();
+     }
+   }
+-  void SendNow(std::unique_ptr<ui::Event> event) {
+-    if (!root_) {
++  void SendNow(base::WeakPtr<aura::Window> target,
++               std::unique_ptr<ui::Event> event) {
++    if (!target) {
+       return;
+     }
+-    root_->GetHost()->SendEventToSink(event.get());
++    target->GetHost()->SendEventToSink(event.get());
+   }
+   void Reset() {
+     weak_.InvalidateWeakPtrs();
+@@ -298,7 +332,7 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+                uint64_t count,
+                uint32_t modifiers) {
+     auto* captured = views::DesktopCaptureClient::GetCaptureWindowGlobal();
+-    if (captured && captured->GetRootWindow() != root_) {
++    if (captured && !Owns(captured->GetRootWindow())) {
+       fault_.Run(4);
+       Done();
+       return;
+@@ -310,7 +344,23 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+                         gfx::ToRoundedPoint(point).OffsetFromOrigin();
+     display::win::GetScreenWinHeadless()->SetCursorScreenPointForTesting(
+         screen);
+-    root_->GetHost()->ConvertDIPToPixels(&point);
++    aura::Window* target = root_;
++    if (captured) {
++      target = captured->GetRootWindow();
++    } else {
++      auto hosts = hosts_.Run();
++      for (auto it = hosts.rbegin(); it != hosts.rend(); ++it) {
++        if (it->accepts_input && it->screen_bounds.Contains(screen)) {
++          target = it->root;
++          break;
++        }
++      }
++    }
++    const auto target_origin = target->GetBoundsInScreen().origin();
++    const auto owner_origin = root_->GetBoundsInScreen().origin();
++    point.Offset(owner_origin.x() - target_origin.x(),
++                 owner_origin.y() - target_origin.y());
++    target->GetHost()->ConvertDIPToPixels(&point);
+     auto stamp = Stamp();
+     std::unique_ptr<ui::Event> event;
+     if (type == 0x203) {
+@@ -334,7 +384,8 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+       }
+       event = std::move(mouse);
+     }
+-    Send(std::move(event), base::BindOnce(&Impl::Done, weak_.GetWeakPtr()));
++    Send(std::move(event), base::BindOnce(&Impl::Done, weak_.GetWeakPtr()),
++         target);
+   }
+   void Focus(bool focused) {
+     if (auto* widget = Widget()) {
+@@ -362,7 +413,7 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+           (ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN | ui::EF_COMMAND_DOWN)) &&
+         content::IsAuraContentTextClient(contents_.Run(), Client());
+     Send(std::make_unique<ui::KeyEvent>(event),
+-         base::BindOnce(&Impl::KeyDone, weak_.GetWeakPtr(), enter));
++         base::BindOnce(&Impl::KeyDone, weak_.GetWeakPtr(), enter), KeyRoot());
+   }
+   void KeyDone(bool enter, bool success) {
+     if (enter && success &&
+@@ -420,6 +471,7 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+   raw_ptr<aura::Window> root_;
+   base::RepeatingCallback<content::WebContents*()> contents_;
+   base::RepeatingCallback<void(uint32_t)> fault_;
++  base::RepeatingCallback<std::vector<OwnedHost>()> hosts_;
+   base::circular_deque<base::OnceClosure> queue_;
+   std::map<ui::KeyboardCode, ui::KeyEvent> keys_;
+   gfx::PointF point_;
+@@ -434,10 +486,12 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+ PrtsWindowInput::PrtsWindowInput(
+     aura::Window* root,
+     base::RepeatingCallback<content::WebContents*()> contents,
+-    base::RepeatingCallback<void(uint32_t)> fault)
+-    : impl_(
+-          std::make_unique<Impl>(root, std::move(contents), std::move(fault))) {
+-}
++    base::RepeatingCallback<void(uint32_t)> fault,
++    base::RepeatingCallback<std::vector<OwnedHost>()> hosts)
++    : impl_(std::make_unique<Impl>(root,
++                                   std::move(contents),
++                                   std::move(fault),
++                                   std::move(hosts))) {}
+ PrtsWindowInput::~PrtsWindowInput() = default;
+ uint32_t PrtsWindowInput::Dispatch(uint16_t type,
+                                    Decoder& d,
+diff --git a/chrome/browser/prts/prts_window_input.h b/chrome/browser/prts/prts_window_input.h
+index c12a606157..cfa351b883 100644
+--- a/chrome/browser/prts/prts_window_input.h
++++ b/chrome/browser/prts/prts_window_input.h
+@@ -6,6 +6,7 @@
+ #include <memory>
+ 
+ #include "base/functional/callback.h"
++#include "chrome/browser/prts/prts_host_tracker.h"
+ #include "chrome/browser/prts/prts_protocol.h"
+ namespace aura {
+ class Window;
+@@ -18,7 +19,8 @@ class PrtsWindowInput {
+  public:
+   PrtsWindowInput(aura::Window* root,
+                   base::RepeatingCallback<content::WebContents*()> contents,
+-                  base::RepeatingCallback<void(uint32_t)> fault);
++                  base::RepeatingCallback<void(uint32_t)> fault,
++                  base::RepeatingCallback<std::vector<OwnedHost>()> hosts);
+   ~PrtsWindowInput();
+   uint32_t Dispatch(uint16_t type, Decoder&, uint32_t modifiers);
+   void Reset();
+diff --git a/chrome/browser/prts/prts_window_registry.cc b/chrome/browser/prts/prts_window_registry.cc
+index fa881c58ef..5c9a2b1a65 100644
+--- a/chrome/browser/prts/prts_window_registry.cc
++++ b/chrome/browser/prts/prts_window_registry.cc
+@@ -34,6 +34,7 @@
+ #include "chrome/browser/ui/views/location_bar/location_bar_view.h"
+ #include "chrome/browser/ui/views/omnibox/omnibox_view_views.h"
+ #include "chrome/browser/ui/views/tabs/tab_strip.h"
++#include "chrome/browser/ui/views/toolbar/app_menu_control.h"
+ #include "chrome/browser/ui/views/toolbar/toolbar_view.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_handle.h"
+@@ -165,7 +166,9 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+   }
+   uint64_t HostOwner(aura::Window* root) {
+     for (auto& [id, w] : windows_) {
+-      if (Root(w) == root) { return id; }
++      if (Root(w) == root) {
++        return id;
++      }
+     }
+     return 0;
+   }
+@@ -202,7 +205,13 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+                 return owner ? owner->Contents(id) : nullptr;
+               },
+               weak_.GetWeakPtr(), w.id),
+-          base::BindRepeating(&Impl::Fault, weak_.GetWeakPtr()));
++          base::BindRepeating(&Impl::Fault, weak_.GetWeakPtr()),
++          base::BindRepeating(
++              [](Impl* self, uint64_t id) {
++                return self->hosts_ ? self->hosts_->Snapshot(id)
++                                    : std::vector<prts::OwnedHost>();
++              },
++              base::Unretained(this), w.id));
+     }
+   }
+   void Navigated(content::WebContents* contents) {
+@@ -697,20 +706,36 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+         e.Int(host.generation, 8);
+         e.Int(host.owner, 8);
+         e.Int(host.type, 4);
+-        for (int value : {host.screen_bounds.x(), host.screen_bounds.y(),
+-                          host.screen_bounds.width(), host.screen_bounds.height()}) {
++        for (int value :
++             {host.screen_bounds.x(), host.screen_bounds.y(),
++              host.screen_bounds.width(), host.screen_bounds.height()}) {
+           e.Int(static_cast<uint32_t>(value), 4);
+         }
+         e.Int(host.accepts_input, 1);
+         e.Int(host.translucent, 1);
+-        for (const auto& rect : {host.root->GetBoundsInScreen(),
+-                                 host.root->GetHost()->GetBoundsInPixels(),
+-                                 Root(windows_.at(id))->GetHost()->GetBoundsInPixels()}) {
++        for (const auto& rect :
++             {host.root->GetBoundsInScreen(),
++              host.root->GetHost()->GetBoundsInPixels(),
++              Root(windows_.at(id))->GetHost()->GetBoundsInPixels()}) {
+           for (int value : {rect.x(), rect.y(), rect.width(), rect.height()}) {
+             e.Int(static_cast<uint32_t>(value), 4);
+           }
+         }
+       }
++      auto* view =
++          BrowserView::GetBrowserViewForBrowser(windows_.at(id).browser);
++      auto rect = view->toolbar_button_provider()
++                      ->GetAppMenuControl()
++                      ->GetFocusablePaneView()
++                      ->GetBoundsInScreen();
++      const auto origin = Root(windows_.at(id))->GetBoundsInScreen().origin();
++      rect.Offset(-origin.x(), -origin.y());
++      for (double value :
++           {static_cast<double>(rect.x()), static_cast<double>(rect.y()),
++            static_cast<double>(rect.width()),
++            static_cast<double>(rect.height())}) {
++        e.Int(std::bit_cast<uint64_t>(value), 8);
++      }
+       send_.Run(0x48c, r.id, std::move(e.data));
+       return;
+     }
+diff --git a/ui/display/win/scaling_util.cc b/ui/display/win/scaling_util.cc
+index 105476c476..9f09d84120 100644
+--- a/ui/display/win/scaling_util.cc
++++ b/ui/display/win/scaling_util.cc
+@@ -28,29 +28,32 @@ enum class CoordinateRotation {
+ // is positioned on top of |other|.
+ CoordinateRotation ComputeCoordinateRotationRefTop(const gfx::Rect& ref,
+                                                    const gfx::Rect& other) {
+-  if (ref.bottom() <= other.y())
++  if (ref.bottom() <= other.y()) {
+     return CoordinateRotation::COORDINATE_ROTATE_0;
+-  if (other.right() <= ref.x())
++  }
++  if (other.right() <= ref.x()) {
+     return CoordinateRotation::COORDINATE_ROTATE_90;
+-  if (other.bottom() <= ref.y())
++  }
++  if (other.bottom() <= ref.y()) {
+     return CoordinateRotation::COORDINATE_ROTATE_180;
++  }
+ 
+   return CoordinateRotation::COORDINATE_ROTATE_270;
+ }
+ 
+ gfx::Rect CoordinateRotateRectangle90(const gfx::Rect& rect) {
+-  return gfx::Rect(rect.y(), -rect.x() - rect.width(),
+-                   rect.height(), rect.width());
++  return gfx::Rect(rect.y(), -rect.x() - rect.width(), rect.height(),
++                   rect.width());
+ }
+ 
+ gfx::Rect CoordinateRotateRectangle180(const gfx::Rect& rect) {
+-  return gfx::Rect(-rect.x() - rect.width(), -rect.y() -rect.height(),
++  return gfx::Rect(-rect.x() - rect.width(), -rect.y() - rect.height(),
+                    rect.width(), rect.height());
+ }
+ 
+ gfx::Rect CoordinateRotateRectangle270(const gfx::Rect& rect) {
+-  return gfx::Rect(-rect.y() - rect.height(), rect.x(),
+-                   rect.height(), rect.width());
++  return gfx::Rect(-rect.y() - rect.height(), rect.x(), rect.height(),
++                   rect.width());
+ }
+ 
+ gfx::Rect CoordinateRotateRect(const gfx::Rect& rect,
+@@ -93,12 +96,10 @@ bool DisplayInfosTouch(const internal::DisplayInfo& a,
+   int max_top = std::max(a_rect.y(), b_rect.y());
+   int min_right = std::min(a_rect.right(), b_rect.right());
+   int min_bottom = std::min(a_rect.bottom(), b_rect.bottom());
+-  return (max_left == min_right &&
+-             a_rect.y() <= b_rect.bottom() &&
+-             b_rect.y() <= a_rect.bottom()) ||
+-         (max_top == min_bottom &&
+-             a_rect.x() <= b_rect.right() &&
+-             b_rect.x() <= a_rect.right());
++  return (max_left == min_right && a_rect.y() <= b_rect.bottom() &&
++          b_rect.y() <= a_rect.bottom()) ||
++         (max_top == min_bottom && a_rect.x() <= b_rect.right() &&
++          b_rect.x() <= a_rect.right());
+ }
+ 
+ DisplayPlacement::Position CalculateDisplayPosition(
+@@ -112,28 +113,26 @@ DisplayPlacement::Position CalculateDisplayPosition(
+   int min_bottom = std::min(parent_rect.bottom(), current_rect.bottom());
+   if (max_left == min_right && max_top == min_bottom) {
+     // Corner touching.
+-    if (parent_rect.bottom() == max_top)
++    if (parent_rect.bottom() == max_top) {
+       return DisplayPlacement::Position::BOTTOM;
+-    if (parent_rect.x() == max_left)
++    }
++    if (parent_rect.x() == max_left) {
+       return DisplayPlacement::Position::LEFT;
++    }
+ 
+     return DisplayPlacement::Position::TOP;
+   }
+-  if (max_left == min_right &&
+-      parent_rect.y() <= current_rect.bottom() &&
++  if (max_left == min_right && parent_rect.y() <= current_rect.bottom() &&
+       current_rect.y() <= parent_rect.bottom()) {
+     // Vertical edge touching.
+-    return parent_rect.x() == max_left
+-        ? DisplayPlacement::Position::LEFT
+-        : DisplayPlacement::Position::RIGHT;
++    return parent_rect.x() == max_left ? DisplayPlacement::Position::LEFT
++                                       : DisplayPlacement::Position::RIGHT;
+   }
+-  if (max_top == min_bottom &&
+-      parent_rect.x() <= current_rect.right() &&
++  if (max_top == min_bottom && parent_rect.x() <= current_rect.right() &&
+       current_rect.x() <= parent_rect.right()) {
+     // Horizontal edge touching.
+-    return parent_rect.y() == max_top
+-        ? DisplayPlacement::Position::TOP
+-        : DisplayPlacement::Position::BOTTOM;
++    return parent_rect.y() == max_top ? DisplayPlacement::Position::TOP
++                                      : DisplayPlacement::Position::BOTTOM;
+   }
+   NOTREACHED() << "CalculateDisplayPosition relies on touching DisplayInfos.";
+ }
+@@ -205,20 +204,18 @@ DisplayPlacement CalculateDisplayPlacement(
+         DisplayPlacement::OffsetReference::BOTTOM_RIGHT;
+     placement.offset = 0;
+   } else if (InRange(current_begin, parent_begin, parent_end)) {
+-    placement.offset = ScaleOffset(parent_end,
+-                                   parent.device_scale_factor(),
+-                                   current_begin);
++    placement.offset =
++        ScaleOffset(parent_end, parent.device_scale_factor(), current_begin);
+   } else if (InRange(current_end, parent_begin, parent_end)) {
+     placement.offset_reference =
+         DisplayPlacement::OffsetReference::BOTTOM_RIGHT;
+-    placement.offset = ScaleOffset(parent_end,
+-                                   parent.device_scale_factor(),
++    placement.offset = ScaleOffset(parent_end, parent.device_scale_factor(),
+                                    parent_end - current_end);
+   } else {
+     DCHECK(InRange(parent_begin, current_begin, current_end));
+-    placement.offset = ScaleOffset(current_end - current_begin,
+-                                   current.device_scale_factor(),
+-                                   current_begin);
++    placement.offset =
++        ScaleOffset(current_end - current_begin, current.device_scale_factor(),
++                    current_begin);
+   }
+ 
+   return placement;
+@@ -230,18 +227,20 @@ DisplayPlacement CalculateDisplayPlacement(
+ int64_t SquaredDistanceBetweenRects(const gfx::Rect& ref,
+                                     const gfx::Rect& rect) {
+   gfx::Rect intersection_rect = gfx::IntersectRects(ref, rect);
+-  if (!intersection_rect.IsEmpty())
+-    return -(intersection_rect.width() * intersection_rect.height());
++  if (!intersection_rect.IsEmpty()) {
++    return -(int64_t{intersection_rect.width()} * intersection_rect.height());
++  }
+ 
+   CoordinateRotation degrees = ComputeCoordinateRotationRefTop(ref, rect);
+   gfx::Rect top_rect(CoordinateRotateRect(ref, degrees));
+   gfx::Rect bottom_rect(CoordinateRotateRect(rect, degrees));
+-  if (bottom_rect.right() < top_rect.x())
++  if (bottom_rect.right() < top_rect.x()) {
+     return (bottom_rect.top_right() - top_rect.bottom_left()).LengthSquared();
+-  else if (top_rect.right() < bottom_rect.x())
++  } else if (top_rect.right() < bottom_rect.x()) {
+     return (bottom_rect.origin() - top_rect.bottom_right()).LengthSquared();
++  }
+ 
+-  int distance = bottom_rect.y() - top_rect.bottom();
++  int64_t distance = int64_t{bottom_rect.y()} - top_rect.bottom();
+   return distance * distance;
+ }
+ 
+diff --git a/ui/display/win/scaling_util_unittest.cc b/ui/display/win/scaling_util_unittest.cc
+index 1a856771ec..ee7bf6fc94 100644
+--- a/ui/display/win/scaling_util_unittest.cc
++++ b/ui/display/win/scaling_util_unittest.cc
+@@ -22,33 +22,30 @@ internal::DisplayInfo CreateDisplayInfo(int x,
+                                         int width,
+                                         int height,
+                                         float scale_factor) {
+-  MONITORINFOEX monitor_info = CreateMonitorInfo(gfx::Rect(x, y, width, height),
+-                                                 gfx::Rect(x, y, width, height),
+-                                                 kFakeDisplayName);
++  MONITORINFOEX monitor_info =
++      CreateMonitorInfo(gfx::Rect(x, y, width, height),
++                        gfx::Rect(x, y, width, height), kFakeDisplayName);
+   return internal::DisplayInfo(
+       std::nullopt, monitor_info, scale_factor, /*text_scale_multiplier=*/1.0f,
+       Display::kDefaultBitsPerPixel, 1.0f, Display::ROTATE_0, 60.0f,
+       gfx::Vector2dF(), DISPLAYCONFIG_OUTPUT_TECHNOLOGY_OTHER, std::string());
+ }
+ 
+-::testing::AssertionResult AssertOffsetsEqual(
+-    const char* lhs_expr,
+-    const char* rhs_expr,
+-    const DisplayPlacement& lhs,
+-    const DisplayPlacement& rhs) {
+-  if (lhs.position == rhs.position &&
+-      lhs.offset == rhs.offset &&
++::testing::AssertionResult AssertOffsetsEqual(const char* lhs_expr,
++                                              const char* rhs_expr,
++                                              const DisplayPlacement& lhs,
++                                              const DisplayPlacement& rhs) {
++  if (lhs.position == rhs.position && lhs.offset == rhs.offset &&
+       lhs.offset_reference == rhs.offset_reference) {
+     return ::testing::AssertionSuccess();
+   }
+ 
+-  return ::testing::AssertionFailure() <<
+-      "Value of: " << rhs_expr << "\n  Actual: " << rhs.ToString() <<
+-      "\nExpected: " << lhs_expr << "\nWhich is: " << lhs.ToString();
++  return ::testing::AssertionFailure()
++         << "Value of: " << rhs_expr << "\n  Actual: " << rhs.ToString()
++         << "\nExpected: " << lhs_expr << "\nWhich is: " << lhs.ToString();
+ }
+ 
+-#define EXPECT_OFFSET_EQ(a, b) \
+-  EXPECT_PRED_FORMAT2(AssertOffsetsEqual, a, b);
++#define EXPECT_OFFSET_EQ(a, b) EXPECT_PRED_FORMAT2(AssertOffsetsEqual, a, b);
+ 
+ TEST(ScalingUtilTest, DisplayInfosTouchBottom) {
+   EXPECT_TRUE(DisplayInfosTouch(CreateDisplayInfo(1, 1, 1, 1, 1.0f),
+@@ -152,8 +149,7 @@ TEST(ScalingUtilTest, CalculateDisplayPlacementNoScaleRight) {
+ 
+   // Bottom edge aligned.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::RIGHT,
+-                       0,
++      DisplayPlacement(DisplayPlacement::RIGHT, 0,
+                        DisplayPlacement::BOTTOM_RIGHT),
+       CalculateDisplayPlacement(CreateDisplayInfo(0, 0, 800, 600, 1.0f),
+                                 CreateDisplayInfo(800, -168, 1024, 768, 1.0f)));
+@@ -166,17 +162,14 @@ TEST(ScalingUtilTest, CalculateDisplayPlacementNoScaleRight) {
+ 
+   // Offset to the top
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::RIGHT,
+-                       -10,
++      DisplayPlacement(DisplayPlacement::RIGHT, -10,
+                        DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(0, 0, 800, 600, 1.0f),
+                                 CreateDisplayInfo(800, -10, 1024, 768, 1.0f)));
+ 
+   // Offset to the bottom.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::RIGHT,
+-                       10,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::RIGHT, 10, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(0, 0, 800, 600, 1.0f),
+                                 CreateDisplayInfo(800, 10, 1024, 768, 1.0f)));
+ }
+@@ -184,35 +177,27 @@ TEST(ScalingUtilTest, CalculateDisplayPlacementNoScaleRight) {
+ TEST(ScalingUtilTest, CalculateDisplayPlacementNoScaleLeft) {
+   // Top edge aligned.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::LEFT,
+-                       0,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::LEFT, 0, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(0, 0, 800, 600, 1.0f),
+                                 CreateDisplayInfo(-1024, 0, 1024, 768, 1.0f)));
+ 
+   // Bottom edge aligned.
+-  EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::LEFT,
+-                       0,
+-                       DisplayPlacement::BOTTOM_RIGHT),
+-      CalculateDisplayPlacement(
+-          CreateDisplayInfo(0, 0, 800, 600, 1.0f),
+-          CreateDisplayInfo(-1024, -168, 1024, 768, 1.0f)));
++  EXPECT_OFFSET_EQ(DisplayPlacement(DisplayPlacement::LEFT, 0,
++                                    DisplayPlacement::BOTTOM_RIGHT),
++                   CalculateDisplayPlacement(
++                       CreateDisplayInfo(0, 0, 800, 600, 1.0f),
++                       CreateDisplayInfo(-1024, -168, 1024, 768, 1.0f)));
+ 
+   // Offset to the top.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::LEFT,
+-                       -10,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::LEFT, -10, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(
+           CreateDisplayInfo(0, 0, 800, 600, 1.0f),
+           CreateDisplayInfo(-1024, -10, 1024, 768, 1.0f)));
+ 
+   // Offset to the bottom.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::LEFT,
+-                       10,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::LEFT, 10, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(0, 0, 800, 600, 1.0f),
+                                 CreateDisplayInfo(-1024, 10, 1024, 768, 1.0f)));
+ }
+@@ -220,34 +205,26 @@ TEST(ScalingUtilTest, CalculateDisplayPlacementNoScaleLeft) {
+ TEST(ScalingUtilTest, CalculateDisplayPlacementNoScaleTop) {
+   // Left edge aligned.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::TOP,
+-                       0,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::TOP, 0, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(0, 0, 800, 600, 1.0f),
+                                 CreateDisplayInfo(0, -768, 1024, 768, 1.0f)));
+ 
+   // Right edge aligned.
+-  EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::TOP,
+-                       0,
+-                       DisplayPlacement::BOTTOM_RIGHT),
+-      CalculateDisplayPlacement(
+-          CreateDisplayInfo(0, 0, 800, 600, 1.0f),
+-          CreateDisplayInfo(-224, -768, 1024, 768, 1.0f)));
++  EXPECT_OFFSET_EQ(DisplayPlacement(DisplayPlacement::TOP, 0,
++                                    DisplayPlacement::BOTTOM_RIGHT),
++                   CalculateDisplayPlacement(
++                       CreateDisplayInfo(0, 0, 800, 600, 1.0f),
++                       CreateDisplayInfo(-224, -768, 1024, 768, 1.0f)));
+ 
+   // Offset to the right.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::TOP,
+-                       10,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::TOP, 10, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(0, 0, 800, 600, 1.0f),
+                                 CreateDisplayInfo(10, -768, 1024, 768, 1.0f)));
+ 
+   // Offset to the left.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::TOP,
+-                       -10,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::TOP, -10, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(0, 0, 800, 600, 1.0f),
+                                 CreateDisplayInfo(-10, -768, 1024, 768, 1.0f)));
+ }
+@@ -255,32 +232,27 @@ TEST(ScalingUtilTest, CalculateDisplayPlacementNoScaleTop) {
+ TEST(ScalingUtilTest, CalculateDisplayPlacementNoScaleBottom) {
+   // Left edge aligned.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::BOTTOM,
+-                       0,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::BOTTOM, 0, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(0, 0, 800, 600, 1.0f),
+                                 CreateDisplayInfo(0, 600, 1024, 768, 1.0f)));
+ 
+   // Right edge aligned.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::BOTTOM,
+-                       0,
++      DisplayPlacement(DisplayPlacement::BOTTOM, 0,
+                        DisplayPlacement::BOTTOM_RIGHT),
+       CalculateDisplayPlacement(CreateDisplayInfo(0, 0, 800, 600, 1.0f),
+                                 CreateDisplayInfo(-224, 600, 1024, 768, 1.0f)));
+ 
+   // Offset to the right
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::BOTTOM,
+-                       10,
++      DisplayPlacement(DisplayPlacement::BOTTOM, 10,
+                        DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(0, 0, 800, 600, 1.0f),
+                                 CreateDisplayInfo(10, 600, 1024, 768, 1.0f)));
+ 
+   // Offset to the left
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::BOTTOM,
+-                       -10,
++      DisplayPlacement(DisplayPlacement::BOTTOM, -10,
+                        DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(0, 0, 800, 600, 1.0f),
+                                 CreateDisplayInfo(-10, 600, 1024, 768, 1.0f)));
+@@ -288,16 +260,12 @@ TEST(ScalingUtilTest, CalculateDisplayPlacementNoScaleBottom) {
+ 
+ TEST(ScalingUtilTest, CalculateDisplayPlacementNoScaleOddDimensions) {
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::RIGHT,
+-                       5,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::RIGHT, 5, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(35, 72, 24, 24, 1.0f),
+                                 CreateDisplayInfo(59, 77, 7, 9, 1.0f)));
+ 
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::LEFT,
+-                       2,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::LEFT, 2, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(1, 7, 30, 40, 1.0f),
+                                 CreateDisplayInfo(-701, 9, 702, 2, 1.0f)));
+ }
+@@ -305,69 +273,54 @@ TEST(ScalingUtilTest, CalculateDisplayPlacementNoScaleOddDimensions) {
+ TEST(ScalingUtilTest, CalculateDisplayPlacement1_5xScale) {
+   // Side by side to the right.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::RIGHT,
+-                       0,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::RIGHT, 0, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(100, 50, 800, 600, 1.0f),
+                                 CreateDisplayInfo(900, 50, 1000, 700, 1.5f)));
+ 
+   // Side-by-side to the left.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::LEFT,
+-                       0,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::LEFT, 0, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(100, 50, 800, 600, 1.0f),
+                                 CreateDisplayInfo(-900, 50, 1000, 700, 1.5f)));
+ 
+   // Side-by-side to the top.
+   // Note that -33 would be the normal enclosing rect offset.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::TOP,
+-                       -34,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::TOP, -34, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(100, 50, 800, 600, 1.0f),
+                                 CreateDisplayInfo(50, -650, 1000, 700, 1.5f)));
+ 
+   // Side-by-side on the bottom.
+   // Note that -33 would be the normal enclosing rect offset.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::BOTTOM,
+-                       -34,
++      DisplayPlacement(DisplayPlacement::BOTTOM, -34,
+                        DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(100, 50, 800, 600, 1.0f),
+                                 CreateDisplayInfo(50, 650, 1000, 700, 1.5f)));
+ 
+   // Side by side to the right.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::RIGHT,
+-                       0,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::RIGHT, 0, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(100, 50, 800, 600, 2.0f),
+                                 CreateDisplayInfo(900, 50, 1000, 700, 1.5f)));
+ 
+   // Side-by-side to the left.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::LEFT,
+-                       0,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::LEFT, 0, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(100, 50, 800, 600, 2.0f),
+                                 CreateDisplayInfo(-900, 50, 1000, 700, 1.5f)));
+ 
+   // Side-by-side to the top.
+   // Note that -33 would be the normal enclosing rect offset.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::TOP,
+-                       -34,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::TOP, -34, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(100, 50, 800, 600, 2.0f),
+                                 CreateDisplayInfo(50, -650, 1000, 700, 1.5f)));
+ 
+-
+   // Side-by-side to the bottom.
+   // Note that -33 would be the normal enclosing rect offset.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::BOTTOM,
+-                       -34,
++      DisplayPlacement(DisplayPlacement::BOTTOM, -34,
+                        DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(100, 50, 800, 600, 2.0f),
+                                 CreateDisplayInfo(50, 650, 1000, 700, 1.5f)));
+@@ -376,9 +329,7 @@ TEST(ScalingUtilTest, CalculateDisplayPlacement1_5xScale) {
+ TEST(ScalingUtilTest, CalculateDisplayPlacement2xScale) {
+   // Side by side to the right.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::RIGHT,
+-                       0,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::RIGHT, 0, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(100, 50, 800, 600, 1.0f),
+                                 CreateDisplayInfo(900, 50, 1000, 700, 2.0f)));
+ 
+@@ -390,57 +341,44 @@ TEST(ScalingUtilTest, CalculateDisplayPlacement2xScale) {
+ 
+   // Side-by-side to the left.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::LEFT,
+-                       0,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::LEFT, 0, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(100, 50, 800, 600, 1.0f),
+                                 CreateDisplayInfo(-900, 50, 1000, 700, 2.0f)));
+ 
+   // Side-by-side to the top.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::TOP,
+-                       -25,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::TOP, -25, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(100, 50, 800, 600, 1.0f),
+                                 CreateDisplayInfo(50, -650, 1000, 700, 2.0f)));
+ 
+   // Side-by-side on the bottom.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::BOTTOM,
+-                       -25,
++      DisplayPlacement(DisplayPlacement::BOTTOM, -25,
+                        DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(100, 50, 800, 600, 1.0f),
+                                 CreateDisplayInfo(50, 650, 1000, 700, 2.0f)));
+ 
+   // Side by side to the right.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::RIGHT,
+-                       0,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::RIGHT, 0, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(100, 50, 800, 600, 2.0f),
+                                 CreateDisplayInfo(900, 50, 1000, 700, 2.0f)));
+ 
+   // Side-by-side to the left.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::LEFT,
+-                       0,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::LEFT, 0, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(100, 50, 800, 600, 2.0f),
+                                 CreateDisplayInfo(-900, 50, 1000, 700, 2.0f)));
+ 
+   // Side-by-side to the top.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::TOP,
+-                       -25,
+-                       DisplayPlacement::TOP_LEFT),
++      DisplayPlacement(DisplayPlacement::TOP, -25, DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(100, 50, 800, 600, 2.0f),
+                                 CreateDisplayInfo(50, -650, 1000, 700, 2.0f)));
+ 
+-
+   // Side-by-side to the bottom.
+   EXPECT_OFFSET_EQ(
+-      DisplayPlacement(DisplayPlacement::BOTTOM,
+-                       -25,
++      DisplayPlacement(DisplayPlacement::BOTTOM, -25,
+                        DisplayPlacement::TOP_LEFT),
+       CalculateDisplayPlacement(CreateDisplayInfo(100, 50, 800, 600, 2.0f),
+                                 CreateDisplayInfo(50, 650, 1000, 700, 2.0f)));
+@@ -453,6 +391,16 @@ TEST(ScalingUtilTest, SquaredDistanceBetweenRectsFullyIntersecting) {
+   EXPECT_EQ(-100, SquaredDistanceBetweenRects(rect2, rect1));
+ }
+ 
++TEST(ScalingUtilTest, SquaredDistanceBetweenRectsFarApart) {
++  const gfx::Rect ref(16954, 32, 390, 608);
++  const gfx::Rect distant(65536, 0, 960, 640);
++  constexpr int64_t kDistance = 65536 - (16954 + 390);
++  EXPECT_EQ(kDistance * kDistance, SquaredDistanceBetweenRects(ref, distant));
++  EXPECT_EQ(kDistance * kDistance, SquaredDistanceBetweenRects(distant, ref));
++  EXPECT_LT(SquaredDistanceBetweenRects(ref, gfx::Rect(16384, 0, 960, 640)),
++            SquaredDistanceBetweenRects(ref, distant));
++}
++
+ TEST(ScalingUtilTest, SquaredDistanceBetweenRectsPartiallyIntersecting) {
+   gfx::Rect rect1(0, 0, 10, 10);
+   gfx::Rect rect2(5, 5, 20, 20);
+diff --git a/ui/display/win/screen_win.cc b/ui/display/win/screen_win.cc
+index 2c11ea99b7..69da30d977 100644
+--- a/ui/display/win/screen_win.cc
++++ b/ui/display/win/screen_win.cc
+@@ -46,6 +46,7 @@
+ #include "ui/gfx/geometry/rect.h"
+ #include "ui/gfx/geometry/rect_f.h"
+ #include "ui/gfx/geometry/size.h"
++#include "ui/gfx/geometry/size_conversions.h"
+ #include "ui/gfx/geometry/vector2d.h"
+ #include "ui/gfx/switches.h"
+ #include "ui/gfx/win/singleton_hwnd.h"
+@@ -115,16 +116,18 @@ ScaleFactors GetMonitorScaleFactors(HMONITOR monitor,
+ // TODO(crbug.com/343872357): Check additional data sources when this is empty.
+ std::string GetFriendlyDeviceName(
+     const std::optional<DISPLAYCONFIG_PATH_INFO>& path) {
+-  if (!path)
++  if (!path) {
+     return std::string();
++  }
+   DISPLAYCONFIG_TARGET_DEVICE_NAME targetName = {};
+   targetName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+   targetName.header.size = sizeof(targetName);
+   targetName.header.adapterId = path->targetInfo.adapterId;
+   targetName.header.id = path->targetInfo.id;
+   LONG result = DisplayConfigGetDeviceInfo(&targetName.header);
+-  if (result == ERROR_SUCCESS && targetName.flags.friendlyNameFromEdid)
++  if (result == ERROR_SUCCESS && targetName.flags.friendlyNameFromEdid) {
+     return base::WideToUTF8(targetName.monitorFriendlyDeviceName);
++  }
+   return std::string();
+ }
+ 
+@@ -135,16 +138,18 @@ float GetSDRWhiteLevel(const std::optional<DISPLAYCONFIG_PATH_INFO>& path) {
+     white_level.header.size = sizeof(white_level);
+     white_level.header.adapterId = path->targetInfo.adapterId;
+     white_level.header.id = path->targetInfo.id;
+-    if (DisplayConfigGetDeviceInfo(&white_level.header) == ERROR_SUCCESS)
++    if (DisplayConfigGetDeviceInfo(&white_level.header) == ERROR_SUCCESS) {
+       return white_level.SDRWhiteLevel * 80.0 / 1000.0;  // From wingdi.h.
++    }
+   }
+   return 200.0f;
+ }
+ 
+ DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY GetOutputTechnology(
+     const std::optional<DISPLAYCONFIG_PATH_INFO>& path) {
+-  if (path)
++  if (path) {
+     return path->targetInfo.outputTechnology;
++  }
+   return DISPLAYCONFIG_OUTPUT_TECHNOLOGY_OTHER;
+ }
+ 
+@@ -184,8 +189,9 @@ struct DisplaySettings {
+ DisplaySettings GetDisplaySettingsForDevice(const wchar_t* device_name) {
+   DEVMODE mode = {};
+   mode.dmSize = sizeof(mode);
+-  if (!::EnumDisplaySettings(device_name, ENUM_CURRENT_SETTINGS, &mode))
++  if (!::EnumDisplaySettings(device_name, ENUM_CURRENT_SETTINGS, &mode)) {
+     return {Display::ROTATE_0, 0};
++  }
+   return {OrientationToRotation(mode.dmDisplayOrientation),
+           static_cast<int>(mode.dmDisplayFrequency)};
+ }
+@@ -422,16 +428,18 @@ std::vector<ScreenWinDisplay> DisplayInfosToScreenWinDisplays(
+   builder.Build()->ApplyToDisplayList(&displays, nullptr, 0);
+ 
+   std::vector<ScreenWinDisplay> screen_win_displays;
+-  for (size_t i = 0; i < display_infos.size(); ++i)
++  for (size_t i = 0; i < display_infos.size(); ++i) {
+     screen_win_displays.emplace_back(displays[i], display_infos[i]);
++  }
+   return screen_win_displays;
+ }
+ 
+ std::vector<Display> ScreenWinDisplaysToDisplays(
+     const std::vector<ScreenWinDisplay>& screen_win_displays) {
+   std::vector<Display> displays;
+-  for (const auto& screen_win_display : screen_win_displays)
++  for (const auto& screen_win_display : screen_win_displays) {
+     displays.push_back(screen_win_display.display());
++  }
+   return displays;
+ }
+ 
+@@ -741,10 +749,12 @@ gfx::Point ScreenWin::DIPToClientPoint(HWND hwnd,
+ 
+ gfx::Rect ScreenWin::ScreenToDIPRect(HWND hwnd,
+                                      const gfx::Rect& pixel_bounds) const {
+-  const ScreenWinDisplay screen_win_display = hwnd
+-      ? GetScreenWinDisplayVia(&ScreenWin::GetScreenWinDisplayNearestHWND, hwnd)
+-      : GetScreenWinDisplayVia(
+-            &ScreenWin::GetScreenWinDisplayNearestScreenRect, pixel_bounds);
++  const ScreenWinDisplay screen_win_display =
++      hwnd
++          ? GetScreenWinDisplayVia(&ScreenWin::GetScreenWinDisplayNearestHWND,
++                                   hwnd)
++          : GetScreenWinDisplayVia(
++                &ScreenWin::GetScreenWinDisplayNearestScreenRect, pixel_bounds);
+   const float scale_factor =
+       1.0f / screen_win_display.display().device_scale_factor();
+   const gfx::Point origin =
+@@ -764,14 +774,18 @@ gfx::Rect ScreenWin::DIPToScreenRect(HWND hwnd,
+   // The HWND parameter is needed for cases where Chrome windows span monitors
+   // that have different DPI settings. This is known to matter when using the OS
+   // IME support. See https::/crbug.com/1224715 for more details.
+-  const ScreenWinDisplay screen_win_display = hwnd
+-      ? GetScreenWinDisplayVia(&ScreenWin::GetScreenWinDisplayNearestHWND, hwnd)
+-      : GetScreenWinDisplayVia(
+-            &ScreenWin::GetScreenWinDisplayNearestDIPRect, dip_bounds);
++  const ScreenWinDisplay screen_win_display =
++      hwnd ? GetScreenWinDisplayVia(&ScreenWin::GetScreenWinDisplayNearestHWND,
++                                    hwnd)
++           : GetScreenWinDisplayVia(
++                 &ScreenWin::GetScreenWinDisplayNearestDIPRect, dip_bounds);
+   const gfx::Point origin =
+       display::win::DIPToScreenPoint(dip_bounds.origin(), screen_win_display);
+   const float scale_factor = screen_win_display.display().device_scale_factor();
+-  return {origin, ScaleToEnclosingRect(dip_bounds, scale_factor).size()};
++  // The origin was rounded independently above. Scaling the entire rectangle
++  // and taking its enclosing size also includes the fractional scaled origin,
++  // potentially adding a pixel and extending a popup beyond its work area.
++  return {origin, gfx::ScaleToCeiledSize(dip_bounds.size(), scale_factor)};
+ }
+ 
+ gfx::Rect ScreenWin::ClientToDIPRect(HWND hwnd,
+@@ -810,8 +824,9 @@ std::optional<gfx::Vector2dF> ScreenWin::GetPixelsPerInchForPointerDevice(
+ 
+ int ScreenWin::GetSystemMetricsForMonitor(HMONITOR monitor, int metric) const {
+   // Fall back to the primary display's HMONITOR.
+-  if (!monitor)
++  if (!monitor) {
+     monitor = GetPrimaryMonitor();
++  }
+ 
+   // We don't include fudge factors stemming from accessibility features when
+   // dealing with system metrics associated with window elements drawn by the
+@@ -843,8 +858,9 @@ float ScreenWin::GetScaleFactorForMonitor(HMONITOR monitor) const {
+ }
+ 
+ int ScreenWin::GetDPIForHWND(HWND hwnd) const {
+-  if (Display::HasForceDeviceScaleFactor())
++  if (Display::HasForceDeviceScaleFactor()) {
+     return GetDPIFromScalingFactor(Display::GetForcedDeviceScaleFactor());
++  }
+ 
+   const HMONITOR monitor = ::MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+   return GetPerMonitorDPI(monitor).value_or(
+@@ -942,8 +958,9 @@ gfx::NativeWindow ScreenWin::GetLocalProcessWindowAtPoint(
+   std::set<HWND> hwnd_set;
+   for (auto* const window : ignore) {
+     HWND w = GetHWNDFromNativeWindow(window);
+-    if (w)
++    if (w) {
+       hwnd_set.emplace(w);
++    }
+   }
+ 
+   return LocalProcessWindowFinder::GetProcessWindowAtPoint(point, hwnd_set,
+@@ -1194,14 +1211,16 @@ void ScreenWin::OnWndProc(HWND hwnd,
+                           LPARAM lparam) {
+   if (message != WM_DISPLAYCHANGE &&
+       (message != WM_ACTIVATEAPP || wparam != TRUE) &&
+-      (message != WM_SETTINGCHANGE || wparam != SPI_SETWORKAREA))
++      (message != WM_SETTINGCHANGE || wparam != SPI_SETWORKAREA)) {
+     return;
++  }
+ 
+   TRACE_EVENT1("ui", "ScreenWin::OnWndProc", "message", message);
+ 
+   color_profile_reader_->UpdateIfNeeded();
+-  if (request_hdr_status_callback_)
++  if (request_hdr_status_callback_) {
+     request_hdr_status_callback_.Run();
++  }
+   UpdateAllDisplaysAndNotify();
+ }
+ 
+@@ -1251,8 +1270,9 @@ ScreenWinDisplay ScreenWin::GetScreenWinDisplayNearestDIPPoint(
+   ScreenWinDisplay primary_screen_win_display;
+   for (const auto& screen_win_display : screen_win_displays_) {
+     const gfx::Rect dip_bounds = screen_win_display.display().bounds();
+-    if (dip_bounds.Contains(dip_point))
++    if (dip_bounds.Contains(dip_point)) {
+       return screen_win_display;
++    }
+     if (IsPrimaryScreenWinDisplay(screen_win_display)) {
+       primary_screen_win_display = screen_win_display;
+     }
+diff --git a/ui/display/win/screen_win_headless.cc b/ui/display/win/screen_win_headless.cc
+index e1b885898d..73aa49719c 100644
+--- a/ui/display/win/screen_win_headless.cc
++++ b/ui/display/win/screen_win_headless.cc
+@@ -230,8 +230,9 @@ std::optional<MONITORINFOEX> ScreenWinHeadless::MonitorInfoFromScreenPoint(
+     const gfx::Point& screen_point) const {
+   // ScreenWin::MonitorInfoFromScreenPoint() uses Win32 ::MonitorFromPoint()
+   // with MONITOR_DEFAULTTONEAREST flag.
++  const auto displays = GetPhysicalDisplays();
+   if (const Display* display =
+-          FindDisplayNearestPoint(GetAllDisplays(), screen_point)) {
++          FindDisplayNearestPoint(displays, screen_point)) {
+     return GetMONITORINFOFromDisplayId(display->id());
+   }
+ 
+@@ -267,13 +268,14 @@ std::optional<MONITORINFOEX> ScreenWinHeadless::MonitorInfoFromScreenRect(
+     const gfx::Rect& screen_rect) const {
+   // ScreenWin::MonitorInfoFromScreenRect() uses Win32 ::MonitorFromRect() with
+   // MONITOR_DEFAULTTONEAREST flag.
++  const auto displays = GetPhysicalDisplays();
+   if (const Display* display =
+-          FindDisplayWithBiggestIntersection(GetAllDisplays(), screen_rect)) {
++          FindDisplayWithBiggestIntersection(displays, screen_rect)) {
+     return GetMONITORINFOFromDisplayId(display->id());
+   }
+ 
+-  if (const Display* display = FindDisplayNearestPoint(
+-          GetAllDisplays(), screen_rect.CenterPoint())) {
++  if (const Display* display =
++          FindDisplayNearestPoint(displays, screen_rect.CenterPoint())) {
+     return GetMONITORINFOFromDisplayId(display->id());
+   }
+ 
+@@ -285,18 +287,19 @@ std::optional<MONITORINFOEX> ScreenWinHeadless::MonitorInfoFromWindow(
+     DWORD default_options) const {
+   CHECK(hwnd);
+   const gfx::Rect bounds = GetHeadlessWindowBounds(hwnd);
++  const auto displays = GetPhysicalDisplays();
+ 
+   // ScreenWin::MonitorInfoFromWindow() calls Win32 ::MonitorFromWindow() so
+   // replicate its behavior according to
+   // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-monitorfromwindow
+   if (const Display* display =
+-          FindDisplayWithBiggestIntersection(GetAllDisplays(), bounds)) {
++          FindDisplayWithBiggestIntersection(displays, bounds)) {
+     return GetMONITORINFOFromDisplayId(display->id());
+   }
+ 
+   if (default_options == MONITOR_DEFAULTTONEAREST) {
+     if (const Display* display =
+-            FindDisplayNearestPoint(GetAllDisplays(), bounds.CenterPoint())) {
++            FindDisplayNearestPoint(displays, bounds.CenterPoint())) {
+       return GetMONITORINFOFromDisplayId(display->id());
+     }
+   } else if (default_options == MONITOR_DEFAULTTOPRIMARY) {
+@@ -585,6 +588,16 @@ Display ScreenWinHeadless::GetDisplayFromScreenRect(
+   return GetPrimaryDisplay();
+ }
+ 
++std::vector<Display> ScreenWinHeadless::GetPhysicalDisplays() const {
++  auto displays = GetAllDisplays();
++  for (auto& display : displays) {
++    const auto monitor = GetMONITORINFOFromDisplayId(display.id());
++    CHECK(monitor);
++    display.set_bounds(gfx::Rect(monitor->rcMonitor));
++  }
++  return displays;
++}
++
+ std::optional<MONITORINFOEX>
+ ScreenWinHeadless::GetMONITORINFOFromDisplayIdForTest(int64_t id) const {
+   return GetMONITORINFOFromDisplayId(id);
+diff --git a/ui/display/win/screen_win_headless.h b/ui/display/win/screen_win_headless.h
+index 5abe7be3cb..50b0932c91 100644
+--- a/ui/display/win/screen_win_headless.h
++++ b/ui/display/win/screen_win_headless.h
+@@ -145,6 +145,9 @@ class DISPLAY_EXPORT ScreenWinHeadless
+ 
+   std::optional<MONITORINFOEX> GetMONITORINFOFromDisplayId(int64_t id) const;
+ 
++  // MonitorFrom* emulation receives physical pixels, unlike Screen's DIP API.
++  std::vector<Display> GetPhysicalDisplays() const;
++
+   void UpdateFromDisplays(const std::vector<Display>& displays);
+ 
+   // Maps display id to a fake Windows monitor info that correlates to
+diff --git a/ui/display/win/screen_win_headless_unittest.cc b/ui/display/win/screen_win_headless_unittest.cc
+index 8a2564cd97..0d59d7548c 100644
+--- a/ui/display/win/screen_win_headless_unittest.cc
++++ b/ui/display/win/screen_win_headless_unittest.cc
+@@ -386,6 +386,13 @@ TEST_F(ScreenWinHeadlessTest, DIPToScreenRect) {
+             gfx::Rect(0, 0, 100, 200));
+ }
+ 
++TEST_F(ScreenWinHeadlessTest, DIPToScreenRectFractionalOrigin) {
++  auto screen = CreateHeadlessScreen("{devicePixelRatio=1.25}");
++  EXPECT_EQ(
++      GetScreenWin()->DIPToScreenRect(nullptr, gfx::Rect(5, 31, 390, 610)),
++      gfx::Rect(6, 39, 488, 763));
++}
++
+ TEST_F(ScreenWinHeadlessTest, DIPToScreenRect2x) {
+   auto screen = CreateHeadlessScreen("{devicePixelRatio=2.0}");
+   ASSERT_EQ(screen->GetNumDisplays(), 1);
+diff --git a/ui/views/controls/menu/menu_controller.cc b/ui/views/controls/menu/menu_controller.cc
+index a298c94486..e2bc37075e 100644
+--- a/ui/views/controls/menu/menu_controller.cc
++++ b/ui/views/controls/menu/menu_controller.cc
+@@ -70,6 +70,7 @@
+ #include "ui/aura/window_tree_host.h"
+ #include "ui/base/win/internal_constants.h"
+ #include "ui/display/win/screen_win.h"
++#include "ui/views/widget/desktop_aura/desktop_headless_input.h"
+ #include "ui/views/win/hwnd_util.h"
+ #endif
+ 
+@@ -2760,6 +2761,18 @@ void MenuController::OpenMenuImpl(MenuItemView* item, bool show) {
+           : CalculateMenuBounds(item, preferred_open_direction,
+                                 &resulting_direction, &anchor);
+ 
++#if BUILDFLAG(IS_WIN)
++  if (DesktopHeadlessInputEnabled() && !state_.monitor_bounds.IsEmpty()) {
++    // A remote window's stream ends at its virtual display edge. Desktop
++    // menus may put their shadow/border outside the work area; retain the
++    // complete menu inside the stream, including nested menus and shadows.
++    const gfx::Rect canvas =
++        owner_ && owner_->GetNativeWindow()
++            ? owner_->GetNativeWindow()->GetRootWindow()->GetBoundsInScreen()
++            : state_.monitor_bounds;
++    bounds.AdjustToFit(canvas);
++  }
++#endif
+   SetChildMenuOpenDirectionAtDepth(menu_depth, resulting_direction);
+   bool do_capture = (!did_capture_ && !for_drop_ && !IsEditableCombobox());
+   showing_submenu_ = true;
+diff --git a/ui/views/win/hwnd_message_handler_headless.cc b/ui/views/win/hwnd_message_handler_headless.cc
+index 71258803ab..80979983f0 100644
+--- a/ui/views/win/hwnd_message_handler_headless.cc
++++ b/ui/views/win/hwnd_message_handler_headless.cc
+@@ -127,10 +127,19 @@ gfx::Rect HWNDMessageHandlerHeadless::GetClientAreaBoundsInScreen() const {
+       return gfx::Rect(window_rect);
+     }
+ 
+-    client_insets.set_left(client_rect.left - window_rect.left);
+-    client_insets.set_right(window_rect.right - client_rect.right);
+-    client_insets.set_top(client_rect.top - window_rect.top);
+-    client_insets.set_bottom(window_rect.bottom - client_rect.bottom);
++    // GetClientRect is local to the HWND, whereas GetWindowRect is in screen
++    // coordinates. Compare both in screen coordinates; the hidden HWND may
++    // have an entirely different origin from the virtual headless window.
++    POINT client_origin = {client_rect.left, client_rect.top};
++    if (!::ClientToScreen(hwnd(), &client_origin)) {
++      return gfx::Rect();
++    }
++    client_insets.set_left(client_origin.x - window_rect.left);
++    client_insets.set_right(window_rect.right - client_origin.x -
++                            (client_rect.right - client_rect.left));
++    client_insets.set_top(client_origin.y - window_rect.top);
++    client_insets.set_bottom(window_rect.bottom - client_origin.y -
++                             (client_rect.bottom - client_rect.top));
+   }
+ 
+   gfx::Rect bounds = bounds_;
