@@ -2,7 +2,7 @@
 
 Both repositories use `wip/mvp-flyouts`. Nothing from this unfinished feature
 has merged to main. Qualified Chromium `work` stays `5a7769bea8` (23 baseline
-patches). `out/Default/chrome.exe` is currently **WIP build29**, not main.
+patches). `out/Default/chrome.exe` is currently **WIP build30**, not main.
 
 ## Current checkpoint (2026-10-21)
 
@@ -27,23 +27,27 @@ opens by real toolbar click; decoded appearance stays <=250ms, missing-layer
 pixels. A second real menu click selects New tab and requires a new selected
 tab before cleanup. This is **partial M5b qualification**, not all-flyout signoff.
 
-Chromium source checkpoint `7da2e4f41e` is committed and exported as26 patches;
-infra checkpoint is pending. Full regression currently running with prefix
-`C:/src/chromium/prts-flyouts-regression29-*`:
+Chromium source checkpoint `0f563c2575` is committed and exported as27 patches;
+infra checkpoint `255ffcd` was pushed before that final resize correction.
+Full regression `C:/src/chromium/prts-flyouts-regression29-*` completed24/26:
 
 ```powershell
 powershell -File scripts/test.ps1 -Suite full -AllowDisconnectedDesktop
 ```
 
-Regression29 already finds black decoded tab-strip ROI at1001x777@1.25 on both
-existing M5 capture paths. M1/M2 and the dedicated flyout gates pass. Pending
-launcher comparison adds `--run-all-compositor-stages-before-draw` so CPU UI
-tiles finish before draw; this edit is not yet rebuilt/tested. Exact next step:
-let the bounded suite finish and inspect exit/done files, then rebuild Rust and
-rerun unchanged M5 CPU/GPU gates with that flag. Fix failures without relaxing
-assertions. Rerun dedicated flyouts and production Intel GPU evidence after the
-launcher change, then checkpoint/push WIP only. Main must wait for all required
-flyout, input and lifecycle gates.
+The two failures were M5 resize ROI gates: Viz fitted the old root surface into
+new capture dimensions, producing black letterbox margins. Build30 rejects
+root frames until `metadata.capture.source_size` and full `content_rect` match
+the requested pixels. Unchanged M5 GPU/CPU capture/input gates PASS in
+`prts-flyouts-resize20-*`; all4 app-menu variants, production Intel auto GPU
+(decoded WebGL/video and QSV zero-copy) and v2 CPU WebRTC PASS in
+`prts-flyouts-final30-*`. The ineffective all-stages launcher flag was removed.
+All other broad gates passed regression29 (including M1/M2/M3/M4/recovery,
+MF hardware/lifetime/latency, odd sizes and GPU/CPU/synthetic WebRTC).
+
+Exact next step: checkpoint/push the resize correction on WIP, then implement
+real decoded/input context-menu gates. Main must wait for all required flyout,
+input and lifecycle gates. Keep all acceptance thresholds unchanged.
 
 ## Implemented behavior
 

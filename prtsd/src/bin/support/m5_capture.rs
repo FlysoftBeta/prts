@@ -180,6 +180,22 @@ fn capture_gate(c: &mut Client, w: Window) -> Result<()> {
                     high = high.max(v);
                 }
             }
+            if high.saturating_sub(low) <= 40 {
+                let mut source_low = 255u8;
+                let mut source_high = 0u8;
+                for y in top..bottom {
+                    for x in left..right {
+                        let v = source_pixels[(y * pw as usize + x) * 4 + 2];
+                        source_low = source_low.min(v);
+                        source_high = source_high.max(v);
+                    }
+                }
+                eprintln!(
+                    "Capture {label} ROI range {source_low}..{source_high}, decoded {low}..{high}"
+                );
+                let _ = std::fs::write("C:/src/chromium/prts-m5-failure-bgra.bin", &source_pixels);
+                let _ = std::fs::write("C:/src/chromium/prts-m5-failure-rgb.bin", &rgb);
+            }
             ensure!(
                 high.saturating_sub(low) > 40,
                 "Decoded {label} ROI has no controls/contrast {low}..{high}"

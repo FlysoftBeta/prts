@@ -1,17 +1,19 @@
 # PRTS status
 
 ## Current state
-- **Active WIP: `wip/mvp-flyouts` in both repos**, not merged into main. Chromium `7da2e4f41e`
-  (build29, exported26 patches) adds owned-layer scenes, fair two-resource alpha capture and correct
+- **Active WIP: `wip/mvp-flyouts` in both repos**, not merged into main. Chromium `0f563c2575`
+  (build30, exported27 patches) adds owned-layer scenes, fair two-resource alpha capture and correct
   Aura mouse-release flags for Views buttons. Daemon CPU/GPU composition and512MiB bounded caches
   are implemented. Dedicated `-Suite flyouts` PASS11 gates: ordinary checks, nine host cycles, Intel
   GPU/reference pixels, and CPU/software + GPU/QSV with HELLO inflight1/2, each DSF1/2/1.25. Decoded
   app-menu pixels/alpha/close restoration and actual pointer selection creating a new tab all pass;
   unchanged100ms missing-layer/250ms appearance gates pass. Other flyout types remain unqualified.
   Launcher disables Views UI GPU raster only to avoid cold shader stalls; page GPU/composition stay
-  enabled. **Full regression29 finds black tab-strip ROI after1001x777@1.25 resize on both M5 paths**;
-  M1/M2 and dedicated flyout gates pass, remaining broad gates running. Pending comparison adds
-  `--run-all-compositor-stages-before-draw`; not yet rebuilt/tested. Exact resume point:
+  enabled. Full regression29 passed24/26 gates; two M5 resize failures came from Viz letterboxing
+  an old root surface into new dimensions. Build30 rejects stale source sizes/content bounds;
+  unchanged M5 GPU/CPU capture/input now PASS. All4 app-menu variants, production Intel auto GPU
+  (decoded WebGL/video, QSV zero-copy) and v2 CPU WebRTC reruns PASS build30. Ineffective all-stages
+  launcher comparison removed. Other flyout gates remain next. Exact resume point:
   [mvp-flyouts-wip.md](mvp-flyouts-wip.md), latest journal-mvp.md. Source `work` remains5a7769bea8;
   current chrome binary is WIP. No full flyout signoff.
 - **Next action: continue MVP (PLAN priority 2), M5b steps 4-5**: host-family tracking and GPU/CPU

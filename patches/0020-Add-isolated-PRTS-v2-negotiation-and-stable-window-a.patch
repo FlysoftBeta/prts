@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Tue, 20 Oct 2026 19:38:18 +0800
-Subject: [PATCH 20/26] Add isolated PRTS v2 negotiation and stable window and
+Subject: [PATCH 20/27] Add isolated PRTS v2 negotiation and stable window and
  tab registry
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

@@ -166,7 +166,7 @@ impl RawBrowser {
             // compilation blocking popup capture on Intel. Page rasterization,
             // hardware compositing, WebGL and DXGI capture remain enabled.
             if headless {
-                "--headless=new --disable-features=UiGpuRasterization --run-all-compositor-stages-before-draw"
+                "--headless=new --disable-features=UiGpuRasterization"
             } else {
                 ""
             },
