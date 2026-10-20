@@ -155,6 +155,7 @@ test('real prtsd → Node → browser video, input, multiple viewers, bitrate an
     }, [x, y]);
   }
   const a = await page();
+  await field(a, '#create [name=source]', 'synthetic');
   await field(a, '#create [name=encoder]', encoder);
   await a.click('#create button');
   await playing(a);
@@ -204,6 +205,7 @@ test('real prtsd → Node → browser video, input, multiple viewers, bitrate an
   console.log('Tab create/switch/resize/close retained the existing WebRTC viewer');
 
   const b = await page();
+  await field(b, '#create [name=source]', 'synthetic');
   await field(b, '#create [name=encoder]', encoder);
   await b.click('#create button');
   await playing(b);

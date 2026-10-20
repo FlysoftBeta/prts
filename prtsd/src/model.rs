@@ -141,10 +141,10 @@ impl Options {
         let source = v
             .get("source")
             .map_or(Ok("synthetic"), |_| string(v, "source"))?;
-        if source != "synthetic" {
+        if !matches!(source, "synthetic" | "chromium") {
             return Err(Error::new(
                 "unsupported",
-                "Chromium source is not implemented; use synthetic",
+                "Source must be synthetic or chromium",
             ));
         }
         let encoder = v

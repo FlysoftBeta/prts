@@ -1,0 +1,132 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 10:27:52 +0800
+Subject: [PATCH 14/14] PRTS: resume blocked static capture when frame credits
+ return
+
+Remember updates dropped during section registration or credit exhaustion and request refresh when credits or resources become available. Refresh only blocked sources and avoid duplicate registration refreshes. Keep optional resource and frame diagnostics behind VLOG.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_capture.cc b/chrome/browser/prts/prts_capture.cc
+index 6821dd516f..d17b7bd551 100644
+--- a/chrome/browser/prts/prts_capture.cc
++++ b/chrome/browser/prts/prts_capture.cc
+@@ -8,6 +8,7 @@
+ #include <map>
+ 
+ #include "base/functional/bind.h"
++#include "base/logging.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/read_only_shared_memory_region.h"
+ #include "base/timer/timer.h"
+@@ -94,6 +95,9 @@ class PrtsCapture::Impl {
+             cb) override {
+       mojo::Remote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks> done(
+           std::move(cb));
++      VLOG(2) << "PRTS capture target=" << target
++              << " generation=" << generation
++              << " size=" << info->visible_rect.size().ToString();
+       if (data->is_read_only_shmem_region() &&
+           info->visible_rect.size() == size &&
+           (info->pixel_format == media::PIXEL_FORMAT_ARGB ||
+@@ -128,6 +132,7 @@ class PrtsCapture::Impl {
+     uint64_t target, generation;
+     gfx::Size size;
+     uint32_t fps, max_inflight;
++    bool waiting_for_credit = false;
+     viz::FrameSinkId sink;
+     base::ScopedClosureRunner visibility;
+     base::RepeatingTimer timer;
+@@ -170,11 +175,22 @@ class PrtsCapture::Impl {
+       }
+     }
+   }
++  void ResumeBlockedSources() {
++    for (const auto& [id, source] : sources) {
++      if (source->waiting_for_credit && source->capturer) {
++        source->capturer->RequestRefreshFrame();
++      }
++    }
++  }
+   void Frame(Source& source,
+              base::span<const uint8_t> pixels,
+              size_t stride,
+              bool rgba,
+              base::TimeTicks capture_time) {
++    // Viz has delivered this update, but section registration or downstream
++    // credits may prevent publication. Remember the lost update until the
++    // corresponding resource/credit transition can request a fresh capture.
++    source.waiting_for_credit = true;
+     Slot* free = nullptr;
+     size_t busy = 0;
+     for (auto& [id, slot] : slots) {
+@@ -186,6 +202,8 @@ class PrtsCapture::Impl {
+       }
+     }
+     if (busy >= limit) {
++      VLOG(2) << "PRTS capture blocked target=" << source.target
++              << " busy=" << busy;
+       return;
+     }
+     if (!free) {
+@@ -205,6 +223,8 @@ class PrtsCapture::Impl {
+       // Includes registering and retired slots: transitions never multiply the
+       // pool.
+       if (slots.size() >= limit) {
++        VLOG(2) << "PRTS capture blocked target=" << source.target
++                << " pool full";
+         return;
+       }
+       Slot slot;
+@@ -235,6 +255,8 @@ class PrtsCapture::Impl {
+       e.Int(0, 8);
+       auto request = slot.request;
+       slots.emplace(slot.id, std::move(slot));
++      VLOG(1) << "PRTS capture register target=" << source.target
++              << " request=" << request;
+       send.Run(0x300, request, std::move(e.data));
+       return;
+     }
+@@ -253,6 +275,9 @@ class PrtsCapture::Impl {
+     std::atomic_thread_fence(std::memory_order_release);
+     free->busy = true;
+     free->frame = ++next_frame;
++    source.waiting_for_credit = false;
++    VLOG(2) << "PRTS capture publish target=" << source.target
++            << " generation=" << source.generation << " frame=" << free->frame;
+     Encoder e;
+     e.Int(source.target, 8);
+     e.Int(source.generation, 8);
+@@ -342,7 +367,9 @@ bool PrtsCapture::Receive(const Record& r) {
+       return false;
+     }
+     it->second.busy = false;
++    VLOG(2) << "PRTS capture release buffer=" << b << " frame=" << f;
+     impl_->Collect();
++    impl_->ResumeBlockedSources();
+     return true;
+   }
+   if (r.type != 7 || !r.id || (r.id & 1) || !d.Done()) {
+@@ -354,19 +381,14 @@ bool PrtsCapture::Receive(const Record& r) {
+       continue;
+     }
+     slot.request = 0;
++    VLOG(1) << "PRTS capture resource ack request=" << r.id;
+     if (slot.registered) {
+       impl_->slots.erase(it);
+     } else {
+       slot.registered = true;
+-      if (!slot.retired) {
+-        Refresh(slot.target);
+-      }
+     }
+     impl_->Collect();
+-    // Pool space may have become available after a static-page transition.
+-    for (const auto& [id, source] : impl_->sources) {
+-      Refresh(id);
+-    }
++    impl_->ResumeBlockedSources();
+     return true;
+   }
+   return false;

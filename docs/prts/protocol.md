@@ -207,7 +207,7 @@ Stale generation/inactive-target input is dropped, with rate-limited FAULT
 
 ### 2.5 Registered frame resources
 
-Use a bounded pool, normally three buffers per active generation. No handles or
+Use a bounded pool, one or two buffers across subscribed targets/generations. No handles or
 pixels appear per frame. Browser registers each resource on the event pipe,
 waits for OK, then may publish frames referencing it. Registration is:
 
@@ -219,13 +219,32 @@ waits for OK, then may publish frames referencing it. Registration is:
 | 0x0311 FRAME_CPU | B->D notification, frame | FrameHeader |
 | 0x0320 FRAME_RELEASE | D->B notification, command | buffer:u64,frame:u64,disposition:u8 |
 | 0x0321 FRAME_CONFIG | D->B request, command | target:u64,mode:u8,max_inflight:u32,max_fps:u32 -> TARGET_RESULT |
+| 0x0322 FRAME_REFRESH | D->B request, command | target:u64 -> OK |
 
 `FrameHeader = {target:u64,generation:u64,buffer:u64,frame:u64,
 timestamp_us:u64,width:u32,height:u32,format:u8,damage:Rect[]}` (max 64 rects).
 kind/mode: 1=D3D11 texture, 2=CPU section; format: 1=BGRA8 only.
-Mode starts as CPU; FRAME_CONFIG selects a negotiated mode, FPS 1..120, and
+CPU is explicitly the readback **fallback**, not the M4 GPU fast path.
+Targets start unsubscribed. FRAME_CONFIG with mode=2 subscribes the target
+using CPU sections; mode=0,max_inflight=0,max_fps=0 unsubscribes. No capture
+occurs for an unsubscribed target. FRAME_REFRESH requests a fresh full image
+(including static content) for a subscribed target; it returns acceptance, not
+a frame. An unsubscribed target refresh is an accepted no-op. This permits
+PLI/keyframe requests to refresh content without reallocating a generation.
+FRAME_CONFIG selects a negotiated mode, FPS 1..120, and
 1..negotiated max_inflight. Applying it allocates a new generation. Old resources
 drain before unregister; production may pause. Resize uses the same transition.
+M3 uses at most two section resources across the entire instance, with up to two
+credits for a single subscription, or one each for two subscriptions, and a
+shared global ceiling of two. More than two subscriptions return resource_exhausted. Section data
+is copied from Viz ARGB shared memory into reusable tightly packed BGRA sections;
+ARGB/ABGR platform ordering is normalized and alpha forced opaque. The daemon
+copies into one latest CPU ingress frame per target (at most two pending copies,
+bounded by registered sections) and releases the section before encoding.
+Replacing one target's copy cannot discard another subscription's static frame;
+unregistering its last section removes an unread copy. The video worker retains
+one latest encoded publication. OpenH264 converts CPU input to I420; QSV to CPU NV12.
+These copies and CPU conversion are deliberate fallback costs.
 The total number of submitted/unreleased descriptors across all generations
 MUST NOT exceed negotiated max_inflight; retired pools do not create credits.
 Reject duplicate buffers, inconsistent metadata, or references before OK.
@@ -394,6 +413,13 @@ encoding failure falls back to software and emits a warning log; stats and
 instance.ready report the actual backend name. Optional profiles `appcontainer`
 and `lpac` are accepted only if advertised and GPU compatibility is validated.
 `job` means managed process-tree Job Object containment, not a security sandbox.
+The Chromium executable is configured by the trusted daemon environment
+`PRTS_CHROME_PATH` (default `C:/src/chromium/src/out/Default/chrome.exe`); it is
+not accepted from viewer input. Browser startup is asynchronous and has a separate
+loader deadline; close/EOF cancels startup. The Windows launcher creates the
+browser suspended, assigns a kill-on-close Job Object, then resumes it. This
+provides process-tree lifetime containment while preserving Chromium sandbox/GPU
+operation; AppContainer/LPAC tenant security is deferred.
 Synthetic uses the same validated options; isolation records policy but there is
 no browser process to isolate. Unknown/unimplemented profiles return unsupported.
 Size omission on target.create inherits instance default, not another tab's size.

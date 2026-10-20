@@ -30,11 +30,12 @@ cr gen | build [out] [target] | run [out]
 2. `cr export`, then commit `patches/` (and `PIN` if changed) in this repo.
 3. Rebase onto newer upstream: `cr update`. If `git am` conflicts: fix in src, `git am --continue`, `cr export`.
 
-## PRTS Phase 1: how to run
+## PRTS: how to run
 
-The synthetic source streams live OpenH264 video over WebRTC. It needs Node.js
-22+, Rust stable MSVC and Visual Studio C++ tools/Windows SDK on Windows x64.
-No Chromium build is needed for Phase 1.
+PRTS streams real Chromium pages over WebRTC using a CPU readback fallback.
+It needs Node.js 22+, Rust stable MSVC and Visual Studio C++ tools/Windows SDK
+on Windows x64, plus the patched Chromium build. Synthetic mode remains
+available without Chromium.
 
 From the repository root in PowerShell:
 
@@ -44,22 +45,25 @@ cargo build --release
 cd ../server
 npm ci
 cd ..
+# Optional; the default is this patched component build:
+$env:PRTS_CHROME_PATH='C:/src/chromium/src/out/Default/chrome.exe'
 node server
 ```
 
-Open `http://127.0.0.1:8080`, create a synthetic instance, and click the video
-to type or move/click the pointer. The stream displays that input. Use New tab,
+Open `http://127.0.0.1:8080`, enter a URL and create a Chromium instance
+(the default source, labelled CPU fallback). Click the video to interact with
+the real page. Select Synthetic for tests without Chromium. Use New tab,
 the tab buttons and Resize to manage targets. A second browser tab can create
 another instance or view an existing one; uncheck Request control to share an
 instance already controlled by another viewer. Receiver and encoder stats appear
-below the video. Network simulation supports a bitrate target cap; packet delay
-and loss are currently unsupported and return an explicit error.
+below the video. Network simulation supports bitrate caps, packet delay and loss.
 
 Run the automated real-daemon/browser test (build prtsd first):
 
 ```powershell
 cd server
-npm run e2e
+npm run e2e          # synthetic source regression
+npm run e2e:browser  # real PRTS pages, decoded pixels/input, two instances
 ```
 
 It uses installed Chrome/Edge or `C:/src/chromium/src/out/Default/chrome.exe`
@@ -71,8 +75,9 @@ the separate mock/unit suite; `cargo test --release` in `prtsd/` runs the Rust
 integration suite. If PATH is stale, prepend `C:/Program Files/nodejs` and
 `$env:USERPROFILE/.cargo/bin`.
 
-Chromium capture, D3D11 shared textures, QSV and Windows process isolation are
-later phases. See [the plan](docs/prts/PLAN.md) and the
+CPU capture, OpenH264/QSV CPU input and Job Object process-tree lifetime are
+implemented. D3D11 shared textures and AppContainer/LPAC isolation remain later
+phases. See [M3 acceptance/design](docs/prts/phase2-m3.md). See [the plan](docs/prts/PLAN.md) and the
 [server](docs/prts/server-notes.md) / [daemon](docs/prts/prtsd-notes.md) notes.
 
 Branch `main` in src always equals `PIN`; `work` = `main` + patches. `sync` refuses to run with uncommitted changes.

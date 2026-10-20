@@ -31,6 +31,181 @@ use webrtc::{
 };
 
 type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>;
+
+/// A static browser has no periodic source frames. A decoded IDR after this
+/// explicit PLI proves viewer feedback reached the Viz refresh adapter.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires patched PRTS Chromium; run --ignored --nocapture"]
+async fn browser_static_pli_requests_fresh_capture() -> Result<()> {
+    let fixture = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}/", fixture.local_addr()?);
+    let fixture_task = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = fixture.accept().await {
+            tokio::spawn(async move {
+                let mut request = [0u8; 4096];
+                let _ = socket.read(&mut request).await;
+                let body = "<!doctype html><style>body{margin:0;background:rgb(220,30,60)}</style><title>static-pli</title>";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    let (c, mut child) = Control::start().await?;
+    c.ok("hello", json!({"versions":[1]})).await?;
+    let created = c.ok("instance.create", json!({"options":{"source":"chromium","encoder":"software","initial_url":url,"size":{"width":320,"height":240}}})).await?;
+    let iid = created["instance"]["instance_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let ready = tokio::time::timeout(Duration::from_secs(330), async {
+        loop {
+            if let Some(event) = c
+                .log
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|e| e["event"] == "instance.ready" || e["event"] == "instance.failed")
+                .cloned()
+            {
+                break event;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    anyhow::ensure!(
+        ready["event"] == "instance.ready",
+        "Browser failed: {ready}"
+    );
+    let session = c
+        .ok(
+            "session.create",
+            json!({"instance_id":iid,"viewer_id":"static-pli","control":false}),
+        )
+        .await?;
+    let sid = session["session_id"].as_str().unwrap().to_owned();
+    let (ice_tx, mut ice_rx) = mpsc::channel(256);
+    let handler = ClientHandler {
+        auto_pli: false,
+        track: Default::default(),
+        ice: ice_tx,
+        messages: Default::default(),
+        control: Default::default(),
+        pictures: Default::default(),
+        rtp: Default::default(),
+        plis: Default::default(),
+        idrs: Default::default(),
+        feedback: Default::default(),
+    };
+    let mut media = MediaEngine::default();
+    media.register_default_codecs()?;
+    let registry = register_default_interceptors(Registry::new(), &mut media)?;
+    let pc: Arc<dyn PeerConnection> = Arc::new(
+        PeerConnectionBuilder::new()
+            .with_media_engine(media)
+            .with_interceptor_registry(registry)
+            .with_handler(Arc::new(handler.clone()))
+            .with_udp_addrs(vec!["0.0.0.0:0"])
+            .build()
+            .await?,
+    );
+    let offer = c.ok("session.offer", json!({"session_id":sid})).await?;
+    pc.set_remote_description(serde_json::from_value(offer["description"].clone())?)
+        .await?;
+    {
+        let mut b = c.bridge.lock().await;
+        b.pc = Some(pc.clone());
+        for candidate in std::mem::take(&mut b.pending) {
+            pc.add_ice_candidate(candidate).await?;
+        }
+    }
+    let answer = pc.create_answer(None).await?;
+    let ufrag = prtsd::viewer::sdp_field(&answer.sdp, "a=ice-ufrag:").unwrap();
+    let ice_control = c.clone();
+    let ice_sid = sid.clone();
+    let ice_task = tokio::spawn(async move {
+        while let Some(candidate) = ice_rx.recv().await {
+            let candidate = candidate.map(|mut c| {
+                c.username_fragment = Some(ufrag.clone());
+                c.sdp_mid = Some("0".into());
+                c.sdp_mline_index = Some(0);
+                c
+            });
+            ice_control
+                .ok(
+                    "session.ice",
+                    json!({"session_id":ice_sid,"candidate":candidate}),
+                )
+                .await
+                .unwrap();
+        }
+    });
+    pc.set_local_description(answer.clone()).await?;
+    c.ok(
+        "session.answer",
+        json!({"session_id":sid,"description":answer}),
+    )
+    .await?;
+    wait_for(|| handler.pictures.lock().unwrap().last().cloned()).await?;
+    // Allow registration and initial decoder recovery refreshes to settle.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let before = handler.pictures.lock().unwrap().len();
+    let idrs = handler.idrs.load(Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    anyhow::ensure!(
+        handler.pictures.lock().unwrap().len() == before,
+        "Static source did not settle before PLI"
+    );
+    let track = handler.track.lock().unwrap().clone().unwrap();
+    let started = Instant::now();
+    track
+        .write_rtcp(vec![Box::new(PictureLossIndication {
+            sender_ssrc: 42,
+            media_ssrc: *track
+                .ssrcs()
+                .await
+                .first()
+                .context("Remote track has no SSRC")?,
+        })])
+        .await?;
+    let picture = wait_for(|| {
+        if handler.idrs.load(Ordering::Relaxed) > idrs
+            && handler.pictures.lock().unwrap().len() > before
+        {
+            handler.pictures.lock().unwrap().last().cloned()
+        } else {
+            None
+        }
+    })
+    .await?;
+    anyhow::ensure!(
+        (picture.w, picture.h) == (320, 240) && picture.dot.abs_diff(94) < 12,
+        "Incorrect static browser picture: {picture:?}"
+    );
+    println!(
+        "Real static browser PLI -> new captured/decoded IDR in {:.2}ms ({} -> {} IDRs)",
+        started.elapsed().as_secs_f64() * 1000.,
+        idrs,
+        handler.idrs.load(Ordering::Relaxed)
+    );
+    pc.close().await?;
+    c.ok("instance.close", json!({"instance_id":iid})).await?;
+    c.input.lock().await.take();
+    anyhow::ensure!(
+        tokio::time::timeout(Duration::from_secs(8), child.wait())
+            .await??
+            .success(),
+        "Daemon exit failed"
+    );
+    ice_task.abort();
+    fixture_task.abort();
+    Ok(())
+}
 #[derive(Default)]
 struct Bridge {
     pc: Option<Arc<dyn PeerConnection>>,
@@ -161,6 +336,8 @@ struct Picture {
 }
 #[derive(Clone)]
 struct ClientHandler {
+    auto_pli: bool,
+    track: Arc<Mutex<Option<Arc<dyn TrackRemote>>>>,
     ice: mpsc::Sender<Option<RTCIceCandidateInit>>,
     messages: Arc<Mutex<Vec<Value>>>,
     control: Arc<Mutex<Option<Arc<dyn DataChannel>>>>,
@@ -200,6 +377,8 @@ impl PeerConnectionEventHandler for ClientHandler {
         });
     }
     async fn on_track(&self, track: Arc<dyn TrackRemote>) {
+        *self.track.lock().unwrap() = Some(track.clone());
+        let auto_pli = self.auto_pli;
         let (pictures, rtp, plis, idrs) = (
             self.pictures.clone(),
             self.rtp.clone(),
@@ -246,7 +425,7 @@ impl PeerConnectionEventHandler for ClientHandler {
                             });
                         }
                         encoded.clear();
-                        if !requested {
+                        if auto_pli && !requested {
                             requested = true;
                             plis.fetch_add(1, Ordering::Relaxed);
                             track
@@ -274,8 +453,11 @@ async fn synthetic_stdio_webrtc_input_and_lifecycle() -> Result<()> {
     assert_eq!(hello["result"]["capabilities"]["packet_shaping"], true);
     c.ok("stats.configure", json!({"interval_ms":250})).await?;
     assert_eq!(
-        c.request("instance.create", json!({"options":{"source":"chromium"}}))
-            .await?["error"]["code"],
+        c.request(
+            "instance.create",
+            json!({"options":{"source":"unknown-test-source"}})
+        )
+        .await?["error"]["code"],
         "unsupported"
     );
     let instance = c
@@ -321,6 +503,8 @@ async fn synthetic_stdio_webrtc_input_and_lifecycle() -> Result<()> {
     );
     let (ice_tx, mut ice_rx) = mpsc::channel(256);
     let handler = ClientHandler {
+        auto_pli: true,
+        track: Default::default(),
         ice: ice_tx,
         messages: Default::default(),
         control: Default::default(),

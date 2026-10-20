@@ -4,7 +4,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use std::{
     collections::VecDeque,
     fs::File,
-    io::{Read, Write},
+    io::Write,
     mem::size_of,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
     path::Path,
@@ -20,7 +20,7 @@ use windows::{
     Win32::{
         Foundation::{HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0},
         Security::SECURITY_ATTRIBUTES,
-        System::{IO::CancelSynchronousIo, Pipes::CreatePipe, Threading::*},
+        System::{IO::CancelSynchronousIo, JobObjects::*, Pipes::CreatePipe, Threading::*},
     },
     core::{PCWSTR, PWSTR},
 };
@@ -76,6 +76,7 @@ pub struct RawBrowser {
     pub command: File,
     pub event: File,
     pub frame: File,
+    job: OwnedHandle,
     process: OwnedHandle,
     pub pid: u32,
 }
@@ -97,14 +98,25 @@ impl RawBrowser {
         let (event, evt_child) = pipe(false)?;
         let (frame, frame_child) = pipe(false)?;
         let children = [handle(&cmd_child), handle(&evt_child), handle(&frame_child)];
+        let job = adopt(unsafe { CreateJobObjectW(None, PCWSTR::null())? });
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        unsafe {
+            SetInformationJobObject(
+                handle(&job),
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const _,
+                size_of_val(&limits) as u32,
+            )?;
+        }
         // Vec<usize> guarantees attribute-list pointer alignment. Windows returns its byte size.
         let mut bytes = 0;
-        let _ = unsafe { InitializeProcThreadAttributeList(None, 1, None, &mut bytes) };
+        let _ = unsafe { InitializeProcThreadAttributeList(None, 2, None, &mut bytes) };
         ensure!(bytes > 0, "No process attribute list size");
         let mut storage = vec![0usize; bytes.div_ceil(size_of::<usize>())];
         let list = LPPROC_THREAD_ATTRIBUTE_LIST(storage.as_mut_ptr().cast());
         unsafe {
-            InitializeProcThreadAttributeList(Some(list), 1, None, &mut bytes)?;
+            InitializeProcThreadAttributeList(Some(list), 2, None, &mut bytes)?;
         }
         struct Attributes(LPPROC_THREAD_ATTRIBUTE_LIST);
         impl Drop for Attributes {
@@ -122,6 +134,20 @@ impl RawBrowser {
                 PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
                 Some(children.as_ptr().cast()),
                 size_of_val(&children),
+                None,
+                None,
+            )?;
+        }
+        // Atomic job assignment closes the parent-death race between
+        // CreateProcess and a subsequent AssignProcessToJobObject call.
+        let jobs = [handle(&job)];
+        unsafe {
+            UpdateProcThreadAttribute(
+                list,
+                0,
+                PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
+                Some(jobs.as_ptr().cast()),
+                size_of_val(&jobs),
                 None,
                 None,
             )?;
@@ -156,7 +182,9 @@ impl RawBrowser {
                 !log.contains('"') && !log.contains('\0'),
                 "Invalid browser log path"
             );
-            text.push_str(" --enable-logging --vmodule=prts_controller=1 --log-file=\"");
+            text.push_str(
+                " --enable-logging --vmodule=prts_controller=1,prts_capture=1 --log-file=\"",
+            );
             text.push_str(&log);
             text.push('"');
         }
@@ -172,7 +200,7 @@ impl RawBrowser {
                 None,
                 None,
                 true,
-                EXTENDED_STARTUPINFO_PRESENT,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED,
                 None,
                 PCWSTR::null(),
                 &startup.StartupInfo,
@@ -181,12 +209,20 @@ impl RawBrowser {
         }
         // CreateProcess grants full process access, including PROCESS_DUP_HANDLE and lifecycle rights.
         let process_handle = adopt(process.hProcess);
-        drop(adopt(process.hThread));
+        let thread_handle = adopt(process.hThread);
+        if unsafe { ResumeThread(handle(&thread_handle)) } == u32::MAX {
+            unsafe {
+                let _ = TerminateProcess(handle(&process_handle), 1);
+            }
+            bail!("Cannot resume contained Chromium");
+        }
+        drop(thread_handle);
         drop((cmd_child, evt_child, frame_child));
         Ok(Self {
             command: command.into(),
             event: event.into(),
             frame: frame.into(),
+            job,
             process: process_handle,
             pid: process.dwProcessId,
         })
@@ -210,9 +246,20 @@ impl RawBrowser {
     /// Component builds may spend substantial time in the Windows DLL loader.
     /// This startup deadline is separate from the five-second HELLO_ACK deadline.
     pub fn wait_startup(&self) -> Result<()> {
+        self.wait_startup_cancellable(None)
+    }
+    fn wait_startup_cancellable(&self, cancel: Option<&AtomicBool>) -> Result<()> {
         let started = Instant::now();
-        let result = unsafe {
-            WaitForInputIdle(handle(&self.process), startup_timeout()?.as_millis() as u32)
+        let timeout = startup_timeout()?;
+        let result = loop {
+            if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+                self.terminate();
+                bail!("Browser startup cancelled");
+            }
+            let status = unsafe { WaitForInputIdle(handle(&self.process), 100) };
+            if status != 258 || started.elapsed() >= timeout {
+                break status;
+            }
         };
         ensure!(
             result == 0,
@@ -264,7 +311,9 @@ enum Incoming {
     FrameClosed(String),
 }
 struct Session {
+    job: OwnedHandle,
     process: OwnedHandle,
+    frames: crate::browser_frames::Resources,
     pid: u32,
     next_id: u64,
     outgoing: Option<SyncSender<Vec<u8>>>,
@@ -301,19 +350,20 @@ impl Session {
             let count = queued_messages.clone();
             let overflow = overflow.clone();
             threads.push(thread::spawn(move || {
-                if is_frame {
-                    let mut byte = [0u8; 1];
-                    let message = match file.read(&mut byte) {
-                        Ok(0) => Incoming::FrameClosed("Frame pipe EOF".into()),
-                        Ok(_) => Incoming::Failure("Unexpected frame bytes in M1".into()),
-                        Err(e) => Incoming::FrameClosed(format!("Frame pipe: {e}")),
-                    };
-                    let _ = tx.try_send(message);
-                    return;
-                }
                 loop {
                     match Record::read(&mut file) {
                         Ok(record) => {
+                            if is_frame && record.kind != 0x311 {
+                                let _ = tx.try_send(Incoming::Failure(
+                                    "Invalid frame pipe direction".into(),
+                                ));
+                                break;
+                            }
+                            if !is_frame && record.kind == 0x311 {
+                                let _ =
+                                    tx.try_send(Incoming::Failure("Frame on event pipe".into()));
+                                break;
+                            }
                             let size = record.payload.len() + 24;
                             if budget.fetch_add(size, Ordering::AcqRel) + size > QUEUE_BYTES
                                 || count.fetch_add(1, Ordering::AcqRel) >= 1024
@@ -333,7 +383,12 @@ impl Session {
                             }
                         }
                         Err(e) => {
-                            let _ = tx.try_send(Incoming::Failure(format!("Event pipe: {e}")));
+                            let message = if is_frame {
+                                Incoming::FrameClosed(format!("Frame pipe: {e}"))
+                            } else {
+                                Incoming::Failure(format!("Event pipe: {e}"))
+                            };
+                            let _ = tx.try_send(message);
                             break;
                         }
                     }
@@ -354,7 +409,9 @@ impl Session {
         }));
         raw.pid = 0; // Disarm raw launch RAII only after all resources have transferred.
         let session = Self {
+            job: raw.job.try_clone()?,
             process,
+            frames: Default::default(),
             pid: unsafe { GetProcessId(handle(&raw.process)) },
             next_id: 1,
             outgoing: Some(outgoing),
@@ -422,6 +479,13 @@ impl Session {
         }
     }
     fn stash(&mut self, record: Record) -> Result<()> {
+        if matches!(record.kind, 0x300 | 0x301 | 0x311) {
+            let reply = match self.frames.process(&record, handle(&self.process)) {
+                Ok(reply) => reply,
+                Err(e) => return self.fail(format!("Frame resource error: {e:#}")),
+            };
+            return self.enqueue(reply.encode()?);
+        }
         let size = record.payload.len() + 24;
         let event = match record.event() {
             Ok(e) => e,
@@ -485,7 +549,7 @@ impl Session {
                 deadline.saturating_duration_since(Instant::now()),
                 kind == SHUTDOWN,
             )?;
-            if record.id == 0 {
+            if record.id == 0 || record.id % 2 == 0 {
                 if kind == HELLO {
                     return self.fail("Event before HELLO_ACK");
                 }
@@ -520,6 +584,7 @@ impl Session {
 }
 impl Drop for Session {
     fn drop(&mut self) {
+        let _ = unsafe { TerminateJobObject(handle(&self.job), 0) };
         // Termination closes peer ends, then CancelSynchronousIo wakes blocked local workers.
         // No reader holds a reference to the session or to the browser process handle.
         if unsafe { WaitForSingleObject(handle(&self.process), 0) } != WAIT_OBJECT_0 {
@@ -552,8 +617,14 @@ impl Browser {
     pub fn launch(executable: impl AsRef<Path>) -> Result<Self> {
         Self::connect(RawBrowser::launch(executable.as_ref())?)
     }
+    pub fn launch_cancellable(executable: impl AsRef<Path>, cancel: &AtomicBool) -> Result<Self> {
+        Self::connect_internal(RawBrowser::launch(executable.as_ref())?, Some(cancel))
+    }
     pub fn connect(raw: RawBrowser) -> Result<Self> {
-        raw.wait_startup()?;
+        Self::connect_internal(raw, None)
+    }
+    fn connect_internal(raw: RawBrowser, cancel: Option<&AtomicBool>) -> Result<Self> {
+        raw.wait_startup_cancellable(cancel)?;
         let mut session = Session::start(raw)?;
         let mut hello = Vec::new();
         for v in [1u16, 0, 1, 0] {
@@ -633,6 +704,91 @@ impl Browser {
             heartbeat: Some(heartbeat),
             hello,
         })
+    }
+    pub fn configure_frames(&self, target: u64, fps: u32) -> Result<Target> {
+        self.configure_frames_with_limit(target, fps, self.hello.max_inflight.min(2))
+    }
+    pub fn configure_frames_with_limit(
+        &self,
+        target: u64,
+        fps: u32,
+        max_inflight: u32,
+    ) -> Result<Target> {
+        ensure!(
+            fps == 0 || (max_inflight > 0 && max_inflight <= self.hello.max_inflight.min(2)),
+            "Invalid frame credit limit"
+        );
+        let mut p = target.to_le_bytes().to_vec();
+        p.push(if fps == 0 { 0 } else { 2 });
+        p.extend((if fps == 0 { 0u32 } else { max_inflight }).to_le_bytes());
+        p.extend(fps.to_le_bytes());
+        self.target_request(0x321, p)
+    }
+    pub fn refresh_frame(&self, target: u64) -> Result<()> {
+        self.empty(0x322, target.to_le_bytes().to_vec())
+    }
+    pub fn poll_frame(&self) -> Result<Option<crate::browser_frames::CpuFrame>> {
+        let mut s = self
+            .session
+            .lock()
+            .map_err(|_| anyhow!("Session poisoned"))?;
+        if s.overflow.load(Ordering::Acquire) {
+            return s.fail("Browser input queue overflow");
+        }
+        if let Some(e) = &s.failed {
+            bail!("{e}")
+        }
+        for _ in 0..1024 {
+            match s.incoming.try_recv() {
+                Ok(Incoming::Record(r, size)) => {
+                    s.queued_bytes.fetch_sub(size, Ordering::AcqRel);
+                    s.queued_messages.fetch_sub(1, Ordering::AcqRel);
+                    s.stash(r)?;
+                }
+                Ok(Incoming::Failure(e) | Incoming::FrameClosed(e)) => return s.fail(e),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => return s.fail("Browser readers stopped"),
+            }
+        }
+        Ok(s.frames.take_frame())
+    }
+    pub fn take_frame(&self) -> Option<crate::browser_frames::CpuFrame> {
+        self.session.lock().unwrap().frames.take_frame()
+    }
+    pub fn frame_counts(&self) -> (u64, u64) {
+        let s = self.session.lock().unwrap();
+        (s.frames.received, s.frames.coalesced)
+    }
+    /// Acceptance diagnostics: CPU seconds for the contained browser tree,
+    /// peak job committed bytes, and live imported section count.
+    pub fn resource_usage(&self) -> Result<(f64, usize, usize)> {
+        let s = self
+            .session
+            .lock()
+            .map_err(|_| anyhow!("Session poisoned"))?;
+        let mut cpu = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        let mut memory = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        unsafe {
+            QueryInformationJobObject(
+                Some(handle(&s.job)),
+                JobObjectBasicAccountingInformation,
+                &mut cpu as *mut _ as *mut _,
+                size_of_val(&cpu) as u32,
+                None,
+            )?;
+            QueryInformationJobObject(
+                Some(handle(&s.job)),
+                JobObjectExtendedLimitInformation,
+                &mut memory as *mut _ as *mut _,
+                size_of_val(&memory) as u32,
+                None,
+            )?;
+        }
+        Ok((
+            (cpu.TotalUserTime + cpu.TotalKernelTime) as f64 / 10_000_000.,
+            memory.PeakJobMemoryUsed,
+            s.frames.resource_count(),
+        ))
     }
     pub fn pid(&self) -> u32 {
         self.hello.browser_pid
@@ -764,7 +920,7 @@ impl Browser {
                             s.transcript.pop_front();
                         }
                         s.transcript.push_back((record.kind, record.id));
-                        if record.id != 0 {
+                        if record.id != 0 && record.id % 2 != 0 {
                             return s.fail("Unexpected unsolicited response");
                         }
                         s.stash(record)?;

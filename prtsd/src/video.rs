@@ -43,6 +43,8 @@ pub struct Metrics {
     pub warnings: Vec<String>,
 }
 pub struct Video {
+    #[cfg(windows)]
+    pub browser: crate::frame_source::BrowserSlot,
     pub state: Arc<Mutex<State>>,
     pub metrics: Arc<Mutex<Metrics>>,
     pub frames: watch::Receiver<Option<Frame>>,
@@ -71,9 +73,30 @@ impl Video {
         let initial_size = options.size.device();
         let initial_bps = options.bitrate_caps.max_bps;
         let initial_fps = options.fps;
+        #[cfg(windows)]
+        let browser: crate::frame_source::BrowserSlot = Default::default();
+        let mut source: Box<dyn crate::frame_source::FrameSource> = {
+            #[cfg(windows)]
+            if options.source == "chromium" {
+                Box::new(crate::frame_source::BrowserSource {
+                    browser: browser.clone(),
+                    subscribed: None,
+                })
+            } else {
+                Box::new(crate::frame_source::Synthetic {
+                    origin: Instant::now(),
+                    frame: 0,
+                })
+            }
+            #[cfg(not(windows))]
+            {
+                Box::new(crate::frame_source::Synthetic {
+                    origin: Instant::now(),
+                    frame: 0,
+                })
+            }
+        };
         let worker = std::thread::spawn(move || {
-            let origin = Instant::now();
-            let mut frame_id = 0;
             let mut encoded_id = 0;
             let (mut encoder, warning) = match Selected::new(
                 &preference,
@@ -114,6 +137,10 @@ impl Video {
                     )
                 };
                 let Some(target) = target else {
+                    if let Err(e) = source.idle() {
+                        m.lock().unwrap().failure = Some(e.to_string());
+                        break;
+                    }
                     std::thread::sleep(Duration::from_millis(10));
                     next = Instant::now();
                     continue;
@@ -121,8 +148,21 @@ impl Video {
                 let period = Duration::from_secs_f64(1.0 / fps as f64);
                 std::thread::sleep(next.saturating_duration_since(Instant::now()));
                 next += period;
-                let capture = Instant::now();
-                frame_id += 1;
+                let force_key = key | k.swap(false, Ordering::AcqRel);
+                let captured = match source.capture(&target, fps, force_key) {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => {
+                        if force_key {
+                            k.store(true, Ordering::Release);
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        m.lock().unwrap().failure = Some(e.to_string());
+                        break;
+                    }
+                };
+                let capture = captured.capture;
                 let (w, h) = target.size.device();
                 let cfg = (w, h, bps, fps);
                 let mut encode_ms = 0.0;
@@ -156,14 +196,9 @@ impl Video {
                         }
                         config.2 = bps;
                     }
-                    let bgra = render(&target, frame_id, origin.elapsed().as_secs_f64());
+                    let bgra = captured.pixels;
                     let encode_start = Instant::now();
-                    let mut result = encoder.encode(
-                        &bgra,
-                        w as usize,
-                        h as usize,
-                        key | k.swap(false, Ordering::AcqRel),
-                    );
+                    let mut result = encoder.encode(&bgra, w as usize, h as usize, force_key);
                     if result.is_err() && !hardware_disabled {
                         m.lock().unwrap().warnings.push(format!(
                             "Hardware encode failed: {:#}; falling back to software",
@@ -223,6 +258,8 @@ impl Video {
             }
         });
         Self {
+            #[cfg(windows)]
+            browser,
             state,
             metrics,
             frames,

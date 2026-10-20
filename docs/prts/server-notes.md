@@ -13,7 +13,9 @@ node server
 Open `http://127.0.0.1:8080`. `npm start` inside `server/` also works.
 If PATH has not refreshed, use `C:\Program Files\nodejs\node.exe` and `npm.cmd`.
 The server binds to IPv4 loopback; localhost with the same port is also accepted.
-Create a synthetic instance, then select it to connect a controlling viewer.
+Create a Chromium instance (CPU fallback), then select it to connect a controlling
+viewer. Enter an http/https URL; Synthetic remains selectable for tests without
+Chromium. The source dropdown defaults to Chromium.
 Uncheck Request control and reconnect for view-only access. Each WebSocket has
 at most one viewer session; disconnecting releases its daemon session. Instance
 management is shared between local operators. An instance remains alive after
@@ -24,6 +26,9 @@ its viewer disconnects; use Close to destroy it.
 - `PORT`: HTTP/WebSocket port, default 8080 (0 selects a free test port).
 - `PRTSD_PATH`: executable path; default is the absolute repository-relative
   `prtsd/target/release/prtsd.exe`. No shell is used, including for paths with spaces.
+- `PRTS_CHROME_PATH`: trusted patched browser executable path, inherited by prtsd;
+  default `C:/src/chromium/src/out/Default/chrome.exe`. This is distinct from
+  `PRTS_BROWSER`, which selects the headless **viewer** in acceptance tests.
 - `PRTSD_ARGS`: optional JSON array of separate arguments, default `[]`.
   For the mock, set `PRTSD_PATH` to the full Node executable and `PRTSD_ARGS` to
   `["C:/Users/Flysoft/Desktop/chromium/server/test/mock-prtsd.js"]`.
@@ -142,3 +147,17 @@ timer; video checks still require actual advancing video frames. It fails on
 browser exceptions or frontend errors and saves the small full-page PNG
 `docs/prts/phase1-e2e.png`. Packet delay/loss shaping remains explicitly
 unsupported; Windows 10 and remote-network/TURN qualification remain open.
+
+
+## Phase 2 M3: real Chromium source
+
+Build the patched Chromium incrementally and `cargo build --release` in prtsd,
+then run `node server`. The existing source selector now defaults to Chromium
+(CPU fallback). No arbitrary executable path or switches are accepted from
+viewer requests. `npm run e2e:browser` starts a local color/animation/input
+fixture and verifies decoded real-page pixels, click/text reactions, two targets,
+resize/DPR2, switching/static refresh, close, two instances and displayed stats.
+`npm run e2e` explicitly chooses Synthetic and remains Chromium-independent.
+Browser creation returns starting immediately; cold component DLL loading can
+take much longer than a normal five-second command deadline. Close/EOF cancels
+startup. See phase2-m3.md for frame lifetimes and final acceptance results.

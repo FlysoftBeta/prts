@@ -1,0 +1,437 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 09:41:18 +0800
+Subject: [PATCH 10/14] Add bounded Viz CPU readback fallback adapter for PRTS
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_capture.cc b/chrome/browser/prts/prts_capture.cc
+new file mode 100644
+index 0000000000..15fffca74a
+--- /dev/null
++++ b/chrome/browser/prts/prts_capture.cc
+@@ -0,0 +1,362 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/prts/prts_capture.h"
++
++#include <algorithm>
++#include <atomic>
++#include <map>
++
++#include "base/functional/bind.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/read_only_shared_memory_region.h"
++#include "base/timer/timer.h"
++#include "components/viz/host/client_frame_sink_video_capturer.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_widget_host.h"
++#include "content/public/browser/render_widget_host_view.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "media/capture/mojom/video_capture_buffer.mojom.h"
++#include "mojo/public/cpp/bindings/remote.h"
++
++namespace prts {
++class PrtsCapture::Impl {
++ public:
++  explicit Impl(Send send) : send(std::move(send)) {
++    timer.Start(FROM_HERE, base::Seconds(1), this, &Impl::CheckRequests);
++  }
++  struct Slot {
++    uint64_t id = 0, target = 0, generation = 0, frame = 0, request = 0;
++    gfx::Size size;
++    base::MappedReadOnlyRegion memory;
++    // Registering -> free -> busy -> free; retired -> unregistering -> erased.
++    bool registered = false, busy = false, retired = false;
++    base::TimeTicks requested_at;
++  };
++  class Source : public content::WebContentsObserver,
++                 public viz::mojom::FrameSinkVideoConsumer {
++   public:
++    Source(Impl* owner,
++           content::WebContents* contents,
++           uint64_t target,
++           uint64_t generation,
++           gfx::Size size,
++           uint32_t fps)
++        : WebContentsObserver(contents),
++          owner(owner),
++          target(target),
++          generation(generation),
++          size(size),
++          fps(fps) {
++      visibility =
++          contents->IncrementCapturerCount(gfx::Size(), false, false, false);
++      timer.Start(FROM_HERE, base::Milliseconds(100), this, &Source::Tick);
++      Tick();
++    }
++    ~Source() override { Stop(); }
++    void Stop() {
++      if (capturer) {
++        capturer->StopAndResetConsumer();
++      }
++      capturer.reset();
++      sink = {};
++    }
++    void Tick() {
++      if (!web_contents()) {
++        return;
++      }
++      auto* view = web_contents()->GetRenderWidgetHostView();
++      if (!view) {
++        return;
++      }
++      auto current = view->GetRenderWidgetHost()->GetFrameSinkId();
++      if (current != sink || !capturer) {
++        Stop();
++        sink = current;
++        capturer = view->CreateVideoCapturer();
++        capturer->SetFormat(media::PIXEL_FORMAT_ARGB);
++        capturer->SetMinCapturePeriod(base::Seconds(1.0 / fps));
++        capturer->SetMinSizeChangePeriod(base::TimeDelta());
++        capturer->SetResolutionConstraints(size, size, false);
++        capturer->SetAutoThrottlingEnabled(false);
++        capturer->Start(this, viz::mojom::BufferFormatPreference::kDefault);
++        capturer->RequestRefreshFrame();
++      }
++    }
++    void OnFrameCaptured(
++        media::mojom::VideoBufferHandlePtr data,
++        media::mojom::VideoFrameInfoPtr info,
++        const gfx::Rect&,
++        mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks>
++            cb) override {
++      mojo::Remote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks> done(
++          std::move(cb));
++      if (data->is_read_only_shmem_region() &&
++          info->visible_rect.size() == size &&
++          (info->pixel_format == media::PIXEL_FORMAT_ARGB ||
++           info->pixel_format == media::PIXEL_FORMAT_ABGR)) {
++        auto mapping = data->get_read_only_shmem_region().Map();
++        const size_t stride = info->strides ? info->strides->stride_by_plane[0]
++                                            : info->coded_size.width() * 4;
++        const size_t offset =
++            info->visible_rect.y() * stride + info->visible_rect.x() * 4;
++        if (mapping.IsValid() &&
++            stride >= static_cast<size_t>(size.width()) * 4 &&
++            offset + (size.height() - 1) * stride + size.width() * 4 <=
++                mapping.size()) {
++          owner->Frame(*this,
++                       mapping.GetMemoryAsSpan<uint8_t>().subspan(offset),
++                       stride, info->pixel_format == media::PIXEL_FORMAT_ABGR);
++        }
++      }
++      done->Done();
++    }
++    void OnNewCaptureVersion(const media::CaptureVersion&) override {}
++    void OnFrameWithEmptyRegionCapture() override {}
++    void OnStopped() override {}
++    void OnLog(const std::string&) override {}
++    void WebContentsDestroyed() override {
++      Stop();
++      visibility.RunAndReset();
++    }
++    raw_ptr<Impl> owner;
++    uint64_t target, generation;
++    gfx::Size size;
++    uint32_t fps;
++    viz::FrameSinkId sink;
++    base::ScopedClosureRunner visibility;
++    base::RepeatingTimer timer;
++    std::unique_ptr<viz::ClientFrameSinkVideoCapturer> capturer;
++  };
++  void Retire(uint64_t target) {
++    for (auto& [id, slot] : slots) {
++      if (slot.target == target) {
++        slot.retired = true;
++      }
++    }
++    Collect();
++  }
++  void CheckRequests() {
++    if (failed) {
++      return;
++    }
++    for (const auto& [id, slot] : slots) {
++      if (slot.request &&
++          base::TimeTicks::Now() - slot.requested_at > base::Seconds(5)) {
++        failed = true;
++        Encoder e;
++        e.Int(7, 4);
++        e.String("Frame resource request timed out");
++        e.Int(1, 1);
++        send.Run(8, 0, std::move(e.data));
++        return;
++      }
++    }
++  }
++  void Collect() {
++    for (auto& [id, slot] : slots) {
++      if (slot.retired && slot.registered && !slot.busy && !slot.request) {
++        slot.request = next_request;
++        slot.requested_at = base::TimeTicks::Now();
++        next_request += 2;
++        Encoder e;
++        e.Int(id, 8);
++        send.Run(0x301, slot.request, std::move(e.data));
++      }
++    }
++  }
++  void Frame(Source& source,
++             base::span<const uint8_t> pixels,
++             size_t stride,
++             bool rgba) {
++    Slot* free = nullptr;
++    size_t busy = 0;
++    for (auto& [id, slot] : slots) {
++      busy += slot.busy;
++      if (!slot.retired && slot.target == source.target &&
++          slot.generation == source.generation && slot.registered &&
++          !slot.busy && !slot.request) {
++        free = &slot;
++      }
++    }
++    if (busy >= limit) {
++      return;
++    }
++    if (!free) {
++      // A lone source can pipeline two frames. With two subscriptions each
++      // gets one credit, so a background source cannot starve the other.
++      size_t owned = 0;
++      for (const auto& [id, slot] : slots) {
++        if (!slot.retired && slot.target == source.target &&
++            slot.generation == source.generation) {
++          ++owned;
++        }
++      }
++      if (owned >= (sources.size() > 1 ? 1u : limit)) {
++        return;
++      }
++      // Includes registering and retired slots: transitions never multiply the
++      // pool.
++      if (slots.size() >= limit) {
++        return;
++      }
++      Slot slot;
++      slot.id = ++next_buffer;
++      slot.target = source.target;
++      slot.generation = source.generation;
++      slot.size = source.size;
++      const size_t bytes = slot.size.GetArea() * 4ull;
++      slot.memory = base::ReadOnlySharedMemoryRegion::Create(bytes);
++      if (!slot.memory.IsValid()) {
++        return;
++      }
++      slot.request = next_request;
++      next_request += 2;
++      slot.requested_at = base::TimeTicks::Now();
++      Encoder e;
++      e.Int(slot.target, 8);
++      e.Int(slot.generation, 8);
++      e.Int(slot.id, 8);
++      e.Int(2, 1);
++      e.Int(reinterpret_cast<uintptr_t>(slot.memory.region.GetPlatformHandle()),
++            8);
++      e.Int(slot.size.width(), 4);
++      e.Int(slot.size.height(), 4);
++      e.Int(1, 1);
++      e.Int(slot.size.width() * 4, 4);
++      e.Int(bytes, 8);
++      e.Int(0, 8);
++      auto request = slot.request;
++      slots.emplace(slot.id, std::move(slot));
++      send.Run(0x300, request, std::move(e.data));
++      return;
++    }
++    auto out = free->memory.mapping.GetMemoryAsSpan<uint8_t>();
++    const size_t row = source.size.width() * 4;
++    for (int y = 0; y < source.size.height(); ++y) {
++      auto dst = out.subspan(y * row, row);
++      dst.copy_from(pixels.subspan(y * stride, row));
++      for (size_t x = 0; x < row; x += 4) {
++        if (rgba) {
++          std::swap(dst[x], dst[x + 2]);
++        }
++        dst[x + 3] = 255;
++      }
++    }
++    std::atomic_thread_fence(std::memory_order_release);
++    free->busy = true;
++    free->frame = ++next_frame;
++    Encoder e;
++    e.Int(source.target, 8);
++    e.Int(source.generation, 8);
++    e.Int(free->id, 8);
++    e.Int(free->frame, 8);
++    e.Int((base::TimeTicks::Now() - base::TimeTicks()).InMicroseconds(), 8);
++    e.Int(source.size.width(), 4);
++    e.Int(source.size.height(), 4);
++    e.Int(1, 1);
++    e.Int(0, 4);  // Complete image; empty damage list.
++    send.Run(0x311, 0, std::move(e.data));
++  }
++  Send send;
++  uint32_t limit = 2;
++  uint64_t next_buffer = 0, next_frame = 0, next_request = 2;
++  std::map<uint64_t, Slot> slots;
++  std::map<uint64_t, std::unique_ptr<Source>> sources;
++  bool failed = false;
++  base::RepeatingTimer timer;
++};
++PrtsCapture::PrtsCapture(Send send)
++    : impl_(std::make_unique<Impl>(std::move(send))) {}
++PrtsCapture::~PrtsCapture() = default;
++void PrtsCapture::SetLimit(uint32_t limit) {
++  impl_->limit = std::min(2u, limit);
++}
++bool PrtsCapture::CanSubscribe(uint64_t target) const {
++  return impl_->sources.contains(target) ||
++         impl_->sources.size() < impl_->limit;
++}
++void PrtsCapture::Configure(content::WebContents* c,
++                            uint64_t t,
++                            uint64_t g,
++                            gfx::Size size,
++                            uint32_t fps) {
++  Remove(t);
++  if (fps) {
++    impl_->sources[t] =
++        std::make_unique<Impl::Source>(impl_.get(), c, t, g, size, fps);
++    if (impl_->sources.size() > 1) {
++      std::map<uint64_t, size_t> counts;
++      for (auto& [id, slot] : impl_->slots) {
++        if (!slot.retired && ++counts[slot.target] > 1) {
++          slot.retired = true;
++        }
++      }
++      impl_->Collect();
++    }
++  }
++}
++void PrtsCapture::Update(content::WebContents* contents,
++                         uint64_t t,
++                         uint64_t g,
++                         gfx::Size size) {
++  auto it = impl_->sources.find(t);
++  if (it != impl_->sources.end() &&
++      (it->second->web_contents() != contents || it->second->generation != g ||
++       it->second->size != size)) {
++    auto* c = contents;
++    auto fps = it->second->fps;
++    Configure(c, t, g, size, fps);
++  }
++}
++void PrtsCapture::Remove(uint64_t t) {
++  impl_->sources.erase(t);
++  impl_->Retire(t);
++}
++void PrtsCapture::Refresh(uint64_t t) {
++  auto it = impl_->sources.find(t);
++  if (it != impl_->sources.end() && it->second->capturer) {
++    it->second->capturer->RequestRefreshFrame();
++  }
++}
++bool PrtsCapture::Receive(const Record& r) {
++  Decoder d(r.payload);
++  if (r.type == 0x320 && !r.id) {
++    auto b = d.Int(8), f = d.Int(8), disposition = d.Int(1);
++    auto it = impl_->slots.find(b);
++    if (!d.Done() || disposition > 1 || it == impl_->slots.end() ||
++        !it->second.busy || it->second.frame != f) {
++      return false;
++    }
++    it->second.busy = false;
++    impl_->Collect();
++    return true;
++  }
++  if (r.type != 7 || !r.id || (r.id & 1) || !d.Done()) {
++    return false;
++  }
++  for (auto it = impl_->slots.begin(); it != impl_->slots.end(); ++it) {
++    auto& slot = it->second;
++    if (slot.request != r.id) {
++      continue;
++    }
++    slot.request = 0;
++    if (slot.registered) {
++      impl_->slots.erase(it);
++    } else {
++      slot.registered = true;
++      if (!slot.retired) {
++        Refresh(slot.target);
++      }
++    }
++    impl_->Collect();
++    // Pool space may have become available after a static-page transition.
++    for (const auto& [id, source] : impl_->sources) {
++      Refresh(id);
++    }
++    return true;
++  }
++  return false;
++}
++}  // namespace prts
+diff --git a/chrome/browser/prts/prts_capture.h b/chrome/browser/prts/prts_capture.h
+new file mode 100644
+index 0000000000..bdd7aea777
+--- /dev/null
++++ b/chrome/browser/prts/prts_capture.h
+@@ -0,0 +1,43 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_PRTS_PRTS_CAPTURE_H_
++#define CHROME_BROWSER_PRTS_PRTS_CAPTURE_H_
++#include <memory>
++
++#include "base/functional/callback.h"
++#include "chrome/browser/prts/prts_protocol.h"
++#include "ui/gfx/geometry/size.h"
++namespace content {
++class WebContents;
++}
++namespace prts {
++// CPU readback FALLBACK adapter. M4 can replace the resource backend without
++// changing target ownership, subscription, pacing, or credit accounting.
++class PrtsCapture {
++ public:
++  using Send =
++      base::RepeatingCallback<void(uint16_t, uint64_t, std::vector<uint8_t>)>;
++  explicit PrtsCapture(Send send);
++  ~PrtsCapture();
++  void SetLimit(uint32_t limit);
++  bool CanSubscribe(uint64_t target) const;
++  void Configure(content::WebContents* contents,
++                 uint64_t target,
++                 uint64_t generation,
++                 gfx::Size size,
++                 uint32_t fps);
++  void Update(content::WebContents* contents,
++              uint64_t target,
++              uint64_t generation,
++              gfx::Size size);
++  void Remove(uint64_t target);
++  void Refresh(uint64_t target);
++  bool Receive(const Record& record);
++
++ private:
++  class Impl;
++  std::unique_ptr<Impl> impl_;
++};
++}  // namespace prts
++#endif
+diff --git a/chrome/browser/prts/prts_sources.gni b/chrome/browser/prts/prts_sources.gni
+index f58d0c890b..f238a18166 100644
+--- a/chrome/browser/prts/prts_sources.gni
++++ b/chrome/browser/prts/prts_sources.gni
+@@ -2,6 +2,8 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ prts_browser_sources = [
++  "//chrome/browser/prts/prts_capture.cc",
++  "//chrome/browser/prts/prts_capture.h",
+   "//chrome/browser/prts/prts_controller.cc",
+   "//chrome/browser/prts/prts_input.cc",
+   "//chrome/browser/prts/prts_input.h",

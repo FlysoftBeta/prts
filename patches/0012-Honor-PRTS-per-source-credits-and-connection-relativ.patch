@@ -1,0 +1,150 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 09:55:12 +0800
+Subject: [PATCH 12/14] Honor PRTS per-source credits and connection-relative
+ capture times
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_capture.cc b/chrome/browser/prts/prts_capture.cc
+index 15fffca74a..6821dd516f 100644
+--- a/chrome/browser/prts/prts_capture.cc
++++ b/chrome/browser/prts/prts_capture.cc
+@@ -42,13 +42,15 @@ class PrtsCapture::Impl {
+            uint64_t target,
+            uint64_t generation,
+            gfx::Size size,
+-           uint32_t fps)
++           uint32_t fps,
++           uint32_t max_inflight)
+         : WebContentsObserver(contents),
+           owner(owner),
+           target(target),
+           generation(generation),
+           size(size),
+-          fps(fps) {
++          fps(fps),
++          max_inflight(max_inflight) {
+       visibility =
+           contents->IncrementCapturerCount(gfx::Size(), false, false, false);
+       timer.Start(FROM_HERE, base::Milliseconds(100), this, &Source::Tick);
+@@ -107,7 +109,9 @@ class PrtsCapture::Impl {
+                 mapping.size()) {
+           owner->Frame(*this,
+                        mapping.GetMemoryAsSpan<uint8_t>().subspan(offset),
+-                       stride, info->pixel_format == media::PIXEL_FORMAT_ABGR);
++                       stride, info->pixel_format == media::PIXEL_FORMAT_ABGR,
++                       info->metadata.capture_begin_time.value_or(
++                           base::TimeTicks::Now()));
+         }
+       }
+       done->Done();
+@@ -123,7 +127,7 @@ class PrtsCapture::Impl {
+     raw_ptr<Impl> owner;
+     uint64_t target, generation;
+     gfx::Size size;
+-    uint32_t fps;
++    uint32_t fps, max_inflight;
+     viz::FrameSinkId sink;
+     base::ScopedClosureRunner visibility;
+     base::RepeatingTimer timer;
+@@ -169,7 +173,8 @@ class PrtsCapture::Impl {
+   void Frame(Source& source,
+              base::span<const uint8_t> pixels,
+              size_t stride,
+-             bool rgba) {
++             bool rgba,
++             base::TimeTicks capture_time) {
+     Slot* free = nullptr;
+     size_t busy = 0;
+     for (auto& [id, slot] : slots) {
+@@ -193,7 +198,8 @@ class PrtsCapture::Impl {
+           ++owned;
+         }
+       }
+-      if (owned >= (sources.size() > 1 ? 1u : limit)) {
++      if (owned >=
++          std::min(source.max_inflight, sources.size() > 1 ? 1u : limit)) {
+         return;
+       }
+       // Includes registering and retired slots: transitions never multiply the
+@@ -252,7 +258,8 @@ class PrtsCapture::Impl {
+     e.Int(source.generation, 8);
+     e.Int(free->id, 8);
+     e.Int(free->frame, 8);
+-    e.Int((base::TimeTicks::Now() - base::TimeTicks()).InMicroseconds(), 8);
++    e.Int(std::max(base::TimeDelta(), capture_time - origin).InMicroseconds(),
++          8);
+     e.Int(source.size.width(), 4);
+     e.Int(source.size.height(), 4);
+     e.Int(1, 1);
+@@ -261,6 +268,7 @@ class PrtsCapture::Impl {
+   }
+   Send send;
+   uint32_t limit = 2;
++  base::TimeTicks origin = base::TimeTicks::Now();
+   uint64_t next_buffer = 0, next_frame = 0, next_request = 2;
+   std::map<uint64_t, Slot> slots;
+   std::map<uint64_t, std::unique_ptr<Source>> sources;
+@@ -272,6 +280,8 @@ PrtsCapture::PrtsCapture(Send send)
+ PrtsCapture::~PrtsCapture() = default;
+ void PrtsCapture::SetLimit(uint32_t limit) {
+   impl_->limit = std::min(2u, limit);
++  // Negotiation calls this once when HELLO_ACK is queued, before subscription.
++  impl_->origin = base::TimeTicks::Now();
+ }
+ bool PrtsCapture::CanSubscribe(uint64_t target) const {
+   return impl_->sources.contains(target) ||
+@@ -281,11 +291,12 @@ void PrtsCapture::Configure(content::WebContents* c,
+                             uint64_t t,
+                             uint64_t g,
+                             gfx::Size size,
+-                            uint32_t fps) {
++                            uint32_t fps,
++                            uint32_t max_inflight) {
+   Remove(t);
+   if (fps) {
+-    impl_->sources[t] =
+-        std::make_unique<Impl::Source>(impl_.get(), c, t, g, size, fps);
++    impl_->sources[t] = std::make_unique<Impl::Source>(impl_.get(), c, t, g,
++                                                       size, fps, max_inflight);
+     if (impl_->sources.size() > 1) {
+       std::map<uint64_t, size_t> counts;
+       for (auto& [id, slot] : impl_->slots) {
+@@ -307,7 +318,8 @@ void PrtsCapture::Update(content::WebContents* contents,
+        it->second->size != size)) {
+     auto* c = contents;
+     auto fps = it->second->fps;
+-    Configure(c, t, g, size, fps);
++    auto max_inflight = it->second->max_inflight;
++    Configure(c, t, g, size, fps, max_inflight);
+   }
+ }
+ void PrtsCapture::Remove(uint64_t t) {
+diff --git a/chrome/browser/prts/prts_capture.h b/chrome/browser/prts/prts_capture.h
+index bdd7aea777..9293041643 100644
+--- a/chrome/browser/prts/prts_capture.h
++++ b/chrome/browser/prts/prts_capture.h
+@@ -26,7 +26,8 @@ class PrtsCapture {
+                  uint64_t target,
+                  uint64_t generation,
+                  gfx::Size size,
+-                 uint32_t fps);
++                 uint32_t fps,
++                 uint32_t max_inflight);
+   void Update(content::WebContents* contents,
+               uint64_t target,
+               uint64_t generation,
+diff --git a/chrome/browser/prts/prts_target_registry.cc b/chrome/browser/prts/prts_target_registry.cc
+index 672859e1c6..8f799b6786 100644
+--- a/chrome/browser/prts/prts_target_registry.cc
++++ b/chrome/browser/prts/prts_target_registry.cc
+@@ -791,7 +791,7 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+     t.input->Reset();
+     ++t.generation;
+     capture_.Configure(t.web_contents(), id, t.generation, DeviceSize(t),
+-                       mode ? fps : 0);
++                       mode ? fps : 0, limit);
+     Changed(t);
+     send_.Run(0x180, r.id, Snapshot(t));
+     return true;

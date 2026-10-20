@@ -350,3 +350,37 @@ regression 10.49 ms average across native and fallback phases). Clippy with
 -D warnings, rustfmt check, seven Node tests and both software/qsv npm run e2e
 runs passed. git diff --check is clean. No prtsd process remains after tests.
 No Chromium build, changes outside authorized paths, or git commit.
+
+
+## Phase 2 M3: browser CPU fallback
+
+`instance.create.options.source="chromium"` launches the patched PRTS browser;
+`"synthetic"` remains available without it. Configure the trusted executable via
+`PRTS_CHROME_PATH` (default `C:/src/chromium/src/out/Default/chrome.exe`). Startup
+runs off the control actor, with a separate bounded DLL-loader deadline and
+cancellation on close/EOF. A kill-on-close Job Object contains the process tree;
+job assignment is part of CreateProcess attributes, before the main thread runs.
+This is lifetime containment, not AppContainer/LPAC security qualification.
+
+`frame_source::FrameSource` selects synthetic or browser capture behind the
+existing encoder/WebRTC path. Browser capture subscribes only while viewers are
+connected and follows the active browser target. Browser target snapshots are
+control-plane authority; DataChannel CSS coordinates and committed text use the
+M2 input API, with a per-instance monotonically increasing wire sequence. Cursor
+events come from Chromium. Input ownership loss sends focus=false.
+
+This is explicitly a **CPU readback fallback**: Viz ARGB shared memory -> reusable
+BGRA section -> bounded latest daemon CPU frame -> I420/OpenH264 or CPU NV12/QSV.
+At most two section resources exist across retired/current generations; each
+published frame holds a credit until the daemon has copied it.
+CPU ingress coalesces per target, with at most two pending copies bounded by
+registered sections; retiring a target's last section removes its unread copy.
+This preserves a static background subscription when an active frame arrives.
+Static refresh, subscription and PLI/keyframe requests use FRAME_REFRESH. Slow WebRTC viewers do
+not hold sections. Capture-to-encode/send metrics start at daemon section receipt;
+they exclude browser readback and viewer decode/display latency.
+
+Standalone capture acceptance: `cargo run --release --bin browser_m3`.
+Real page/WebRTC acceptance: `cd server; npm run e2e:browser`.
+Existing synthetic acceptance: `npm run e2e`, `cargo test`, Clippy and rustfmt.
+Details, measurements and M4 handoff: phase2-m3.md.

@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node .",
     "test": "node --test test/*.test.js",
-    "e2e": "node --test test/e2e.js"
+    "e2e": "node --test test/e2e.js",
+    "e2e:browser": "node --test test/e2e-browser.js"
   },
   "engines": {
     "node": ">=22"

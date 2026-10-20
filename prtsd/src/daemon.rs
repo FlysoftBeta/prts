@@ -13,6 +13,12 @@ use std::{
 use tokio::sync::mpsc;
 use webrtc::peer_connection::RTCPeerConnectionState;
 
+#[cfg(windows)]
+type BrowserStartup = anyhow::Result<(
+    std::sync::Arc<crate::browser::Browser>,
+    crate::browser_wire::Target,
+)>;
+
 struct Instance {
     id: String,
     options: Options,
@@ -21,13 +27,41 @@ struct Instance {
     next_target: u64,
     network: Network,
     video: Video,
+    #[cfg(windows)]
+    browser: Option<std::sync::Arc<crate::browser::Browser>>,
+    #[cfg(windows)]
+    startup: Option<tokio::task::JoinHandle<BrowserStartup>>,
+    input_sequence: u64,
+    startup_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 impl Instance {
+    fn release_input(&mut self) {
+        #[cfg(windows)]
+        if let Some(browser) = &self.browser
+            && let Some((target, generation)) = self
+                .active()
+                .map(|t| (t.target_id.parse().unwrap(), t.generation.parse().unwrap()))
+        {
+            self.input_sequence += 1;
+            let _ = browser.input(
+                &crate::browser_wire::InputHeader {
+                    target,
+                    generation,
+                    sequence: self.input_sequence,
+                    modifiers: 0,
+                },
+                &crate::browser_wire::Input::Focus(false),
+            );
+        }
+        for target in self.targets.values_mut() {
+            target.input.release();
+        }
+    }
     fn active(&self) -> Option<&Target> {
         self.targets.values().find(|t| t.active)
     }
     fn snapshot(&self) -> Value {
-        json!({"instance_id":self.id,"source":"synthetic","state":self.state,"active_target_id":self.active().map(|t|&t.target_id),"options":self.options})
+        json!({"instance_id":self.id,"source":self.options.source,"state":self.state,"active_target_id":self.active().map(|t|&t.target_id),"options":self.options})
     }
     fn sync(&self, switch: bool) {
         let mut s = self.video.state.lock().unwrap();
@@ -109,9 +143,7 @@ impl Daemon {
             let control = s.control;
             s.close().await;
             if control && let Some(i) = self.instances.get_mut(&iid) {
-                for t in i.targets.values_mut() {
-                    t.input.release();
-                }
+                i.release_input();
                 i.sync(false);
             }
             self.out.event(
@@ -123,6 +155,7 @@ impl Daemon {
     }
     async fn close_instance(&mut self, id: &str, reason: &str) {
         if let Some(i) = self.instances.get_mut(id) {
+            i.startup_cancel.store(true, Ordering::Release);
             i.state = "closing";
             i.video.stop();
         }
@@ -137,6 +170,13 @@ impl Daemon {
         }
         if let Some(mut i) = self.instances.remove(id) {
             i.video.join().await;
+            #[cfg(windows)]
+            {
+                i.video.browser.lock().unwrap().take();
+                if let Some(browser) = i.browser.take() {
+                    let _ = tokio::task::spawn_blocking(move || browser.shutdown()).await;
+                }
+            }
             for t in i.targets.values() {
                 self.out.event(
                     "target.closed",
@@ -177,6 +217,13 @@ impl Daemon {
         }
     }
     async fn command(&mut self, method: &str, p: &Value) -> Result<Value> {
+        #[cfg(windows)]
+        if method.starts_with("target.")
+            && method != "target.list"
+            && self.instance(p)?.options.source == "chromium"
+        {
+            return self.browser_command(method, p).await;
+        }
         match method {
             "hello" => Err(Error::new("invalid_state", "hello already completed")),
             "instance.create" => {
@@ -189,14 +236,40 @@ impl Daemon {
                 )?;
                 self.next_instance += 1;
                 let id = format!("i{}", self.next_instance);
+                let startup_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let i = Instance {
                     id: id.clone(),
                     video: Video::start(&options),
-                    options,
+                    options: options.clone(),
                     state: "starting",
                     targets: BTreeMap::new(),
                     next_target: 1,
                     network: Network::default(),
+                    #[cfg(windows)]
+                    browser: None,
+                    #[cfg(windows)]
+                    startup: if options.source == "chromium" {
+                        let options = options.clone();
+                        let cancel = startup_cancel.clone();
+                        Some(tokio::task::spawn_blocking(move || {
+                            let path = std::env::var("PRTS_CHROME_PATH")
+                                .unwrap_or_else(|_| crate::browser::DEFAULT_CHROME.into());
+                            let browser = std::sync::Arc::new(
+                                crate::browser::Browser::launch_cancellable(path, &cancel)?,
+                            );
+                            let target = browser.create(
+                                &options.initial_url,
+                                browser_size(options.size),
+                                true,
+                            )?;
+                            browser.drain_events();
+                            Ok((browser, target))
+                        }))
+                    } else {
+                        None
+                    },
+                    input_sequence: 0,
+                    startup_cancel,
                 };
                 let result = json!({"instance":i.snapshot()});
                 self.instances.insert(id, i);
@@ -432,7 +505,91 @@ impl Daemon {
         let mut ready = Vec::new();
         let mut failed = Vec::new();
         for i in self.instances.values_mut() {
-            if i.state == "starting" && *i.video.encoder_name.lock().unwrap() != "initializing" {
+            #[cfg(windows)]
+            if i.state == "starting" && i.startup.as_ref().is_some_and(|s| s.is_finished()) {
+                match i.startup.take().unwrap().await {
+                    Ok(Ok((browser, target))) => {
+                        *i.video.browser.lock().unwrap() = Some(browser.clone());
+                        i.browser = Some(browser);
+                        i.targets.insert(target.id, browser_target(target.clone()));
+                        i.state = "ready";
+                        targets.push((i.id.clone(), "target.created", browser_target(target)));
+                        ready.push(i.id.clone());
+                        i.sync(true);
+                    }
+                    Ok(Err(e)) => {
+                        failed.push((i.id.clone(), format!("Browser startup failed: {e:#}")))
+                    }
+                    Err(e) => failed.push((i.id.clone(), format!("Browser startup task: {e}"))),
+                }
+            }
+            #[cfg(windows)]
+            if let Some(browser) = &i.browser {
+                for event in browser.drain_events() {
+                    use crate::browser_wire::Event as B;
+                    match event {
+                        B::Created(t) | B::Changed(t) => {
+                            let name = if i.targets.contains_key(&t.id) {
+                                "target.changed"
+                            } else {
+                                "target.created"
+                            };
+                            let mut t = browser_target(t);
+                            if let Some(old) = i.targets.get(&t.target_id.parse().unwrap())
+                                && old.generation == t.generation
+                                && old.active == t.active
+                            {
+                                t.input = old.input.clone();
+                            }
+                            let changed =
+                                i.targets
+                                    .get(&t.target_id.parse().unwrap())
+                                    .is_none_or(|old| {
+                                        old.generation != t.generation || old.active != t.active
+                                    });
+                            i.targets.insert(t.target_id.parse().unwrap(), t.clone());
+                            i.sync(changed);
+                            targets.push((i.id.clone(), name, t));
+                        }
+                        B::Closed { target, reason } => {
+                            i.targets.remove(&target);
+                            i.sync(true);
+                            self.out.event("target.closed", json!({"instance_id":i.id,"target_id":target.to_string(),"reason":reason}));
+                        }
+                        B::Cursor {
+                            target,
+                            generation,
+                            cursor,
+                        } => {
+                            let shape = [
+                                "default",
+                                "pointer",
+                                "text",
+                                "crosshair",
+                                "move",
+                                "ew-resize",
+                                "ns-resize",
+                                "none",
+                            ];
+                            let cursor = json!({"shape":shape.get(cursor.shape as usize).unwrap_or(&"default")});
+                            self.out.event("cursor.changed", json!({"instance_id":i.id,"target_id":target.to_string(),"generation":generation.to_string(),"cursor":cursor}));
+                            for s in self.sessions.values().filter(|s| s.instance_id == i.id) {
+                                s.send(json!({"v":1,"type":"cursor","target_id":target.to_string(),"generation":generation.to_string(),"cursor":cursor})).await;
+                            }
+                        }
+                        B::Fault {
+                            fatal: true,
+                            message,
+                            ..
+                        } => failed.push((i.id.clone(), message)),
+                        _ => {}
+                    }
+                }
+            }
+            if i.options.source == "synthetic"
+                && i.state == "starting"
+                && *i.video.encoder_name.lock().unwrap() != "initializing"
+            {
                 let target = Target::new(1, i.options.initial_url.clone(), i.options.size, true);
                 i.targets.insert(1, target.clone());
                 i.next_target = 2;
@@ -460,22 +617,31 @@ impl Daemon {
                 failed.push((i.id.clone(), e));
             }
         }
+        let changed_ids: std::collections::BTreeSet<_> =
+            targets.iter().map(|(id, _, _)| id.clone()).collect();
         for (id, event, target) in targets {
             self.target_event(event, &id, &target);
             self.instances[&id].sync(false);
         }
+        for id in changed_ids {
+            self.broadcast(&id).await;
+        }
         for id in ready {
             let i = &self.instances[&id];
-            self.out.event("instance.ready",json!({"instance_id":id,"source":"synthetic","active_target_id":"1","encoder":*i.video.encoder_name.lock().unwrap(),"isolation_profile":i.options.isolation_profile}));
+            self.out.event("instance.ready",json!({"instance_id":id,"source":i.options.source,"active_target_id":i.active().map(|t| &t.target_id),"encoder":*i.video.encoder_name.lock().unwrap(),"isolation_profile":i.options.isolation_profile}));
         }
         for (id, error) in failed {
-            eprintln!("prtsd: encoder failed for {id}: {error}");
+            if self.instances[&id].state == "failed" {
+                continue;
+            }
+            eprintln!("prtsd: instance failed for {id}: {error}");
             let i = self.instances.get_mut(&id).unwrap();
             i.state = "failed";
+            i.startup_cancel.store(true, Ordering::Release);
             i.video.stop();
             self.out.event(
                 "instance.failed",
-                json!({"instance_id":id,"error":Error::new("internal","video encoder failed")}),
+                json!({"instance_id":id,"error":Error::new("internal","instance source or encoder failed")}),
             );
             let sessions: Vec<_> = self
                 .sessions
@@ -485,6 +651,17 @@ impl Daemon {
                 .collect();
             for sid in sessions {
                 self.close_session(&sid, "instance_failed").await;
+            }
+            // A failed instance keeps its diagnostic ID, not a live browser
+            // or imported resources. Joining completes outstanding CPU reads.
+            let i = self.instances.get_mut(&id).unwrap();
+            i.video.join().await;
+            #[cfg(windows)]
+            {
+                i.video.browser.lock().unwrap().take();
+                if let Some(browser) = i.browser.take() {
+                    let _ = tokio::task::spawn_blocking(move || drop(browser)).await;
+                }
             }
         }
         let failed_sessions: Vec<_> = self
@@ -590,9 +767,7 @@ impl Daemon {
                         && s.control
                         && let Some(i) = self.instances.get_mut(&s.instance_id)
                     {
-                        for t in i.targets.values_mut() {
-                            t.input.release();
-                        }
+                        i.release_input();
                         i.sync(false);
                     }
                     if state == RTCPeerConnectionState::Disconnected {
@@ -784,7 +959,7 @@ impl Daemon {
                 && x < target.size.width as f64 * 2.0 / 3.0
                 && y >= target.size.height as f64 / 3.0
                 && y < target.size.height as f64 * 2.0 / 3.0;
-            if pointer != input.pointer {
+            if i.options.source == "synthetic" && pointer != input.pointer {
                 input.pointer = pointer;
                 self.out.event("cursor.changed",json!({"instance_id":i.id,"target_id":target.target_id,"generation":target.generation,"cursor":{"shape":if pointer {"pointer"} else {"default"}}}));
                 // Channel sends are performed by the actor after this synchronous validation.
@@ -858,6 +1033,75 @@ impl Daemon {
                 }
                 input.last_key = key.into();
             }
+        }
+        #[cfg(windows)]
+        if let Some(browser) = &i.browser {
+            use crate::browser_wire::{Input as B, InputHeader, Key};
+            let buttons = v["buttons"].as_u64().unwrap_or(0) as u32;
+            let x = v["x"].as_f64().unwrap_or(0.);
+            let y = v["y"].as_f64().unwrap_or(0.);
+            let button = v["button"].as_u64().unwrap_or(0) as u8;
+            let click_count = v["click_count"].as_u64().unwrap_or(1) as u8;
+            let command = match kind {
+                "mouse.move" => B::MouseMove { x, y, buttons },
+                "mouse.down" => B::MouseDown {
+                    x,
+                    y,
+                    button,
+                    buttons,
+                    click_count,
+                },
+                "mouse.up" => B::MouseUp {
+                    x,
+                    y,
+                    button,
+                    buttons,
+                    click_count,
+                },
+                "mouse.wheel" => B::Wheel {
+                    x,
+                    y,
+                    delta_x: v["delta_x"].as_f64().unwrap(),
+                    delta_y: v["delta_y"].as_f64().unwrap(),
+                    buttons,
+                },
+                "focus" => B::Focus(v["focused"].as_bool().unwrap()),
+                "key.char" => B::Char(v["text"].as_str().unwrap().into()),
+                _ => {
+                    let code = v["code"].as_str().unwrap();
+                    let key = v["key"].as_str().unwrap();
+                    let k = Key {
+                        vk: v["vk"]
+                            .as_u64()
+                            .map(|v| v as u32)
+                            .or_else(|| virtual_key(code, key).map(u32::from))
+                            .unwrap(),
+                        code: code.into(),
+                        key: key.into(),
+                        text: v["text"].as_str().unwrap().into(),
+                        location: v["location"].as_u64().unwrap() as u8,
+                        repeat: v["repeat"].as_bool().unwrap(),
+                        is_system: v["is_system"].as_bool().unwrap(),
+                    };
+                    if kind == "key.down" {
+                        B::KeyDown(k)
+                    } else {
+                        B::KeyUp(k)
+                    }
+                }
+            };
+            i.input_sequence += 1;
+            browser
+                .input(
+                    &InputHeader {
+                        target: target.target_id.parse().unwrap(),
+                        generation: target.generation.parse().unwrap(),
+                        sequence: i.input_sequence,
+                        modifiers: v["modifiers"].as_u64().unwrap() as u32,
+                    },
+                    &command,
+                )
+                .map_err(|e| Error::new("internal", e.to_string()))?;
         }
         i.sync(false);
         Ok(())
@@ -942,7 +1186,7 @@ fn virtual_key(code: &str, key: &str) -> Option<u8> {
 }
 pub async fn run() -> anyhow::Result<()> {
     #[cfg(windows)]
-    eprintln!("prtsd: synthetic daemon pid {}", unsafe {
+    eprintln!("prtsd: daemon pid {}", unsafe {
         windows::Win32::System::Threading::GetCurrentProcessId()
     });
     let mut input = transport::input();
@@ -979,7 +1223,7 @@ pub async fn run() -> anyhow::Result<()> {
                         if !params.is_object() || !params["versions"].as_array().is_some_and(|a| a.len()<=4096 && a.iter().all(|v|v.as_u64().is_some_and(|n|n<=MAX_SAFE)) && a.contains(&json!(1))) {
                             out.response(id,Err(Error::new("unsupported","protocol v1 required")));break;
                         }
-                        out.response(id,Ok(json!({"version":1,"daemon":"prtsd","capabilities":{"sources":["synthetic"],"encoders":["auto","qsv","software"],"isolation_profiles":["job"],"max_instances":8,"max_sessions":32,"max_width":4096,"max_height":4096,"max_pixels":8294400,"max_device_width":4096,"max_device_height":4096,"min_device_dimension":16,"device_dimension_alignment":2,"fps":{"default":30,"min":1,"max":60},"packet_shaping":true,"bitrate_cap":true,"custom_cursor":false}})));hello=true;
+                        out.response(id,Ok(json!({"version":1,"daemon":"prtsd","capabilities":{"sources":["synthetic","chromium"],"encoders":["auto","qsv","software"],"isolation_profiles":["job"],"max_instances":8,"max_sessions":32,"max_width":4096,"max_height":4096,"max_pixels":8294400,"max_device_width":4096,"max_device_height":4096,"min_device_dimension":16,"device_dimension_alignment":2,"fps":{"default":30,"min":1,"max":60},"packet_shaping":true,"bitrate_cap":true,"custom_cursor":false}})));hello=true;
                     } else {
                         let response=match method {
                             Some(method) if params.is_object()=>match tokio::time::timeout(Duration::from_secs(5),d.command(method,params)).await {Ok(r)=>r,Err(_)=>{out.failed.store(true,Ordering::Release);Err(Error::new("timeout","command exceeded five seconds; daemon shutting down"))}},
@@ -1002,4 +1246,80 @@ pub async fn run() -> anyhow::Result<()> {
     let _ = tokio::time::timeout(Duration::from_secs(5), shutdown).await;
     out.drain().await;
     result
+}
+
+#[cfg(windows)]
+fn browser_size(s: Size) -> crate::browser_wire::Size {
+    crate::browser_wire::Size {
+        width: s.width,
+        height: s.height,
+        dpr: s.dpr,
+    }
+}
+#[cfg(windows)]
+fn browser_target(t: crate::browser_wire::Target) -> Target {
+    let mut result = Target::new(
+        t.id,
+        t.url,
+        Size {
+            width: t.size.width,
+            height: t.size.height,
+            dpr: t.size.dpr,
+        },
+        t.active,
+    );
+    result.generation = t.generation.to_string();
+    result.title = t.title;
+    result.opener_target_id = (t.opener != 0).then(|| t.opener.to_string());
+    result.kind = if t.kind == 2 { "popup" } else { "tab" };
+    result.load = ["idle", "loading", "complete", "failed"][t.load as usize];
+    result.complete_at = None;
+    result
+}
+#[cfg(windows)]
+impl Daemon {
+    async fn browser_command(&mut self, method: &str, p: &Value) -> Result<Value> {
+        let i = self.instance(p)?;
+        let id = i.id.clone();
+        let browser = i
+            .browser
+            .clone()
+            .ok_or_else(|| Error::new("invalid_state", "Browser unavailable"))?;
+        let tid = if method == "target.create" {
+            0
+        } else {
+            self.target_id(p)?
+        };
+        let size = p
+            .get("size")
+            .map(Size::parse)
+            .transpose()?
+            .unwrap_or(i.options.size);
+        let url = url(p
+            .get("url")
+            .map_or(Ok("about:blank"), |_| string(p, "url"))?)?;
+        let activate = boolean(p, "activate", true)?;
+        let method = method.to_owned();
+        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+            Ok(match method.as_str() {
+                "target.create" => json!({"target":browser_target(browser.create(&url,browser_size(size),activate)?)}),
+                "target.navigate" => { browser.navigate(tid,&url)?; json!({"accepted":true}) },
+                "target.resize" => json!({"target":browser_target(browser.resize(tid,browser_size(size))?)}),
+                "target.activate" => json!({"target":browser_target(browser.activate(tid)?)}),
+                "target.close" => { browser.close(tid)?; json!({"closed":true}) },
+                _ => anyhow::bail!("Unsupported browser command"),
+            })
+        }).await.map_err(|e| Error::new("internal",e.to_string()))?.map_err(|e| Error::new("internal", e.to_string()))?;
+        // Apply ordered browser notifications before the correlated response.
+        self.tick().await;
+        self.instances[&id].sync(false);
+        self.broadcast(&id).await;
+        Ok(result)
+    }
+}
+
+impl Drop for Instance {
+    fn drop(&mut self) {
+        self.startup_cancel.store(true, Ordering::Release);
+    }
 }
