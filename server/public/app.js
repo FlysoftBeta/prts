@@ -1,5 +1,6 @@
 import { RemoteInput } from './input.js';
 import { ReceiverStats } from './stats.js';
+import { installVideoCrop } from './video-crop.js';
 
 const $ = id => document.getElementById(id);
 const instances = new Map(), targets = new Map(), pending = new Map();
@@ -7,6 +8,7 @@ let selected = null, nextId = 0, viewer = null, connecting = false;
 const video = $('video');
 const report = error => { $('error').textContent = error?.message || String(error); };
 const input = new RemoteInput(video, $('keyboard'), $('cursor'), report);
+const updateVideoCrop = installVideoCrop(video, () => input.target?.size);
 const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
 
 function rpc(method, params = {}) {
@@ -93,6 +95,7 @@ async function selectInstance(id) {
 }
 function showTarget(target) {
   input.setTarget(target);
+  updateVideoCrop();
   video.classList.toggle('no-frame', !target);
   $('empty').hidden = !!target;
   if (!target) $('empty').textContent = 'No active remote tab';

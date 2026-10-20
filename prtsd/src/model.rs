@@ -102,11 +102,9 @@ impl Size {
             || w > 4096
             || h > 4096
             || w * h > 8_294_400
-            || w % 2 != 0
-            || h % 2 != 0
         {
             return Err(invalid(
-                "software requires even device dimensions, 16..4096 per axis, at most 8294400 device pixels",
+                "device dimensions require 16..4096 per axis, at most 8294400 device pixels",
             ));
         }
         Ok(s)

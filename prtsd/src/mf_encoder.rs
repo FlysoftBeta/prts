@@ -32,14 +32,7 @@ pub struct MfEncoder {
 impl MfEncoder {
     pub fn new(width: u32, height: u32, bps: u32, fps: u32) -> Result<Self> {
         ensure!(
-            width > 0
-                && height > 0
-                && width <= 4096
-                && height <= 4096
-                && width.is_multiple_of(2)
-                && height.is_multiple_of(2)
-                && fps > 0
-                && fps <= 60,
+            width > 0 && height > 0 && width <= 4096 && height <= 4096 && fps > 0 && fps <= 60,
             "invalid MF dimensions/fps"
         );
         let (tx, rx) = mpsc::sync_channel(1);
@@ -335,8 +328,11 @@ impl Hardware {
                 .SetOutputType(hw.output_id, &out, 0)
                 .context("H264 output type")?;
             let input = hw.media_type(MFVideoFormat_NV12)?;
-            input.SetUINT32(&MF_MT_DEFAULT_STRIDE, width)?;
-            input.SetUINT32(&MF_MT_SAMPLE_SIZE, width * height * 3 / 2)?;
+            input.SetUINT32(&MF_MT_DEFAULT_STRIDE, (width + 3) & !3)?;
+            input.SetUINT32(
+                &MF_MT_SAMPLE_SIZE,
+                ((width + 3) & !3) * ((height + 3) & !3) * 3 / 2,
+            )?;
             hw.mft
                 .SetInputType(hw.input_id, &input, 0)
                 .context("NV12 input type")?;
@@ -357,13 +353,34 @@ impl Hardware {
     }
     unsafe fn media_type(&self, subtype: GUID) -> Result<IMFMediaType> {
         unsafe {
+            // The qualified Intel DXGI path rejects either dimension == 2 mod 4
+            // at ProcessInput (CPU samples do not). Use matching padded media
+            // and texture sizes for both input paths and bitrate recreation.
             let t = MFCreateMediaType()?;
             t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
             t.SetGUID(&MF_MT_SUBTYPE, &subtype)?;
             t.SetUINT64(
                 &MF_MT_FRAME_SIZE,
-                ((self.width as u64) << 32) | self.height as u64,
+                ((((self.width + 3) & !3) as u64) << 32) | ((self.height + 3) & !3) as u64,
             )?;
+            // Intel honours even apertures in SPS cropping, but truncates odd
+            // apertures down to even, losing real pixels. Preserve those pixels
+            // with an enclosing even aperture; the viewer crops the final pixel
+            // from the existing target size metadata, as for OpenH264.
+            let area = MFVideoArea {
+                OffsetX: MFOffset::default(),
+                OffsetY: MFOffset::default(),
+                Area: windows::Win32::Foundation::SIZE {
+                    cx: ((self.width + 1) & !1) as i32,
+                    cy: ((self.height + 1) & !1) as i32,
+                },
+            };
+            let aperture = std::slice::from_raw_parts(
+                (&area as *const MFVideoArea).cast::<u8>(),
+                std::mem::size_of::<MFVideoArea>(),
+            );
+            t.SetBlob(&MF_MT_MINIMUM_DISPLAY_APERTURE, aperture)?;
+            t.SetBlob(&MF_MT_GEOMETRIC_APERTURE, aperture)?;
             t.SetUINT64(&MF_MT_FRAME_RATE, ((self.fps as u64) << 32) | 1)?;
             t.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1)?;
             t.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
@@ -393,8 +410,14 @@ impl Hardware {
     unsafe fn cpu_sample(&self, bgra: &[u8]) -> Result<IMFSample> {
         unsafe {
             use openh264::formats::YUVSource;
-            let yuv = crate::encoder::bgra_to_i420(bgra, self.width as usize, self.height as usize);
-            let n = (self.width * self.height) as usize;
+            let yuv = crate::encoder::bgra_to_i420_padded(
+                bgra,
+                self.width as usize,
+                self.height as usize,
+                ((self.width + 3) & !3) as usize,
+                ((self.height + 3) & !3) as usize,
+            );
+            let n = (((self.width + 3) & !3) * ((self.height + 3) & !3)) as usize;
             let buffer = MFCreateMemoryBuffer((n * 3 / 2) as u32)?;
             let mut data = std::ptr::null_mut();
             buffer.Lock(&mut data, None, None)?;
@@ -444,7 +467,9 @@ impl Hardware {
             let sample = if let Some(frame) = texture {
                 ensure!(self.manager.is_some(), "MFT does not support D3D11 input");
                 let gpu = frame.gpu.lock().unwrap();
-                let nv12 = gpu.nv12(&frame.texture, self.width, self.height)?;
+                let nv12 = gpu
+                    .nv12(&frame.texture, self.width, self.height)
+                    .context("GPU NV12 conversion")?;
                 let buffer = MFCreateDXGISurfaceBuffer(
                     &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D::IID,
                     &nv12,
@@ -459,7 +484,9 @@ impl Hardware {
             } else {
                 self.cpu_sample(bgra)?
             };
-            self.mft.ProcessInput(self.input_id, &sample, 0)?;
+            self.mft
+                .ProcessInput(self.input_id, &sample, 0)
+                .context("hardware MFT ProcessInput")?;
             self.input_credit -= 1;
             self.frame += 1;
             if !pending.is_empty() {

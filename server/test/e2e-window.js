@@ -66,5 +66,43 @@ const source=document.createElement('canvas');source.width=128;source.height=128
   const afterBlur=JSON.parse(await page.$eval('#encoder',e=>e.textContent));
   assert.ok(afterBlur.frames.encoded>0,'logical blur paused the selected window stream');
   console.log('M5 logical blur retained window video publication');
+  for (const [width,height,dpr] of [[961,641,1.25],[1001,777,1.25],[1203,803,1]]) {
+    for (const [name,value] of Object.entries({width,height,dpr})) {
+      await page.$eval(`#resize [name=${name}]`,(e,value)=>e.value=value,String(value));
+    }
+    await page.click('#resize button');
+    const pw=Math.ceil(width*dpr), ph=Math.ceil(height*dpr);
+    await page.waitForFunction(([w,h])=>{
+      const v=document.querySelector('video');return v.videoWidth===w && v.videoHeight===h;
+    },{},[pw+(pw%2),ph+(ph%2)]);
+    await until(()=>page.$eval('video',(v,[pw,ph])=>{
+      if(v.readyState<2)return false;
+      const c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;
+      const ctx=c.getContext('2d');ctx.drawImage(v,0,0);
+      return [[pw-2,ph-2],[pw-2,ph*3>>2],[pw>>1,ph-2]].every(([x,y])=>{
+        const p=ctx.getImageData(x,y,1,1).data;return [220,30,60].every((n,i)=>Math.abs(p[i]-n)<35);
+      });
+    },[pw,ph]),`decoded right/bottom edges ${pw}x${ph}`);
+    await page.waitForFunction(([pw,ph])=>{
+      const v=document.querySelector('video'),s=document.querySelector('#stage');
+      const scale=Math.min(s.clientWidth/pw,s.clientHeight/ph);
+      return Math.abs(parseFloat(v.style.width)-v.videoWidth*scale)<.1 &&
+        Math.abs(parseFloat(v.style.left)-(s.clientWidth-pw*scale)/2)<.1;
+    },{},[pw,ph]);
+    const crop=await page.$eval('video',(v,[pw,ph])=>{
+      const r=v.getBoundingClientRect(),scale=r.width/v.videoWidth;
+      return {inside:document.elementFromPoint(r.left+(pw-.25)*scale,r.top+(ph-.25)*scale)===v,
+        outside:pw===v.videoWidth || document.elementFromPoint(r.left+(pw+.5)*scale,r.top+ph/2*scale)!==v,
+        clip:getComputedStyle(v).clipPath};
+    },[pw,ph]);
+    assert.ok(crop.inside && crop.outside,JSON.stringify(crop));
+    await sleep(1100);
+    const oddStats=JSON.parse(await page.$eval('#encoder',e=>e.textContent));
+    if(process.env.PRTS_TEST_ENCODER!=='software') {
+      assert.match(oddStats.encoder.name,/Quick Sync/);
+      assert.equal(oddStats.encoder.input_path,process.env.PRTS_FRAME_MODE==='cpu'?'cpu-nv12':'d3d11-zero-copy');
+    }
+    console.log(`PASS odd WebRTC ${width}x${height}@${dpr}: true ${pw}x${ph}, ${oddStats.encoder.name}/${oddStats.encoder.input_path}, frontend crop ${JSON.stringify(crop)}`);
+  }
   await page.screenshot({path:fileURLToPath(new URL('../../docs/prts/phase2-m5-e2e.png',import.meta.url)),fullPage:true});
 });

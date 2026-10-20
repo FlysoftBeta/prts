@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { Decoder, encode, Writer, MAX_RECORD } from '../framing.js';
 import { mapPoint, RemoteInput } from '../public/input.js';
+import { visibleSize, cropLayout } from '../public/video-crop.js';
 import { receiverSample } from '../public/stats.js';
 import { Daemon } from '../daemon.js';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +43,19 @@ test('pointer mapping excludes letterbox bars, uses CSS pixels and permits captu
   assert.ok(mapPoint(rect, 2560, 1440, size, 0, 0, true).x < 0);
   assert.equal(mapPoint(rect, 2560, 1440, size, 1010, 520), null);
   assert.equal(mapPoint(rect, 2560, 1440, size, 100000, 520, true).x, 32767);
+});
+
+test('odd video crop preserves the visible aspect ratio and pointer coordinates', () => {
+  const size = { width: 1203, height: 803, dpr: 1 };
+  assert.deepEqual(visibleSize(1204, 804, size), [1203, 803]);
+  assert.deepEqual(visibleSize(960, 640, size), [960, 640]); // old frame during resize
+  const layout = cropLayout(1203, 803, 1204, 804, size);
+  assert.equal(layout.width, '1204px'); assert.equal(layout.height, '804px');
+  assert.equal(layout.left, '0px'); assert.equal(layout.top, '0px');
+  const rect = { left: 0, top: 0, width: 1204, height: 804 };
+  assert.deepEqual(mapPoint(rect, 1204, 804, size, 1202.5, 802.5), { x: 1202.5, y: 802.5 });
+  assert.equal(mapPoint(rect, 1204, 804, size, 1203.5, 802), null);
+  assert.equal(mapPoint(rect, 1204, 804, size, 1202, 803.5), null);
 });
 
 test('receiver uses interval deltas and keeps unavailable and negative loss values', () => {

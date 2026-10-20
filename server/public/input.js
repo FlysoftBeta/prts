@@ -1,8 +1,11 @@
+import { visibleSize } from './video-crop.js';
+
 export function mapPoint(rect, videoWidth, videoHeight, size, clientX, clientY, captured = false) {
   if (!rect.width || !rect.height || !videoWidth || !videoHeight) return null;
   const scale = Math.min(rect.width / videoWidth, rect.height / videoHeight);
-  const width = videoWidth * scale, height = videoHeight * scale;
-  const left = rect.left + (rect.width - width) / 2, top = rect.top + (rect.height - height) / 2;
+  const [w, h] = visibleSize(videoWidth, videoHeight, size);
+  const width = w * scale, height = h * scale;
+  const left = rect.left + (rect.width - videoWidth * scale) / 2, top = rect.top + (rect.height - videoHeight * scale) / 2;
   const px = clientX - left, py = clientY - top;
   if (!captured && (px < 0 || py < 0 || px >= width || py >= height)) return null;
   const clamp = n => Math.max(-32768, Math.min(32767, n));
@@ -43,9 +46,9 @@ export class RemoteInput {
       if (e.pointerType !== 'mouse') return;
       const point = this.point(e, this.pointer === e.pointerId);
       if (!point) { cursor.hidden = true; return; }
-      const rect = video.getBoundingClientRect();
-      cursor.style.left = `${e.clientX - rect.left - (this.hotX || 0)}px`;
-      cursor.style.top = `${e.clientY - rect.top - (this.hotY || 0)}px`;
+      const rect = (video.parentElement ?? video).getBoundingClientRect();
+      cursor.style.left = `${e.clientX - rect.left - (video.parentElement?.clientLeft || 0) - (this.hotX || 0)}px`;
+      cursor.style.top = `${e.clientY - rect.top - (video.parentElement?.clientTop || 0) - (this.hotY || 0)}px`;
       cursor.hidden = !this.customCursor;
       this.send('mouse.move', { ...point, buttons: this.buttons }, e);
     });

@@ -39,5 +39,8 @@ agent is supervising you; you must plan, implement, verify, commit and record pr
    hardware adapter (not SwiftShader/WARP). Nothing may appear on the interactive desktop.
 6. Commit to `main` at each milestone (export patches first), push to `origin main`. Commit trailer:
    `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Don't commit build outputs.
+6b. Uncompleted features never land on `main` (not even behind config): develop them on a branch
+   (`wip/<feature>` in this repo, matching branch in C:\src\chromium\src) and merge only when their gates pass.
+   Paused isolation work lives on `wip/i1-isolation` (see journal-i1.md "Resume later").
 7. Keep `docs/prts/STATUS.md` "Current state" + "Next action" accurate after each milestone.
 8. Long-running commands (builds, soak tests) must be run with timeouts and polled; don't hang forever.

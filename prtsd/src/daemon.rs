@@ -1225,7 +1225,7 @@ pub async fn run() -> anyhow::Result<()> {
                         if !params.is_object() || !params["versions"].as_array().is_some_and(|a| a.len()<=4096 && a.iter().all(|v|v.as_u64().is_some_and(|n|n<=MAX_SAFE)) && a.contains(&json!(1))) {
                             out.response(id,Err(Error::new("unsupported","protocol v1 required")));break;
                         }
-                        out.response(id,Ok(json!({"version":1,"daemon":"prtsd","capabilities":{"sources":["synthetic","chromium"],"encoders":["auto","qsv","software"],"isolation_profiles":["job"],"max_instances":8,"max_sessions":32,"max_width":4096,"max_height":4096,"max_pixels":8294400,"max_device_width":4096,"max_device_height":4096,"min_device_dimension":16,"device_dimension_alignment":2,"fps":{"default":30,"min":1,"max":60},"packet_shaping":true,"bitrate_cap":true,"custom_cursor":false}})));hello=true;
+                        out.response(id,Ok(json!({"version":1,"daemon":"prtsd","capabilities":{"sources":["synthetic","chromium"],"encoders":["auto","qsv","software"],"isolation_profiles":["job"],"max_instances":8,"max_sessions":32,"max_width":4096,"max_height":4096,"max_pixels":8294400,"max_device_width":4096,"max_device_height":4096,"min_device_dimension":16,"device_dimension_alignment":1,"fps":{"default":30,"min":1,"max":60},"packet_shaping":true,"bitrate_cap":true,"custom_cursor":false}})));hello=true;
                     } else {
                         let response=match method {
                             Some(method) if params.is_object()=>match tokio::time::timeout(Duration::from_secs(5),d.command(method,params)).await {Ok(r)=>r,Err(_)=>{out.failed.store(true,Ordering::Release);Err(Error::new("timeout","command exceeded five seconds; daemon shutting down"))}},

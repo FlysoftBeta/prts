@@ -119,6 +119,57 @@ incremental compilation passed at 20:00; Chromium remains clean with tree
 `1c188c132a6e884952b8bd53181b42a45eedafcf`, identical to the pre-squash tree.
 No browser/daemon/acceptance processes remained after qualification.
 
+## Odd-size fix
+
+The Intel UHD630 DXGI encoder rejects either media dimension equal to 2 modulo
+4 at `IMFTransform::ProcessInput` with E_FAIL (0x80004005). The unmodified
+encoder succeeds with CPU NV12 at the same sizes: 1202x800, 1200x802,
+1204x802 and 1202x804. GPU1204x804 succeeds, disproving a 16/32 alignment
+requirement. Padding only the texture while retaining the old media size still
+fails. Separately, prtsd rejected odd dimensions before MF and at Size parsing.
+
+Both input paths now use matching four-aligned media/surface dimensions with
+edge replication. GPU copies the BGRA border before NV12 conversion, with no
+staging/readback; CPU conversion replicates the same border. MF minimum display
+and geometric apertures produce SPS cropping: padded1204x804 decodes1202x802.
+Intel truncates an odd1203x803 aperture to1202x802, losing pixels, so we request
+the enclosing even1204x804 aperture. The frontend crops that final padded pixel
+using existing target size/DSF metadata and maps input to the visible rectangle.
+Software uses its existing even I420 padding and the same frontend crop.
+
+Regression: `cargo test --release --test odd_sizes -- --include-ignored
+--nocapture --test-threads=1` covers nine sizes, CPU/GPU QSV and software,
+12 decoded frames each, decoded dimensions and single-pixel right/bottom edges.
+M5 capture now requires QSV for both transports without recovery, adds
+1001x777@1.25 and1203x803, and compares decoded boundary pixels to capture.
+Window WebRTC acceptance checks those sizes, actual encoder/input stats,
+decoded page edges, visible geometry and exclusion of padding by CSS hit tests.
+Evidence: `C:/src/chromium/prts-odd-{probe2,axis,surface4,media4,regression}.log`;
+the focused browser logs use the same `prts-odd-` prefix. This supersedes the
+earlier odd-size software recovery qualification.
+
+Final qualification at 20:36 on 2026-10-20: **all 18 gates PASS**, including
+release, cargo test, all-target Clippy with warnings denied, fmt, eight Node
+units, M5 GPU/CPU, M1-M4/recovery, MF hardware, odd regression and v1/v2 E2E
+GPU/CPU. Logs/exit files: `C:/src/chromium/prts-odd-qualified-*`;
+`prts-odd-qualified.done` is PASS. MF lifetime is304 for all20 cycles; M4
+handles397/396/395. The first full run's M5 taskbar checks were perturbed by
+concurrent Notepad UI probes; unchanged assertions pass in this final run.
+Qualification used baseline8641a41 plus this fix in the independent
+`C:/src/chromium/prts-odd-validation-20261020` snapshot, excluding concurrent
+I1 source edits (which were still failing whole-workspace fmt). Focused live
+M5 GPU/CPU and v2 GPU QSV, CPU QSV and CPU software also passed. Chromium was
+not changed or rebuilt. The disconnected-desktop override was used.
+
+Requalified on main on 2026-10-21 after parking isolation: **all 18 gates
+PASS** with the original 23 Chromium patches and `work=5a7769bea8` rebuilt
+incrementally. Logs/exit files: `C:/src/chromium/prts-park-qualified-*`;
+`prts-park-qualified.done` is PASS. M4 handles were397/394/396; all20 MF
+lifetime cycles settled at304 handles. Nine odd/fractional device sizes pass
+CPU/GPU QSV and software edge/decode checks; v2 WebRTC verifies cropping and
+QSV zero-copy stats. Foreground and physical cursor observations remain
+unverified in the disconnected desktop session.
+
 ## Deviations and remaining work
 
 See also `phase2-m5-design.md`, Implementation deviations.
@@ -130,10 +181,9 @@ See also `phase2-m5-design.md`, Implementation deviations.
   An owned Aura root-size property prevents fractional notifications from
   expanding logical layout. The odd case is 961×641 DIP / 1202×802 pixels;
   renderer CSS viewport may enclose fractional pixels by one CSS pixel.
-- Intel QSV may accept the first 1202×802 frame and fail a later encode with
-  E_FAIL. Existing any-frame software encoder recovery is exercised, retaining
-  GPU capture with staging/software encoding. Standard sizes qualify QSV;
-  odd fractional recovery is never described as zero-copy encoding.
+- Intel QSV requires four-aligned DXGI media/surface dimensions on this host;
+  the odd-size fix above retains QSV and GPU conversion for fractional sizes.
+  General device/encode failures still use the existing software recovery.
 - Input completion additionally releases post-navigation paint holding before
   explicit remote input. Motion does not wait for an unnecessary visual-state
   callback. Fixture readiness uses complete HTTP headers/graceful shutdown,

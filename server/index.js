@@ -36,7 +36,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405).end(); return; }
   // Explicit static allowlist avoids traversal, symlinks and accidental source serving.
   const pathname = new URL(req.url, 'http://localhost').pathname;
-  const files = new Set(['/index.html', '/app.js', '/input.js', '/stats.js', '/style.css']);
+  const files = new Set(['/index.html', '/app.js', '/input.js', '/stats.js', '/video-crop.js', '/style.css']);
   const name = pathname === '/' ? '/index.html' : pathname;
   if (!files.has(name)) { res.writeHead(404).end(); return; }
   try {
