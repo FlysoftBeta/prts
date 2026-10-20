@@ -52,8 +52,14 @@ real page right-click, decoded pixels/alpha within250ms, zero missing-layer
 diagnostics, exact close restoration, and pointer Reload executing page script.
 The one-command runner includes these4 additional gates. Chromium source unchanged.
 
-Exact next step: checkpoint/push context coverage on WIP, then implement
-real select-popup and omnibox gates. Main must wait for all required flyout,
+Context checkpoint `7dc05b4` is pushed. Select-popup gates now also PASS all4
+CPU/GPU/credit variants at3 DSFs (`prts-flyouts-select-all1-*`, Rust23 checks
+PASS): visible decoded dropdown below the closed control, exact Escape
+restoration/no value change, then End/Enter selecting blue with decoded blue
+page. The one-command runner includes context and select variants.
+
+Exact next step: checkpoint/push select coverage on WIP, then implement
+real omnibox gates. Main must wait for all required flyout,
 input and lifecycle gates. Keep all acceptance thresholds unchanged.
 
 ## Implemented behavior
@@ -108,8 +114,8 @@ incremental-build rule; runtime gates cover the regressions.
 
 ## Remaining work in priority order
 
-1. Extend real decoded/input gates and fix required flyouts: select popup/change
-   selection, omnibox suggestions, bubbles, tooltip,
+1. Extend real decoded/input gates and fix required flyouts: omnibox suggestions,
+   bubbles, tooltip,
    JavaScript dialogs, secure-origin permission prompts (no auto-accept flags),
    nested edge menus, extension/profile popups. Require GPU/QSV and CPU/software,
    alpha/ROI/close restoration, popup-only updates, three DSFs and no desktop UI.

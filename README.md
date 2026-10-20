@@ -93,7 +93,7 @@ Run checks from repo root with one command:
 ```powershell
 powershell -File scripts/test.ps1              # build, Rust tests, Clippy/fmt, Node unit tests
 powershell -File scripts/test.ps1 -Suite full  # plus real Chromium, GPU/QSV, CPU/software and WebRTC gates
-powershell -File scripts/test.ps1 -Suite flyouts # WIP app/context menus, scale/credits and GPU composition
+powershell -File scripts/test.ps1 -Suite flyouts # WIP app/context/select popups, scale/credits and GPU composition
 ```
 
 The full suite requires the patched Chromium build, Intel hardware encoding and
@@ -106,7 +106,7 @@ In a disconnected Windows
 session, `-AllowDisconnectedDesktop` permits the existing explicit override;
 foreground/cursor qualification still requires a connected desktop.
 
-The flyout suite currently qualifies app and right-click context menus; other flyout types remain
+The flyout suite currently qualifies app/context menus and select popups; other flyout types remain
 in progress on `wip/mvp-flyouts`. The headless launcher rasterizes Views UI tiles
 on CPU to avoid cold UI shader stalls. Page GPU rasterization, hardware
 compositing, WebGL and shared-texture capture remain enabled.
