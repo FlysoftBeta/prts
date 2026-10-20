@@ -43,4 +43,7 @@ agent is supervising you; you must plan, implement, verify, commit and record pr
    (`wip/<feature>` in this repo, matching branch in C:\src\chromium\src) and merge only when their gates pass.
    Paused isolation work lives on `wip/i1-isolation` (see journal-i1.md "Resume later").
 7. Keep `docs/prts/STATUS.md` "Current state" + "Next action" accurate after each milestone.
+7b. Do not stop after a checkpoint: keep working through the priority list until it is complete or you
+   are blocked by usage limits. If the current milestone is on a `wip/*` branch, resume it from its resume
+   notes (e.g. `docs/prts/mvp-flyouts-wip.md`).
 8. Long-running commands (builds, soak tests) must be run with timeouts and polled; don't hang forever.
