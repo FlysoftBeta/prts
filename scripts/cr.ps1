@@ -9,7 +9,7 @@ Commands:
   pin [rev|latest]   write PIN (default: latest upstream main); does not touch the checkout
   sync               export work, sync src+deps to PIN (shallow), re-apply patches
   update             pin latest + sync
-  export             work commits -> patches\ (rewrites the directory)
+  export [branch]    work (or selected WIP branch) commits -> patches\
   apply              recreate "work" from main + patches\
   status             PIN vs checkout, patch count
   gen   [out]        gn gen with recommended args (default out\Default)
@@ -44,11 +44,11 @@ function Pin($rev) {
   Write-Host "PIN = $rev"
 }
 
-function Export {
-  if (-not (Has-Branch work) -or -not (Has-Branch main)) { Write-Host 'No main/work branches; nothing to export.'; return }
+function Export([string]$branch = 'work') {
+  if (-not (Has-Branch $branch) -or -not (Has-Branch main)) { throw "Missing main/$branch export branch" }
   New-Item -ItemType Directory -Force $Patches | Out-Null
   Get-ChildItem $Patches -Filter *.patch | Remove-Item
-  G format-patch --zero-commit --no-signature --no-stat -o $Patches main..work | Out-Null
+  G format-patch --zero-commit --no-signature --no-stat -o $Patches "main..$branch" | Out-Null
   Write-Host "Exported $((Get-ChildItem $Patches -Filter *.patch).Count) patch(es)"
 }
 
@@ -108,7 +108,7 @@ switch ($Cmd) {
   'pin'    { Pin $A1 }
   'sync'   { Sync-Checkout }
   'update' { Pin 'latest'; Sync-Checkout }
-  'export' { Export }
+  'export' { if ($A1) { Export $A1 } else { Export } }
   'apply'  { Apply }
   'status' {
     $head = if (Has-Branch main) { G rev-parse main } else { G rev-parse HEAD }

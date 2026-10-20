@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Tue, 20 Oct 2026 05:12:55 +0800
-Subject: [PATCH 09/23] Implement PRTS input notifications and root cursor
+Subject: [PATCH 09/24] Implement PRTS input notifications and root cursor
  events
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

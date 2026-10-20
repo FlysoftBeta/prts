@@ -1,0 +1,495 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Wed, 21 Oct 2026 01:23:29 +0800
+Subject: [PATCH 24/24] WIP: track owned headless popup hosts and expose
+ lifecycle probes
+
+Observe creation readiness, ownership, visibility and stacking without starting popup capture. Placement and composition are unqualified; keep this commit on wip/mvp-flyouts until the complete gates pass.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_host_tracker.cc b/chrome/browser/prts/prts_host_tracker.cc
+new file mode 100644
+index 0000000000..c6ec6f8f06
+--- /dev/null
++++ b/chrome/browser/prts/prts_host_tracker.cc
+@@ -0,0 +1,213 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/prts/prts_host_tracker.h"
++
++#include <algorithm>
++#include <map>
++#include <set>
++#include <tuple>
++
++#include "base/functional/bind.h"
++#include "base/memory/weak_ptr.h"
++#include "base/scoped_multi_source_observation.h"
++#include "base/scoped_observation.h"
++#include "ui/aura/env.h"
++#include "ui/aura/env_observer.h"
++#include "ui/aura/window.h"
++#include "ui/aura/window_tree_host.h"
++#include "ui/views/bubble/bubble_dialog_delegate_view.h"
++#include "ui/views/widget/desktop_aura/desktop_headless_input.h"
++#include "ui/views/widget/widget.h"
++#include "ui/views/widget/widget_delegate.h"
++#include "ui/views/widget/widget_observer.h"
++#include "ui/wm/core/window_util.h"
++
++namespace prts {
++class PrtsHostTracker::Impl : public aura::EnvObserver,
++                              public views::WidgetObserver {
++ public:
++  Impl(Owner owner, base::RepeatingCallback<uint64_t()> allocate,
++       base::RepeatingClosure changed)
++      : owner_(std::move(owner)), allocate_(std::move(allocate)),
++        changed_(std::move(changed)) {
++    env_.Observe(aura::Env::GetInstance());
++    views::SetHeadlessHostObserver(base::BindRepeating(
++        &Impl::HostEvent, weak_.GetWeakPtr()));
++    // Bootstrap existing, fully initialized hosts. New hosts remain provisional
++    // until OnWidgetInitDone, even when Aura announced their root earlier.
++    for (const auto& host : aura::Env::GetInstance()->window_tree_hosts()) {
++      auto* widget = views::Widget::GetTopLevelWidgetForNativeView(host->window());
++      if (widget) {
++        HostEvent(views::HeadlessHostEvent::kReady, host.get(), widget, nullptr, nullptr);
++      }
++    }
++  }
++  ~Impl() override {
++    views::SetHeadlessHostObserver({});
++    widgets_.RemoveAllObservations();
++    env_.Reset();
++  }
++  struct Node {
++    base::WeakPtr<aura::Window> root, parent, context;
++    base::WeakPtr<views::Widget> widget;
++    OwnedHost info;
++    bool ready = false;
++  };
++  void HostEvent(views::HeadlessHostEvent event, aura::WindowTreeHost* host,
++                 views::Widget* widget, const views::HeadlessHostInfo* info,
++                 aura::Window* relative) {
++    auto [it, inserted] = nodes_.try_emplace(host->window());
++    auto& node = it->second;
++    if (inserted) {
++      node.root = host->window()->GetWeakPtrAsWindow();
++      node.info.source = allocate_.Run();
++      node.info.order = ++order_;
++    }
++    if (widget) { node.widget = widget->GetWeakPtr(); }
++    if (info) {
++      node.parent = info->parent ? info->parent->GetWeakPtrAsWindow() : nullptr;
++      node.context = info->context ? info->context->GetWeakPtrAsWindow() : nullptr;
++      node.info.type = info->type;
++      node.info.corners = info->corners;
++      node.info.shadow = info->shadow;
++      node.info.z_order = info->z_order;
++      node.info.accepts_input = info->accepts_input;
++      node.info.translucent = info->translucent;
++    }
++    if (event == views::HeadlessHostEvent::kReady && widget) {
++      node.ready = true;
++      node.info.translucent = widget->ShouldWindowContentsBeTransparent();
++      if (!widgets_.IsObservingSource(widget)) { widgets_.AddObservation(widget); }
++    }
++    if (event == views::HeadlessHostEvent::kStackAbove ||
++        event == views::HeadlessHostEvent::kStackAtTop) {
++      // Preserve the actual request even though headless HWND stacking is a
++      // no-op. Descendant relationships are resolved separately below.
++      node.info.order = ++order_;
++      if (event == views::HeadlessHostEvent::kStackAbove && relative) {
++        auto below = nodes_.find(relative->GetRootWindow());
++        if (below != nodes_.end() && below != it) {
++          std::vector<Node*> order;
++          for (auto& [root, other] : nodes_) {
++            if (&other != &node) { order.push_back(&other); }
++          }
++          std::ranges::sort(order, {}, [](Node* n) { return n->info.order; });
++          auto position = std::ranges::find(order, &below->second);
++          order.insert(position + 1, &node);
++          for (auto* ordered : order) { ordered->info.order = ++order_; }
++        }
++      }
++    }
++    changed_.Run();
++  }
++  void OnHostInitialized(aura::WindowTreeHost*) override {}
++  void OnHostDestroyed(aura::WindowTreeHost* host) override {
++    auto it = nodes_.find(host->window());
++    if (it == nodes_.end()) { return; }
++    auto* widget = it->second.widget.get();
++    if (widget && widgets_.IsObservingSource(widget)) {
++      widgets_.RemoveObservation(widget);
++    }
++    nodes_.erase(it);
++    changed_.Run();
++  }
++  void Remove(views::Widget* widget) {
++    if (widgets_.IsObservingSource(widget)) { widgets_.RemoveObservation(widget); }
++    std::erase_if(nodes_, [widget](const auto& pair) {
++      return pair.second.widget.get() == widget;
++    });
++    changed_.Run();
++  }
++  void OnWidgetDestroying(views::Widget* widget) override { Remove(widget); }
++  void OnWidgetDestroyed(views::Widget* widget) override { Remove(widget); }
++  void OnWidgetVisibilityChanged(views::Widget* widget, bool visible) override {
++    for (auto& [root, node] : nodes_) {
++      if (node.widget.get() == widget) {
++        ++node.info.generation;
++        if (visible) { node.info.order = ++order_; }
++      }
++    }
++    changed_.Run();
++  }
++  void OnWidgetBoundsChanged(views::Widget* widget, const gfx::Rect&) override {
++    for (auto& [root, node] : nodes_) {
++      if (node.widget.get() == widget) { ++node.info.generation; }
++    }
++    changed_.Run();
++  }
++  void OnWidgetActivationChanged(views::Widget*, bool) override { changed_.Run(); }
++  void OnWidgetChildAdded(views::Widget*, views::Widget*) override { changed_.Run(); }
++  void OnWidgetChildRemoved(views::Widget*, views::Widget*) override { changed_.Run(); }
++
++  uint64_t Resolve(aura::Window* window, std::set<aura::Window*>& visited) const {
++    if (!window || !visited.insert(window).second) { return 0; }
++    if (uint64_t id = owner_.Run(window->GetRootWindow())) { return id; }
++    if (auto it = nodes_.find(window->GetRootWindow()); it != nodes_.end()) {
++      const auto& node = it->second;
++      if (uint64_t id = Resolve(node.parent.get(), visited)) { return id; }
++      if (uint64_t id = Resolve(node.context.get(), visited)) { return id; }
++      if (auto* widget = node.widget.get()) {
++        if (auto* parent = widget->parent()) {
++          if (uint64_t id = Resolve(parent->GetNativeWindow(), visited)) { return id; }
++        }
++        if (auto* delegate = widget->widget_delegate()) {
++          if (auto* bubble = delegate->AsBubbleDialogDelegate()) {
++            if (auto* anchor = bubble->anchor_widget()) {
++              if (uint64_t id = Resolve(anchor->GetNativeWindow(), visited)) { return id; }
++            }
++          }
++        }
++      }
++    }
++    if (uint64_t id = Resolve(wm::GetTransientParent(window), visited)) { return id; }
++    return Resolve(window->parent(), visited);
++  }
++  std::vector<OwnedHost> Snapshot(uint64_t owner) const {
++    std::vector<OwnedHost> result;
++    for (const auto& [root, node] : nodes_) {
++      if (!node.ready || !node.root || !node.widget || !node.widget->IsVisible() ||
++          owner_.Run(node.root.get())) { continue; }
++      std::set<aura::Window*> visited;
++      uint64_t resolved = Resolve(node.widget->GetNativeWindow(), visited);
++      if (!resolved || resolved != owner) { continue; }
++      OwnedHost info = node.info;
++      info.root = node.root.get();
++      info.owner = resolved;
++      for (auto* candidate : {node.parent.get(), node.context.get()}) {
++        if (!candidate || owner_.Run(candidate->GetRootWindow())) { continue; }
++        auto parent = nodes_.find(candidate->GetRootWindow());
++        if (parent != nodes_.end() && parent->first != root) {
++          info.parent_source = parent->second.info.source;
++          break;
++        }
++      }
++      info.screen_bounds = node.widget->GetClientAreaBoundsInScreen();
++      info.dpr = node.root->GetHost()->device_scale_factor();
++      result.push_back(info);
++    }
++    std::ranges::sort(result, {}, [](const OwnedHost& h) {
++      return std::tuple(h.z_order, h.order);
++    });
++    return result;
++  }
++
++ private:
++  Owner owner_;
++  base::RepeatingCallback<uint64_t()> allocate_;
++  base::RepeatingClosure changed_;
++  uint64_t order_ = 0;
++  std::map<aura::Window*, Node> nodes_;
++  base::ScopedObservation<aura::Env, aura::EnvObserver> env_{this};
++  base::ScopedMultiSourceObservation<views::Widget, views::WidgetObserver> widgets_{this};
++  base::WeakPtrFactory<Impl> weak_{this};
++};
++PrtsHostTracker::PrtsHostTracker(Owner owner,
++    base::RepeatingCallback<uint64_t()> allocate, base::RepeatingClosure changed)
++    : impl_(std::make_unique<Impl>(std::move(owner), std::move(allocate),
++                                   std::move(changed))) {}
++PrtsHostTracker::~PrtsHostTracker() = default;
++std::vector<OwnedHost> PrtsHostTracker::Snapshot(uint64_t owner) const {
++  return impl_->Snapshot(owner);
++}
++}  // namespace prts
+diff --git a/chrome/browser/prts/prts_host_tracker.h b/chrome/browser/prts/prts_host_tracker.h
+new file mode 100644
+index 0000000000..10f38ccdbb
+--- /dev/null
++++ b/chrome/browser/prts/prts_host_tracker.h
+@@ -0,0 +1,48 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_PRTS_PRTS_HOST_TRACKER_H_
++#define CHROME_BROWSER_PRTS_PRTS_HOST_TRACKER_H_
++
++#include <memory>
++#include <vector>
++
++#include "base/functional/callback.h"
++#include "base/memory/raw_ptr.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/rounded_corners_f.h"
++
++namespace aura { class Window; }
++namespace prts {
++// UI-sequence snapshots. Pointers are borrowed only until the next UI dispatch;
++// protocol identities are allocated separately and never reuse a native address.
++struct OwnedHost {
++  uint64_t source = 0;
++  uint64_t generation = 1;
++  uint64_t owner = 0;
++  uint64_t parent_source = 0;
++  raw_ptr<aura::Window> root = nullptr;
++  gfx::Rect screen_bounds;
++  gfx::RoundedCornersF corners;
++  double dpr = 1;
++  uint64_t order = 0;
++  int type = 0;
++  int z_order = 0;
++  int shadow = 0;
++  bool accepts_input = true;
++  bool translucent = false;
++};
++class PrtsHostTracker {
++ public:
++  using Owner = base::RepeatingCallback<uint64_t(aura::Window*)>;
++  PrtsHostTracker(Owner owner, base::RepeatingCallback<uint64_t()> allocate,
++                  base::RepeatingClosure changed);
++  ~PrtsHostTracker();
++  std::vector<OwnedHost> Snapshot(uint64_t owner) const;
++
++ private:
++  class Impl;
++  std::unique_ptr<Impl> impl_;
++};
++}  // namespace prts
++#endif
+diff --git a/chrome/browser/prts/prts_sources.gni b/chrome/browser/prts/prts_sources.gni
+index e353f93fda..96a84a3bcb 100644
+--- a/chrome/browser/prts/prts_sources.gni
++++ b/chrome/browser/prts/prts_sources.gni
+@@ -2,6 +2,8 @@
+ # Use of this source code is governed by a BSD-style license that can be
+ # found in the LICENSE file.
+ prts_browser_sources = [
++  "//chrome/browser/prts/prts_host_tracker.cc",
++  "//chrome/browser/prts/prts_host_tracker.h",
+   "//chrome/browser/prts/prts_d3d.cc",
+   "//chrome/browser/prts/prts_d3d.h",
+   "//chrome/browser/prts/prts_capture.cc",
+diff --git a/chrome/browser/prts/prts_window_registry.cc b/chrome/browser/prts/prts_window_registry.cc
+index cc0647956b..fa881c58ef 100644
+--- a/chrome/browser/prts/prts_window_registry.cc
++++ b/chrome/browser/prts/prts_window_registry.cc
+@@ -19,6 +19,7 @@
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+ #include "chrome/browser/prts/prts_capture.h"
++#include "chrome/browser/prts/prts_host_tracker.h"
+ #include "chrome/browser/prts/prts_window_input.h"
+ #include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
+ #include "chrome/browser/ui/browser_window/public/create_browser_window.h"
+@@ -64,6 +65,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+                  base::BindRepeating(&Impl::Fallback, base::Unretained(this))) {
+   }
+   ~Impl() override {
++    hosts_.reset();
+     views::SetHeadlessCursorObserver({});
+     observation_.Reset();
+     for (const auto& [id, w] : windows_) {
+@@ -155,6 +157,17 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+           OnBrowserCreated(browser);
+           return true;
+         });
++    hosts_ = std::make_unique<prts::PrtsHostTracker>(
++        base::BindRepeating(&Impl::HostOwner, base::Unretained(this)),
++        base::BindRepeating([](Impl* self) { return ++self->next_; },
++                            base::Unretained(this)),
++        base::BindRepeating(&Impl::Schedule, weak_.GetWeakPtr()));
++  }
++  uint64_t HostOwner(aura::Window* root) {
++    for (auto& [id, w] : windows_) {
++      if (Root(w) == root) { return id; }
++    }
++    return 0;
+   }
+   void Error(uint64_t request, uint32_t code, const char* message) {
+     prts::Encoder e;
+@@ -670,6 +683,37 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+       return;
+     }
+     auto id = d.Int(8);
++    if (r.type == 0x42c &&
++        base::CommandLine::ForCurrentProcess()->HasSwitch("prts-test-hooks")) {
++      if (!d.Done() || !windows_.contains(id)) {
++        Error(r.id, 1, "Invalid host probe");
++        return;
++      }
++      prts::Encoder e;
++      auto hosts = hosts_->Snapshot(id);
++      e.Int(hosts.size(), 4);
++      for (const auto& host : hosts) {
++        e.Int(host.source, 8);
++        e.Int(host.generation, 8);
++        e.Int(host.owner, 8);
++        e.Int(host.type, 4);
++        for (int value : {host.screen_bounds.x(), host.screen_bounds.y(),
++                          host.screen_bounds.width(), host.screen_bounds.height()}) {
++          e.Int(static_cast<uint32_t>(value), 4);
++        }
++        e.Int(host.accepts_input, 1);
++        e.Int(host.translucent, 1);
++        for (const auto& rect : {host.root->GetBoundsInScreen(),
++                                 host.root->GetHost()->GetBoundsInPixels(),
++                                 Root(windows_.at(id))->GetHost()->GetBoundsInPixels()}) {
++          for (int value : {rect.x(), rect.y(), rect.width(), rect.height()}) {
++            e.Int(static_cast<uint32_t>(value), 4);
++          }
++        }
++      }
++      send_.Run(0x48c, r.id, std::move(e.data));
++      return;
++    }
+     if (r.type == 0x42d &&
+         base::CommandLine::ForCurrentProcess()->HasSwitch("prts-test-hooks")) {
+       if (!d.Done()) {
+@@ -934,6 +978,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+  private:
+   PrtsTargetRegistry::SendCallback send_;
+   prts::PrtsCapture capture_;
++  std::unique_ptr<prts::PrtsHostTracker> hosts_;
+   uint32_t frame_limit_ = 2;
+   bool gpu_enabled_ = false;
+   uint64_t next_ = 0, input_ = 0;
+diff --git a/ui/views/widget/desktop_aura/desktop_headless_input.h b/ui/views/widget/desktop_aura/desktop_headless_input.h
+index 1c1ec2e32b..660b879d00 100644
+--- a/ui/views/widget/desktop_aura/desktop_headless_input.h
++++ b/ui/views/widget/desktop_aura/desktop_headless_input.h
+@@ -6,14 +6,35 @@
+ #include <stdint.h>
+ 
+ #include "base/functional/callback.h"
++#include "base/memory/raw_ptr.h"
++#include "ui/gfx/geometry/rounded_corners_f.h"
+ #include "ui/views/views_export.h"
+ namespace aura {
++class Window;
+ class WindowTreeHost;
+ }
+ namespace ui {
+ class Cursor;
+ }
+ namespace views {
++class Widget;
++enum class HeadlessHostEvent { kCreated, kReady, kStackAbove, kStackAtTop };
++// Creation data is valid only during the callback. Consumers must retain weak
++// identities and wait for kReady before inspecting layout or starting capture.
++struct HeadlessHostInfo {
++  raw_ptr<aura::Window> parent = nullptr;
++  raw_ptr<aura::Window> context = nullptr;
++  int type = 0;
++  bool accepts_input = true;
++  bool translucent = false;
++  gfx::RoundedCornersF corners;
++  int shadow = 0;
++  int z_order = 0;
++};
++using HeadlessHostObserver = base::RepeatingCallback<void(
++    HeadlessHostEvent, aura::WindowTreeHost*, Widget*,
++    const HeadlessHostInfo*, aura::Window*)>;
++VIEWS_EXPORT void SetHeadlessHostObserver(HeadlessHostObserver observer);
+ using HeadlessCursorObserver = base::RepeatingCallback<
+     void(aura::WindowTreeHost*, const ui::Cursor&, bool)>;
+ // UI-sequence opt-in, installed before any desktop Widget is created.
+diff --git a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+index a5d86d909d..8762a32ac9 100644
+--- a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
++++ b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+@@ -91,6 +91,7 @@ struct HeadlessInputState {
+   uint64_t blocked = 0;
+   uint64_t writes = 0;
+   HeadlessCursorObserver cursor;
++  HeadlessHostObserver host_observer;
+   std::map<aura::WindowTreeHost*, ui::Cursor> cursors;
+ };
+ HeadlessInputState& HeadlessState() {
+@@ -107,6 +108,9 @@ bool DesktopHeadlessInputEnabled() {
+ void SetHeadlessCursorObserver(HeadlessCursorObserver observer) {
+   HeadlessState().cursor = std::move(observer);
+ }
++void SetHeadlessHostObserver(HeadlessHostObserver observer) {
++  HeadlessState().host_observer = std::move(observer);
++}
+ uint64_t BlockedHeadlessNativeCursorCalls() {
+   return HeadlessState().blocked;
+ }
+@@ -377,11 +381,29 @@ void DesktopWindowTreeHostWin::OnNativeWidgetCreated(
+   should_animate_window_close_ =
+       content_window()->GetType() != aura::client::WINDOW_TYPE_NORMAL &&
+       !wm::WindowAnimationsDisabled(content_window());
++  if (HeadlessState().enabled && HeadlessState().host_observer) {
++    HeadlessHostInfo info;
++    info.parent = params.parent;
++    info.context = params.context;
++    info.type = params.type;
++    info.accepts_input = params.accept_events;
++    info.translucent = params.opacity == Widget::InitParams::WindowOpacity::kTranslucent;
++    info.corners = params.rounded_corners.value_or(gfx::RoundedCornersF());
++    info.shadow = static_cast<int>(params.shadow_type);
++    info.z_order = static_cast<int>(z_order_);
++    HeadlessState().host_observer.Run(HeadlessHostEvent::kCreated, this,
++                                    GetWidget(), &info, nullptr);
++  }
+ }
+ 
+ void DesktopWindowTreeHostWin::OnActiveWindowChanged(bool active) {}
+ 
+-void DesktopWindowTreeHostWin::OnWidgetInitDone() {}
++void DesktopWindowTreeHostWin::OnWidgetInitDone() {
++  if (HeadlessState().enabled && HeadlessState().host_observer) {
++    HeadlessState().host_observer.Run(HeadlessHostEvent::kReady, this,
++                                    GetWidget(), nullptr, nullptr);
++  }
++}
+ 
+ void DesktopWindowTreeHostWin::SetBackgroundColor(SkColor background_color) {
+   UpdateBackdropColorMode();
+@@ -487,6 +509,10 @@ void DesktopWindowTreeHostWin::SetSize(const gfx::Size& size) {
+ }
+ 
+ void DesktopWindowTreeHostWin::StackAbove(aura::Window* window) {
++  if (HeadlessState().enabled && HeadlessState().host_observer) {
++    HeadlessState().host_observer.Run(HeadlessHostEvent::kStackAbove, this,
++                                    GetWidget(), nullptr, window);
++  }
+   HWND hwnd = HWNDForNativeView(window);
+   if (hwnd) {
+     message_handler_->StackAbove(hwnd);
+@@ -494,6 +520,10 @@ void DesktopWindowTreeHostWin::StackAbove(aura::Window* window) {
+ }
+ 
+ void DesktopWindowTreeHostWin::StackAtTop() {
++  if (HeadlessState().enabled && HeadlessState().host_observer) {
++    HeadlessState().host_observer.Run(HeadlessHostEvent::kStackAtTop, this,
++                                    GetWidget(), nullptr, nullptr);
++  }
+   message_handler_->StackAtTop();
+ }
+ 

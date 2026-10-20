@@ -288,6 +288,7 @@ mod acceptance {
     }
     include!("support/m5_capture.rs");
     include!("support/m5_input.rs");
+    include!("support/m5_hosts.rs");
     pub fn run() -> Result<()> {
         let desktop = DesktopProbe::start()?;
         let mut c = Client::start()?;
@@ -378,6 +379,9 @@ mod acceptance {
         }
         if std::env::var_os("PRTS_M5_INPUT").is_some() {
             input_gate(&mut c, recreated.id)?;
+        }
+        if std::env::var_os("PRTS_M5_HOSTS").is_some() {
+            host_gate(&mut c, recreated.id)?;
         }
         for window in c.list()? {
             let mut p = window.id.to_le_bytes().to_vec();
