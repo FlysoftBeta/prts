@@ -1,6 +1,25 @@
 # PRTS status
 
 ## Current state
+- **Next action: MVP milestone per PLAN.md "Priority order (revised 2026-10-21)" item 2**: hardware GPU
+  verified in shipped config; MF/QSV low-latency setup with measured latency; common flyouts (m5b: menus,
+  context menus, omnibox dropdown, bubbles, tooltips, dialogs, permission/select/extension popups) in the
+  stream with input + one stream per browser window; touch input; codebase cleanup + one-command tests.
+- Isolation (I1) PAUSED and parked OFF main: infra branch `wip/i1-isolation` (d045f0a, incl. its exported
+  patches) and Chromium branch `wip-i1` (9d3afd6eae; original history at `backup-i1-pre-park` = 23ec43701b).
+  Resume instructions + pending items (Mojo execute-guard fix, outer-job UI-limit root cause, per-tenant
+  window station + cross-tenant UI probe, precise LPAC failure diagnosis/minimal caps, AC loopback fixture
+  gap) are in journal-i1.md "Resume later". WIP state observed: job limits/kill-on-close tests pass;
+  AppContainer + private desktop passed M4 QSV zero-copy on Intel (LUID e369), but the final AC smoke
+  failed (Mojo execute guard); LPAC fails at startup (not yet diagnosed).
+- main: M5 steps 1-3 (whole-window capture, Aura input, v2 protocol) + odd/fractional-size fix (the Intel DXGI
+  MFT rejects dims = 2 mod 4, so QSV input is padded to 4-aligned with edge replication and the frontend crops
+  via true-size metadata; MF cropping is honoured only for even sizes). All 18 qualify-m5a gates pass on main
+  (C:/src/chromium/prts-park-qualified-*). Chromium `work` = 5a7769bea8 = patches 0001-0023 (unchanged).
+- Open gaps: connected-desktop foreground/physical cursor unverified (disconnected session), Windows 10
+  22H2 qualification, QSV low-cap overshoot fallback, isolation (paused).
+
+### Older state (superseded by the above)
 - Phase 2 M5 DESIGN completed (source validation only): whole-window root capture,
   separate popup-host GPU/CPU composition, Aura/Views input and logical focus,
   per-window virtual displays/DSF, proposed v2 window/tab/source protocol and
@@ -38,6 +57,12 @@
   (<=150 kbps -> auto-fallback to software), Windows 10 22H2 qualification, AppContainer/LPAC security isolation untested at runtime.
 
 ## Log
+- 2026-10-21 (orchestrator run 5, 20:04-00:55): Codex i1 (isolation) ran 20:07-21:41 and was killed by the
+  5h usage limit (window 17% -> 100%, ~502k tokens). Codex oddsize (20:07-20:38) kept odd sizes on QSV; all
+  gates pass. The user then paused isolation, so i1b was not resumed. Codex park (00:36-00:50) moved isolation
+  to wip/i1-isolation + Chromium wip-i1, reset work to 5a7769bea8, committed the odd-size fix on main (9737575);
+  full qualify-m5a 18/18 PASS, cr export unchanged. Pushed main + wip/i1-isolation. Usage: i1+oddsize consumed
+  one full 5h window (~80 points); park was small.
 - 2026-10-20 (Codex m5d): Reviewed the full chromium-output-investigation repo
   (7476579f2ce0) and validated hooks against local PIN + patches 0001-0019
   (work HEAD 7ea7adb8afc7). Added phase2-m5-design.md, proposed v2 protocol
