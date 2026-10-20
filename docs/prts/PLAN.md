@@ -105,9 +105,11 @@ PRTS (custom headless Chromium)  --anonymous pipes-->  prtsd (Rust, windows-rs)
    (what worked, what failed, measured numbers, root causes found). Finish cleanup (README, one-command
    tests). Touch input only if it's quick; otherwise list it as known gap.
 2. RELEASE: publish a GitHub release on FlysoftBeta/prts (e.g. `v0.1.0-preview`, marked pre-release):
-   zipped PRTS Chromium binaries (package the existing out\Default build — it's a component release+dcheck
-   build, so include every needed DLL/pak/resources, and say so in the notes; don't block on a new full
-   build), prtsd release binaries, the Node server + frontend (without node_modules; with install steps),
+   zipped PRTS Chromium binaries from the NON-component release build `out\Release` (component off, dcheck
+   off, symbol_level=0; full build started 2026-10-21 07:38 via scripts/build-release.ps1, log
+   C:\src\chromium\prts-release-build.log, ~6-8 h). Before packaging, rebuild it incrementally with the
+   final patches (`autoninja -C out\Release chrome`); never start another full build; don't run two
+   ninja builds on out\Release at once. prtsd release binaries, the Node server + frontend (without node_modules; with install steps),
    a quickstart in the release notes, and SHA256 sums. Verify the zip runs from a clean extract dir.
    Use `gh release create`. Keep assets < 2 GB each (split if needed).
 3. Then: unify flyout and window code paths (one window/surface model); minimize Chromium patch surface
