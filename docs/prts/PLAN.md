@@ -116,6 +116,15 @@ PRTS (custom headless Chromium)  --anonymous pipes-->  prtsd (Rust, windows-rs)
    embedder level (one small hook, e.g. brand/product in embedder_support user-agent utils + headless
    product override) rather than many patches. Gate: a test page dumping headers + JS values compares
    against expected Chrome values for our PIN's major version.
+   **MVP-required: product branding = "PRTS"** — the browser's own branding (chrome://settings/help "About",
+   chrome://version, window/app titles, resource/version info) shows PRTS. Use Chromium's standard branding
+   mechanism (`chrome/app/theme/chromium/BRANDING` and the chromium-branded resources/strings) rather than
+   ad-hoc string patches. Web-facing identity stays Google Chrome (UA + client hints above), so the UA/brand
+   hook must not derive from the product name. Do the branding change EARLY (it triggers a wider rebuild;
+   out\Release is building now and will pick it up incrementally).
+   **All Chromium changes must be as small and elegant as possible**: prefer one well-placed hook over many,
+   use existing extension points (embedder/content-client overrides, BRANDING, features/switches), no
+   copy-pasted code, each patch focused and documented in its commit message.
 2. RELEASE: publish a GitHub release on FlysoftBeta/prts (e.g. `v0.1.0-preview`, marked pre-release):
    zipped PRTS Chromium binaries from the NON-component release build `out\Release` (component off, dcheck
    off, symbol_level=0; full build started 2026-10-21 07:38 via scripts/build-release.ps1, log
