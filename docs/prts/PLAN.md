@@ -104,6 +104,18 @@ PRTS (custom headless Chromium)  --anonymous pipes-->  prtsd (Rust, windows-rs)
    that pass (latency report-only); write the lessons learned to `docs/prts/lessons-flyouts.md`
    (what worked, what failed, measured numbers, root causes found). Finish cleanup (README, one-command
    tests). Touch input only if it's quick; otherwise list it as known gap.
+   **MVP-required: Google Chrome identity** (reduce extra bot checks): the UA string must look exactly like
+   stable Google Chrome on Windows (no "HeadlessChrome", no "Chromium"; reduced-UA format
+   `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/<major>.0.0.0 Safari/537.36`),
+   and User-Agent Client Hints must be consistent with it everywhere: `Sec-CH-UA` / `Sec-CH-UA-Full-Version-List`
+   brands = "Google Chrome" + "Chromium" + GREASE brand (same order/format as real Chrome), `Sec-CH-UA-Platform`,
+   `-Mobile`, `-Platform-Version`, `-Arch`, `-Bitness`, and JS `navigator.userAgent`,
+   `navigator.userAgentData.brands` / `getHighEntropyValues()` in pages, workers and service workers. Also
+   check other headless tells reachable from pages (e.g. `navigator.webdriver` false, `window.chrome` present,
+   plugins/mimeTypes, screen/window outer sizes non-zero and consistent with the window). Do it at the
+   embedder level (one small hook, e.g. brand/product in embedder_support user-agent utils + headless
+   product override) rather than many patches. Gate: a test page dumping headers + JS values compares
+   against expected Chrome values for our PIN's major version.
 2. RELEASE: publish a GitHub release on FlysoftBeta/prts (e.g. `v0.1.0-preview`, marked pre-release):
    zipped PRTS Chromium binaries from the NON-component release build `out\Release` (component off, dcheck
    off, symbol_level=0; full build started 2026-10-21 07:38 via scripts/build-release.ps1, log
