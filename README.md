@@ -1,3 +1,27 @@
+# PRTS
+
+PRTS streams real, headless Chromium pages to a web viewer over WebRTC, with remote input.
+
+```
+patched headless Chromium --(anonymous pipes: control, input, frames)--> prtsd (Rust, windows-rs)
+   prtsd: capture (GPU shared D3D11 texture or CPU readback) -> H.264 (Intel QSV / OpenH264) -> WebRTC
+   prtsd --(framed stdio)--> Node control plane (server/) --(WebSocket signalling)--> browser frontend
+```
+
+## Repository layout
+| Path | Purpose |
+|---|---|
+| `prtsd/` | Rust daemon: browser launcher, pipe transport, encoder, WebRTC |
+| `server/` | Node control plane and vanilla JS viewer (`server/public`), tests and E2E |
+| `patches/` | Chromium patches (git format-patch) carried on top of `PIN` |
+| `docs/prts/` | Plan, protocol, status, milestone notes (start with `STATUS.md`, `PLAN.md`) |
+| `PIN`, `args.gn`, `cr.cmd`, `scripts/` | Chromium checkout/build workflow (below) |
+
+The Chromium checkout and build outputs live outside this repo (`C:\src\chromium`) and are never committed.
+Current status: `docs/prts/STATUS.md`.
+
+---
+
 # Chromium workflow
 
 Infra for a pinned, history-less Chromium checkout with local commits carried as patches.
