@@ -17,7 +17,13 @@ PRTS (custom headless Chromium)  --anonymous pipes-->  prtsd (Rust, windows-rs)
 ### 1. Chromium custom build (codename PRTS)
 - Base: `--headless=new`. Must not touch the Windows desktop (no windows, no focus issues,
   no synthetic OS-level clicks).
-- Wire out: multi-window (multi-target/tab) management, input forwarding (mouse/keyboard/wheel
+- **The stream is the WHOLE browser window including Chrome UI** (tab strip, omnibox, toolbar,
+  menus, bubbles, context menus, dialogs, permission prompts) — NOT just page content. The user
+  operates the real Chrome UI remotely. One stream = one browser window; multi-window = multiple
+  browser windows (each its own stream/track). Input goes to the browser window (aura/views level),
+  so clicks on tabs/omnibox and accelerators (Ctrl+T/L/W) work. Popup widgets that are separate
+  top-level windows (menus, omnibox dropdown, bubbles) must appear in the stream (composited).
+- Wire out: multi-window management, input forwarding (mouse/keyboard/wheel
   injected at the content/RenderWidgetHost level), frame/texture forwarding.
 - Efficient GPU texture path: frames as D3D11 shared textures (NT handles duplicated into prtsd)
   so prtsd can zero-copy feed a HW encoder. No DWM / readback paths in the fast path.
