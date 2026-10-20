@@ -98,9 +98,22 @@ PRTS (custom headless Chromium)  --anonymous pipes-->  prtsd (Rust, windows-rs)
 3. Integrate: zero-copy texture -> QSV encode; isolation (Job Object + AppContainer) with GPU verified.
 4. Polish: network simulation, quality stats, multi-instance, docs (README with run steps).
 
-**Priority order (user, 2026-10-20):** finish m5a2 -> ISOLATION (Job Object + AppContainer/LPAC,
-GPU verified, per isolation.md) -> m5b (popups + per-window streams) -> polish -> encoder
-backends LAST (oneVPL QSV, NVENC, MF kept as fallback, benchmark).
+**Priority order (user, revised 2026-10-21; supersedes 2026-10-20):**
+1. Isolation PAUSED (I1 WIP parked; default profile = none).
+2. MINIMUM USABLE STATE ("MVP"), then commit + push:
+   - Chromium hardware GPU acceleration verified working (not SwiftShader/WARP) in the shipped config.
+   - Media Foundation (Intel QSV MFT) encoder with a proper low-latency setup (CODECAPI low-latency
+     mode, no B-frames, CBR/low-delay rate control, small VBV, GOP/intra-refresh policy, async/queue depth
+     minimal), measured latency documented.
+   - Common flyout handling: menus, context menus, omnibox dropdown, bubbles, tooltips, dialogs,
+     permission prompts, select popups, extension/profile popups appear in the stream and take input
+     (m5b scope) — plus one stream per browser window.
+   - Touch handling: client touch/pointer events -> Chromium touch events (multi-touch, gestures like
+     scroll/pinch, tap) through the window-level input path; frontend sends touch on touch devices.
+   - Codebase organized: dead/obsolete code from the tab-surface era removed or clearly marked,
+     consistent module layout, README run steps accurate, tests runnable with one command.
+3. Better codec backends: oneVPL QSV direct, NVENC; MF kept as fallback; benchmark.
+4. Isolation: BOTH AppContainer and LPAC working (with hardware GPU), plus per-tenant window station/desktop.
 
 Definition of "usable": `node server` -> open frontend -> create instance -> see the PRTS page
 rendering live via WebRTC, click/type into it, open a 2nd instance, see stats.
