@@ -7,3 +7,13 @@
 
 # Rust daemon build output
 /prtsd/target/
+
+# Misc
+node_modules/
+target/
+.env
+.env.*
+*.exe
+*.pdb
+*.pem
+*.key
