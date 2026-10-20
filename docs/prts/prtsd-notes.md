@@ -1,9 +1,9 @@
 # prtsd Phase 1 part A handoff
 
-Current M4 status: native GPU capture/DXGI QSV input and CPU/software recovery
-work, but signoff is blocked by the reproduced Intel MFT handle lifetime leak.
-See [phase2-m4.md](phase2-m4.md) and the M4 section below; earlier milestone
-sections are historical.
+Current status: native GPU capture/DXGI QSV input and CPU/software recovery are
+qualified, including the Intel MFT handle-lifetime fix. Whole-window M5 steps
+1-3 are qualified. See [STATUS.md](STATUS.md), [MF latency](mvp-mf-latency.md)
+and [phase2-m4.md](phase2-m4.md); earlier milestone sections below are historical.
 
 Implemented and verified on Windows 11 x64, 2026-10-19. No Chromium build,
 Chromium launch/source changes, server/ changes, or git commits in this task.

@@ -149,7 +149,6 @@ struct Hardware {
     output_credit: usize,
     input_id: u32,
     output_id: u32,
-    last_output: Instant,
     bitrate: u32,
     rate_bytes: u64,
     rate_frames: u32,
@@ -294,7 +293,6 @@ impl Hardware {
                 output_credit: 0,
                 input_id: input_ids[0],
                 output_id: output_ids[0],
-                last_output: Instant::now(),
                 bitrate: bps,
                 rate_bytes: 0,
                 rate_frames: 0,
@@ -316,7 +314,13 @@ impl Hardware {
             hw.set(&CODECAPI_AVEncCommonMaxBitRate, VARIANT::from(bps))
                 .context("peak bitrate")?;
             let _ = hw.set(&CODECAPI_AVEncVideoMaxQP, VARIANT::from(51u32));
-            let _ = hw.set(&CODECAPI_AVEncCommonBufferSize, VARIANT::from(bps / 4));
+            // H.264 HRD size is in BYTES, unlike MPEG VBV (bits). Target
+            // 100 ms; the old bps/4 request represented two seconds of video.
+            // Keep enough room for an IDR at tiny bitrate caps; Intel emits
+            // undecodable restart output with a 1,875-byte buffer at 150 kbps.
+            let buffer_bytes = bps.div_ceil(80).max(32 * 1024);
+            hw.set(&CODECAPI_AVEncCommonBufferSize, VARIANT::from(buffer_bytes))
+                .context("100 ms H264 HRD buffer")?;
             let _ = hw.set(
                 &CODECAPI_AVScenarioInfo,
                 VARIANT::from(eAVScenarioInfo_DisplayRemoting.0 as u32),
@@ -338,6 +342,24 @@ impl Hardware {
                 .context("NV12 input type")?;
             hw.set(&CODECAPI_AVEncVideoMaxQP, VARIANT::from(51u32))?;
             hw.set(&CODECAPI_AVEncCommonMeanBitRate, VARIANT::from(bps))?;
+            // Media-type negotiation can reset driver settings. Check the final
+            // values rather than claiming success from SetValue alone.
+            hw.verify_u32(&CODECAPI_AVEncCommonBufferSize, buffer_bytes, "HRD bytes")?;
+            hw.verify_u32(&CODECAPI_AVEncMPVDefaultBPictureCount, 0, "B pictures")?;
+            hw.verify_u32(&CODECAPI_AVEncMPVGOPSize, fps * 2, "GOP frames")?;
+            hw.verify_u32(
+                &CODECAPI_AVEncCommonRateControlMode,
+                eAVEncCommonRateControlMode_CBR.0 as u32,
+                "CBR",
+            )?;
+            let low_latency = hw.codec.GetValue(&CODECAPI_AVLowLatencyMode)?;
+            ensure!(bool::try_from(&low_latency)?, "MFT disabled low latency");
+            eprintln!(
+                "prtsd: MF low_latency=true CBR B=0 GOP={} HRD_bytes={buffer_bytes} HRD_ms={:.1} encoder={}",
+                fps * 2,
+                buffer_bytes as f64 * 8000. / bps as f64,
+                hw.name
+            );
             hw.mft
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
             hw.mft
@@ -349,6 +371,15 @@ impl Hardware {
         unsafe {
             self.codec.SetValue(key, &value)?;
         }
+        Ok(())
+    }
+    fn verify_u32(&self, key: &GUID, expected: u32, name: &str) -> Result<()> {
+        let value = unsafe { self.codec.GetValue(key) }.with_context(|| format!("read {name}"))?;
+        let actual = u32::try_from(&value)?;
+        ensure!(
+            actual == expected,
+            "MFT {name}: requested {expected}, read {actual}"
+        );
         Ok(())
     }
     unsafe fn media_type(&self, subtype: GUID) -> Result<IMFMediaType> {
@@ -492,9 +523,10 @@ impl Hardware {
             if !pending.is_empty() {
                 return Ok(pending);
             }
-            // Low-latency encoders normally return the submitted frame immediately.
-            // Permit pipeline startup without ever queueing another CPU BGRA frame.
-            let deadline = Instant::now() + Duration::from_millis(100);
+            // Complete this input before accepting another request. A driver that
+            // needs multiple frames in flight cannot meet this backend's latency
+            // contract; report failure so the caller can use software fallback.
+            let deadline = Instant::now() + Duration::from_secs(2);
             loop {
                 self.poll_events()?;
                 if self.output_credit > 0 {
@@ -503,13 +535,7 @@ impl Hardware {
                         return Ok(pending);
                     }
                 }
-                if Instant::now() >= deadline {
-                    ensure!(
-                        self.last_output.elapsed() < Duration::from_secs(2),
-                        "hardware MFT output timeout"
-                    );
-                    return Ok(pending);
-                }
+                ensure!(Instant::now() < deadline, "hardware MFT output timeout");
                 thread::sleep(Duration::from_millis(1));
             }
         }
@@ -552,6 +578,10 @@ impl Hardware {
             self.output_credit -= 1;
             result.context("hardware MFT ProcessOutput")?;
             let sample = sample.context("hardware MFT returned no sample")?;
+            ensure!(
+                sample.GetSampleTime()? == (self.frame - 1) * 10_000_000 / self.fps as i64,
+                "hardware MFT delayed or reordered an input frame"
+            );
             let buffer = sample.ConvertToContiguousBuffer()?;
             let (mut data, mut length) = (std::ptr::null_mut(), 0);
             buffer.Lock(&mut data, None, Some(&mut length))?;
@@ -561,7 +591,6 @@ impl Hardware {
                 bytes.starts_with(&[0, 0, 0, 1]) || bytes.starts_with(&[0, 0, 1]),
                 "hardware MFT did not produce Annex B H264"
             );
-            self.last_output = Instant::now();
             // Driver property acceptance is insufficient: qualify actual output.
             // Allow one second for RC to settle, then measure a second of media.
             if self.frame > self.fps as i64 {

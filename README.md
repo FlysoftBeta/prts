@@ -1,6 +1,8 @@
 # PRTS
 
-PRTS streams real, headless Chromium pages to a web viewer over WebRTC, with remote input.
+PRTS streams headless Chromium to a web viewer over WebRTC, with remote input.
+Whole-window mode includes the tab strip, omnibox and toolbar; separate flyouts
+and touch input are still being implemented. See [current status](docs/prts/STATUS.md).
 
 ```
 patched headless Chromium --(anonymous pipes: control, input, frames)--> prtsd (Rust, windows-rs)
@@ -56,7 +58,8 @@ cr gen | build [out] [target] | run [out]
 
 ## PRTS: how to run
 
-PRTS streams real Chromium pages over WebRTC using a CPU readback fallback.
+PRTS captures D3D11 shared textures and feeds the Intel hardware H.264 encoder
+through Media Foundation, with CPU capture and OpenH264 software fallbacks.
 It needs Node.js 22+, Rust stable MSVC and Visual Studio C++ tools/Windows SDK
 on Windows x64, plus the patched Chromium build. Synthetic mode remains
 available without Chromium.
@@ -71,18 +74,38 @@ npm ci
 cd ..
 # Optional; the default is this patched component build:
 $env:PRTS_CHROME_PATH='C:/src/chromium/src/out/Default/chrome.exe'
+# Whole-window capture and Chrome UI input (v1 page-only compatibility is still the default):
+$env:PRTS_BROWSER_PROTOCOL='2'
 node server
 ```
 
 Open `http://127.0.0.1:8080`, enter a URL and create a Chromium instance
-(the default source, labelled CPU fallback). Click the video to interact with
-the real page. Select Synthetic for tests without Chromium. Use New tab,
+(the default source). Choose `auto` for hardware encoding with software fallback,
+or `qsv` to request the hardware backend. Click the video to interact with
+the page or Chrome toolbar in whole-window mode. Select Synthetic for tests without Chromium. Use New tab,
 the tab buttons and Resize to manage targets. A second browser tab can create
 another instance or view an existing one; uncheck Request control to share an
 instance already controlled by another viewer. Receiver and encoder stats appear
 below the video. Network simulation supports bitrate caps, packet delay and loss.
 
-Run the automated real-daemon/browser test (build prtsd first):
+Run checks from repo root with one command:
+
+```powershell
+powershell -File scripts/test.ps1              # build, Rust tests, Clippy/fmt, Node unit tests
+powershell -File scripts/test.ps1 -Suite full  # plus real Chromium, GPU/QSV, CPU/software and WebRTC gates
+```
+
+The full suite requires the patched Chromium build, Intel hardware encoding and
+installed Chrome/Edge for the viewer (override with `PRTS_BROWSER`). Gates run
+sequentially with deadlines, separate stdout/stderr logs and exit-status files
+under `%TEMP%`; use `-LogPrefix C:/path/prefix` to choose their location. Use
+`-Suite mf` for the hardware encoder gates alone, or `-Suite gpu` for the
+production auto-capture Intel adapter check (both require built binaries).
+In a disconnected Windows
+session, `-AllowDisconnectedDesktop` permits the existing explicit override;
+foreground/cursor qualification still requires a connected desktop.
+
+Individual browser tests (build prtsd first):
 
 ```powershell
 cd server
@@ -99,9 +122,10 @@ the separate mock/unit suite; `cargo test --release` in `prtsd/` runs the Rust
 integration suite. If PATH is stale, prepend `C:/Program Files/nodejs` and
 `$env:USERPROFILE/.cargo/bin`.
 
-CPU capture, OpenH264/QSV CPU input and Job Object process-tree lifetime are
-implemented. D3D11 shared textures and AppContainer/LPAC isolation remain later
-phases. See [M3 acceptance/design](docs/prts/phase2-m3.md). See [the plan](docs/prts/PLAN.md) and the
+GPU/CPU capture, QSV DXGI/CPU input, OpenH264 and Job Object process-tree lifetime
+are implemented. Isolation is paused on `wip/i1-isolation`; the shipped profile
+remains unchanged. See [M5 design and qualification](docs/prts/phase2-m5-design.md),
+[MF latency](docs/prts/mvp-mf-latency.md), [the plan](docs/prts/PLAN.md) and the
 [server](docs/prts/server-notes.md) / [daemon](docs/prts/prtsd-notes.md) notes.
 
 Branch `main` in src always equals `PIN`; `work` = `main` + patches. `sync` refuses to run with uncommitted changes.

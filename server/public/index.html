@@ -12,7 +12,7 @@
     <form id="create">
       <label>Initial URL<input name="url" value="about:blank" required></label>
       <div class="row"><label>Width<input name="width" type="number" min="1" max="8192" value="1280" required></label><label>Height<input name="height" type="number" min="1" max="8192" value="720" required></label><label>DPR<input name="dpr" type="number" min="0.5" max="4" step="0.25" value="1" required></label></div>
-      <div class="row"><label>Source<select name="source"><option value="chromium">Chromium (CPU fallback)</option><option value="synthetic">Synthetic (test)</option></select></label><label>Encoder<select name="encoder"><option>auto</option><option>software</option><option>qsv</option></select></label></div>
+      <div class="row"><label>Source<select name="source"><option value="chromium">Chromium</option><option value="synthetic">Synthetic (test)</option></select></label><label>Encoder<select name="encoder"><option>auto</option><option>software</option><option>qsv</option></select></label></div>
       <button>Create instance</button>
     </form>
     <div id="instances"></div>

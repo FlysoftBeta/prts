@@ -1,6 +1,111 @@
 #![cfg(windows)]
 use prtsd::{encoder::VideoEncoder, mf_encoder::MfEncoder};
 
+/// Measure each complete synchronous request, including COM dispatch, conversion,
+/// async-MFT polling and output copy. Require a decoded picture from every call:
+/// an encoder that accumulates frames must fail even if average throughput is high.
+#[test]
+#[ignore = "requires Intel QSV; run --ignored --nocapture"]
+fn hardware_low_latency_has_no_frame_queue() -> anyhow::Result<()> {
+    use openh264::formats::YUVSource;
+    use prtsd::{
+        d3d,
+        model::{Size, Target},
+        video::render,
+    };
+    use std::time::Instant;
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+    let target = Target::new(
+        1,
+        "about:blank".into(),
+        Size {
+            width: 1280,
+            height: 720,
+            dpr: 1.,
+        },
+        true,
+    );
+    let gpu = d3d::shared()?;
+    let texture = gpu
+        .lock()
+        .unwrap()
+        .texture(1280, 720, DXGI_FORMAT_B8G8R8A8_UNORM, false)?;
+    let frame = d3d::Frame { texture, gpu };
+    for gpu_input in [false, true] {
+        let mut encoder = MfEncoder::new(1280, 720, 4_000_000, 30)?;
+        assert!(encoder.name().to_lowercase().contains("intel"));
+        let mut decoder = openh264::decoder::Decoder::new()?;
+        let mut times = Vec::new();
+        let mut idrs = Vec::new();
+        for i in 0..180 {
+            // Exercise restart policy as well as initial settings.
+            if i == 90 {
+                encoder.set_bitrate(1_000_000)?;
+            }
+            let pixels = render(&target, i, i as f64 / 30.);
+            if gpu_input {
+                let g = frame.gpu.lock().unwrap();
+                unsafe {
+                    g.context.UpdateSubresource(
+                        &frame.texture,
+                        0,
+                        None,
+                        pixels.as_ptr().cast(),
+                        1280 * 4,
+                        0,
+                    );
+                }
+            }
+            let start = Instant::now();
+            let bytes = if gpu_input {
+                encoder.encode_texture(&frame, i == 0 || i == 25)?
+            } else {
+                encoder.encode(&pixels, 1280, 720, i == 0 || i == 25)?
+            };
+            times.push(start.elapsed().as_secs_f64() * 1000.);
+            let mut decoded = 0;
+            let mut idr = false;
+            for nal in openh264::nal_units(&bytes) {
+                let prefix = if nal.starts_with(&[0, 0, 0, 1]) { 4 } else { 3 };
+                idr |= nal[prefix] & 31 == 5;
+                if let Some(picture) = decoder.decode(nal)? {
+                    assert_eq!(picture.dimensions(), (1280, 720));
+                    decoded += 1;
+                }
+            }
+            assert_eq!(
+                decoded, 1,
+                "one input must produce one decoded picture immediately: gpu={gpu_input} frame={i}"
+            );
+            if idr {
+                idrs.push(i);
+            }
+        }
+        assert!(
+            idrs.contains(&0) && idrs.contains(&25) && idrs.contains(&90),
+            "initial/forced/restart IDR missing: {idrs:?}"
+        );
+        assert!(
+            idrs.windows(2).all(|pair| pair[1] - pair[0] <= 60) && 179 - idrs.last().unwrap() < 60,
+            "two-second GOP exceeded: {idrs:?}"
+        );
+        times.sort_by(f64::total_cmp);
+        eprintln!(
+            "MF latency gpu={gpu_input} 1280x720@30 4M->1M n=180 decoded=180 no_delayed_frames=true idrs={idrs:?} mean_ms={:.3} p50_ms={:.3} p95_ms={:.3} p99_ms={:.3} max_ms={:.3}",
+            times.iter().sum::<f64>() / 180.,
+            times[89],
+            times[170],
+            times[178],
+            times[179]
+        );
+        assert!(
+            times[170] < 100.,
+            "p95 encoder latency exceeds three frame intervals"
+        );
+    }
+    Ok(())
+}
+
 /// Opt in on machines with an Intel/NVIDIA hardware encoder. Ordinary CI still
 /// compiles the complete native backend without requiring a GPU or desktop.
 #[test]

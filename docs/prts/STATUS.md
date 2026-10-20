@@ -1,10 +1,20 @@
 # PRTS status
 
 ## Current state
-- **Next action: MVP milestone per PLAN.md "Priority order (revised 2026-10-21)" item 2**: hardware GPU
-  verified in shipped config; MF/QSV low-latency setup with measured latency; common flyouts (m5b: menus,
-  context menus, omnibox dropdown, bubbles, tooltips, dialogs, permission/select/extension popups) in the
-  stream with input + one stream per browser window; touch input; codebase cleanup + one-command tests.
+- **Next action: continue MVP (PLAN priority 2), M5b steps 4-5**: host-family tracking and GPU/CPU
+  flyout composition/input (menus, context menus, omnibox dropdown, bubbles, tooltips, dialogs,
+  permission/select/extension popups). Then step 6 per-window streams, touch input and remaining cleanup.
+  Develop unfinished features on matching WIP branches; merge only after their gates pass.
+- **MVP GPU/MF submilestone qualified (2026-10-21)**: production launcher in default auto capture mode
+  reports active Intel vendor 32902/device 39877/LUID 0xe369, SwiftShader=0, with decoded WebGL/video and
+  QSV DXGI zero-copy. MF H264 HRD corrected from two seconds to 100ms with a 32KiB IDR floor; mandatory
+  settings readback and one-inflight timestamp contract. GPU encoder latency mean9.281ms/p95 10.737ms,
+  CPU mean10.656ms/p95 11.862ms; each path180/180 pictures decoded immediately including bitrate restart.
+  All19 full-suite gates plus production-auto GPU gate pass (20 total), strict MF20-cycle handles301 flat.
+  One-command runner `powershell -File scripts/test.ps1 -Suite full` has per-gate deadlines/logs;
+  disconnected-session override is explicit. README run steps corrected; v1 page compatibility remains
+  the default pending M5b completion (`PRTS_BROWSER_PROTOCOL=2` opts into whole-window mode).
+  See [mvp-mf-latency.md](mvp-mf-latency.md) and journal-mvp.md. Chromium source/patches unchanged.
 - Isolation (I1) PAUSED and parked OFF main: infra branch `wip/i1-isolation` (d045f0a, incl. its exported
   patches) and Chromium branch `wip-i1` (9d3afd6eae; original history at `backup-i1-pre-park` = 23ec43701b).
   Resume instructions + pending items (Mojo execute-guard fix, outer-job UI-limit root cause, per-tenant
@@ -57,6 +67,14 @@
   (<=150 kbps -> auto-fallback to software), Windows 10 22H2 qualification, AppContainer/LPAC security isolation untested at runtime.
 
 ## Log
+- 2026-10-21 (Codex MVP GPU/MF): Qualified Intel hardware in production auto capture with active GPU
+  info, decoded WebGL/video and QSV zero-copy assertions. Fixed H264 HRD byte units (100ms target,
+  32KiB floor after unchanged 150kbps decode gate exposed tiny-buffer corruption), read back mandatory
+  settings, reject delayed/reordered output, added CPU/GPU latency/IDR/restart gate. Full19 + GPU gate
+  PASS; no acceptance thresholds relaxed. Added bounded one-command runner and accurate README;
+  refreshed stale daemon notes/UI label. Native failure/exception/timeout runner smoke gives7/1/124.
+  Tests retain hidden/cloaked/taskbar checks; connected-desktop focus/cursor and Windows10 remain
+  unverified. No Chromium edits/rebuild; export unchanged23 patches. Flyouts/per-window/touch still next.
 - 2026-10-21 (orchestrator run 5, 20:04-00:55): Codex i1 (isolation) ran 20:07-21:41 and was killed by the
   5h usage limit (window 17% -> 100%, ~502k tokens). Codex oddsize (20:07-20:38) kept odd sizes on QSV; all
   gates pass. The user then paused isolation, so i1b was not resumed. Codex park (00:36-00:50) moved isolation
