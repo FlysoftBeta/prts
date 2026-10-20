@@ -1,5 +1,10 @@
 # prtsd Phase 1 part A handoff
 
+Current M4 status: native GPU capture/DXGI QSV input and CPU/software recovery
+work, but signoff is blocked by the reproduced Intel MFT handle lifetime leak.
+See [phase2-m4.md](phase2-m4.md) and the M4 section below; earlier milestone
+sections are historical.
+
 Implemented and verified on Windows 11 x64, 2026-10-19. No Chromium build,
 Chromium launch/source changes, server/ changes, or git commits in this task.
 Windows 10 22H2 runtime qualification remains outstanding.
@@ -384,3 +389,40 @@ Standalone capture acceptance: `cargo run --release --bin browser_m3`.
 Real page/WebRTC acceptance: `cd server; npm run e2e:browser`.
 Existing synthetic acceptance: `npm run e2e`, `cargo test`, Clippy and rustfmt.
 Details, measurements and M4 handoff: phase2-m3.md.
+
+## Phase 2 M4: native texture input
+
+`PRTS_FRAME_MODE=auto|gpu|cpu` is trusted daemon configuration (default `auto`).
+`gpu` prefers textures but retains CPU negotiation/recovery; to require GPU,
+check actual stats as the acceptance programs do. No extra Chromium launch
+switch is needed: the HELLO offer selects modes and adapter LUID. `cpu` offers
+only sections, preserving the unchanged M3 acceptance and encoder CPU inputs.
+
+`d3d.rs` creates a hardware Intel D3D11 device (never WARP), validates imported
+NT resources and their adapter LUID, and checks raw AcquireSync HRESULTs so
+WAIT_TIMEOUT/WAIT_ABANDONED cannot be treated as successful Rust `Result<()>`.
+Each wire frame copies to a private GPU BGRA image, waits for GPU reads, returns
+key 0, and ACKs before queueing a per-target latest frame. Coalescing remains
+bounded by the two registered resources, independently across targets.
+
+The MF worker attaches an IMFDXGIDeviceManager before media-type negotiation
+when the MFT advertises MF_SA_D3D11_AWARE. GPU frames convert through an
+ID3D11VideoProcessor to private NV12 textures; MFCreateDXGISurfaceBuffer retains
+each texture for the async MFT. Each sample owns its surface; an MFT-retained
+sample can never be overwritten by the browser. This path performs GPU copies
+and conversion but no CPU pixel readback. Encoder selection/fallback/bitrate
+recreation remain unchanged. OpenH264 texture input uses staging BGRA readback
+then CPU I420 conversion and explicitly reports `staging`.
+
+Actual interval stats: `frames.backend` (`gpu-texture`, `cpu-section`,
+`synthetic`) and `encoder.input_path` (`d3d11-zero-copy`, `staging`, `cpu-nv12`,
+`cpu-i420`). These fields persist across intervals without newly encoded frames.
+Use them together with the actual encoder name; requested QSV is not evidence
+of hardware or zero-copy operation. Recoverable registration/import rejection
+logs once per target and switches Chromium to a new CPU generation. Acquired
+mutex failure/uncertain GPU completion still requires connection restart under
+the protocol; physical device removal has not been injected.
+
+Qualification commands and measurements: `phase2-m4.md`. Intel UHD 630 native
+capture logs vendor 8086/device 9bc5, hardware enabled, SwiftShader false, LUID
+0x000000000000e369 matching prtsd on this boot. No other vendor is qualified.

@@ -691,6 +691,8 @@ impl Daemon {
                 let mut sample = std::mem::take(&mut *guard);
                 // Lifecycle diagnostics belong to tick(), including failures that
                 // arrive while stats awaits another viewer's transport report.
+                guard.frame_backend = sample.frame_backend.clone();
+                guard.encoder_input = sample.encoder_input.clone();
                 guard.failure = sample.failure.take();
                 guard.warnings = std::mem::take(&mut sample.warnings);
                 sample
@@ -728,8 +730,8 @@ impl Daemon {
                 sessions.push(json!({"session_id":id,"rtt_ms":rtt,"available_outgoing_bps":if available==0 {None}else{Some(available)},"rtp_sent_bps":s.bytes.swap(0,Ordering::AcqRel) as f64*8.0/seconds,"shaper_dropped_packets":s.shaper.dropped.load(Ordering::Relaxed),"viewer_feedback":s.feedback}));
             }
             self.out.event("stats",json!({"instance_id":i.id,"interval_ms":elapsed.as_millis() as u64,
-                "encoder":{"name":*i.video.encoder_name.lock().unwrap(),"fps":m.encoded as f64/seconds,"bitrate_bps":m.bytes as f64*8.0/seconds,"qp_avg":null,"encode_ms_avg":encode_avg},
-                "frames":{"captured":m.captured,"encoded":m.encoded,"dropped":m.dropped,"capture_to_encode_ms_avg":capture_encode_avg,"capture_to_encode_ms_p95":p95,"capture_to_send_ms_avg":avg(&m.send_ms)},"sessions":sessions}));
+                "encoder":{"input_path":m.encoder_input,"name":*i.video.encoder_name.lock().unwrap(),"fps":m.encoded as f64/seconds,"bitrate_bps":m.bytes as f64*8.0/seconds,"qp_avg":null,"encode_ms_avg":encode_avg},
+                "frames":{"backend":m.frame_backend,"captured":m.captured,"encoded":m.encoded,"dropped":m.dropped,"capture_to_encode_ms_avg":capture_encode_avg,"capture_to_encode_ms_p95":p95,"capture_to_send_ms_avg":avg(&m.send_ms)},"sessions":sessions}));
         }
     }
     async fn event(&mut self, event: Event) {

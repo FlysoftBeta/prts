@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fork } from 'node:child_process';
+import { fork, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { access } from 'node:fs/promises';
@@ -27,7 +28,7 @@ async function viewerPath() {
   throw new Error('Set PRTS_BROWSER to an installed Chrome/Edge viewer');
 }
 
-test('PRTS CPU fallback: real Chromium page pixels, input, targets and two instances', { timeout: 420000 }, async t => {
+test('PRTS browser frames: real Chromium page pixels, input, targets and two instances', { timeout: 420000 }, async t => {
   const fixture = createServer((req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     const blue = req.url.includes('blue'), staticPage = req.url.includes('static');
@@ -92,6 +93,38 @@ test('PRTS CPU fallback: real Chromium page pixels, input, targets and two insta
   await color(a,350,240,[210,35,60],'real red page decoded');
   const colors=new Set();
   await until(async () => { colors.add((await pixel(a,480,340))[0] > 120); return colors.size===2; },'real animation changes');
+  if (process.env.PRTS_M4_BENCH === '1') {
+    const exec = promisify(execFile);
+    async function cpuSnapshot() {
+      assert.ok(Number.isSafeInteger(daemonPid) && daemonPid > 0);
+      const command = `$rootPid=${daemonPid}
+$tree=New-Object 'System.Collections.Generic.HashSet[int]'
+[void]$tree.Add($rootPid)
+$processes=Get-CimInstance Win32_Process
+for($n=0;$n -lt 8;$n++){foreach($p in $processes){if($tree.Contains([int]$p.ParentProcessId)){[void]$tree.Add([int]$p.ProcessId)}}}
+$browserCpu=0.0
+foreach($processId in $tree){if($processId -ne $rootPid){$p=Get-Process -Id $processId -ErrorAction SilentlyContinue;if($p){$browserCpu+=$p.TotalProcessorTime.TotalSeconds}}}
+$daemonCpu=(Get-Process -Id $rootPid).TotalProcessorTime.TotalSeconds
+@{browser=$browserCpu;daemon=$daemonCpu;time=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()}|ConvertTo-Json -Compress`;
+      const {stdout} = await exec('powershell.exe', ['-NoProfile','-Command',command], {windowsHide:true});
+      return JSON.parse(stdout);
+    }
+    for (const [width,height] of [[960,640],[1920,1080]]) {
+      await field(a,'#resize [name=width]',width); await field(a,'#resize [name=height]',height); await field(a,'#resize [name=dpr]',1);
+      await a.click('#resize button');
+      await a.waitForFunction(([w,h]) => document.querySelector('video').videoWidth===w && document.querySelector('video').videoHeight===h, {}, [width,height]);
+      await sleep(2500);
+      const before = await cpuSnapshot(), samples=[];
+      for (let n=0;n<8;n++) { await sleep(1050); samples.push(JSON.parse(await a.$eval('#encoder',e=>e.textContent))); }
+      const after = await cpuSnapshot(), wall=(after.time-before.time)/1000;
+      const captured=samples.reduce((n,s)=>n+s.frames.encoded,0);
+      const fps=samples.reduce((n,s)=>n+s.encoder.fps,0)/samples.length;
+      const encodeMs=samples.reduce((n,s)=>n+(s.encoder.encode_ms_avg||0)*s.frames.encoded,0)/captured;
+      console.log('M4_REAL_BENCH '+JSON.stringify({mode:process.env.PRTS_FRAME_MODE||'auto',width,height,wall,browser_tree_cpu_percent:(after.browser-before.browser)/wall*100,prtsd_cpu_percent:(after.daemon-before.daemon)/wall*100,fps,encode_ms:encodeMs,frame_backend:samples.at(-1).frames.backend,input_path:samples.at(-1).encoder.input_path}));
+    }
+    await field(a,'#resize [name=width]',640); await field(a,'#resize [name=height]',480); await a.click('#resize button');
+    await a.waitForFunction(() => document.querySelector('video').videoWidth===640 && document.querySelector('video').videoHeight===480);
+  }
   await field(a,'#navigate [name=url]',url.replace('127.0.0.1','localhost')+'blue');
   await a.click('#navigate button'); await color(a,350,240,[20,60,210],'cross-site navigation produced new page frames');
   await a.waitForFunction(() => document.querySelector('#tabs button.active').textContent.includes('localhost:fixture'));
@@ -124,11 +157,18 @@ test('PRTS CPU fallback: real Chromium page pixels, input, targets and two insta
   for (const p of [a,b]) {
     await p.bringToFront();
     await p.waitForFunction(() => /FPS: [1-9]/.test(document.querySelector('#quality').textContent) && document.querySelector('#encoder').textContent.includes('capture_to_encode_ms'));
-    console.log(await p.$eval('#encoder',e=>e.textContent));
+    const stats = await p.$eval('#encoder',e=>e.textContent);
+    console.log(stats);
+    const mode = process.env.PRTS_FRAME_MODE || 'auto';
+    if (mode === 'cpu') assert.match(stats, /cpu-section/);
+    else {
+      assert.match(stats, /gpu-texture/);
+      assert.match(stats, process.env.PRTS_TEST_ENCODER === 'qsv' ? /d3d11-zero-copy/ : /staging/);
+    }
     assert.equal(await p.$eval('#error',e=>e.textContent),'');
   }
   await b.bringToFront();
-  await b.screenshot({path:fileURLToPath(new URL('../../docs/prts/phase2-m3-e2e.png',import.meta.url)),fullPage:true});
+  await b.screenshot({path:fileURLToPath(new URL('../../docs/prts/phase2-m4-e2e.png',import.meta.url)),fullPage:true});
   assert.deepEqual(errors,[]);
   const ids = await b.$$eval('#instances .instance > button:first-child',bs=>bs.map(b=>b.textContent.split(' ')[0]));
   for (const id of ids) {
@@ -145,7 +185,7 @@ test('PRTS CPU fallback: real Chromium page pixels, input, targets and two insta
   await sleep(1500);
   assert.equal((await b.$$('#instances .instance')).length,0,'cancelled browser did not publish late ready');
   assert.deepEqual(errors,[]);
-  console.log('Browser CPU fallback WebRTC E2E passed; instances closed');
+  console.log('Browser frame backend WebRTC E2E passed; instances closed');
 });
 
 test('browser launch failure is asynchronous, retains failed ID, and closes cleanly', {timeout:30000}, async t => {

@@ -295,65 +295,36 @@ visible in `SkiaOutputSurfaceImplOnGpu::CopyOutputNV12`,
 `components/viz/service/display_embedder/skia_output_surface_impl_on_gpu.cc:1352–1487`,
 including `skia::BlitRGBAToYUVA`. Hardware/driver renderability still needs testing.
 
-#### Exact proposed GPU → browser → prtsd handoff
+#### Exact implemented GPU ? browser ? prtsd handoff (M4)
 
-1. **GPU/Viz process** allocates and owns the pool texture, performs the capture
-   blit/conversion, and completes the GPU work. The mappable path explicitly
-   waits before sending its result: `CopyOutputRGBAInTexture:1066–1093` and
-   `CopyOutputNV12:1490–1525` use `ReadbackContextTexture` and the finished
-   callbacks configured by `FlushAndSubmitCopyOutput:1204–1249`.
-   Despite its name, `ReadbackContextTexture::OnMailboxReadyInternal`,
-   `components/viz/service/display_embedder/skia_render_copy_results.cc:179–194`,
-   only sends a SharedImage result; it does **not** map/copy pixels to the CPU.
-2. **Existing Mojo GPU→browser channel** carries the cloned GMB platform handle
-   to the browser's capture consumer. The capturer assembles metadata and holds
-   the frame through `InFlightFrameDelivery` until `Done()`
-   (`frame_sink_video_capturer_impl.cc:1573–1609`). This isn't a raw numeric
-   GPU-process handle sent over an anonymous pipe.
-3. **Browser process owns the PRTS pipe client.** Check the delivered union arm,
-   handle type and validity. It now has its own local NT texture handle.
-   Call `DuplicateHandle(GetCurrentProcess(), local_texture_handle,
-   inherited_prtsd_process_handle, ..., DUPLICATE_SAME_ACCESS)` to create an NT
-   handle **in prtsd's handle table**. Send that destination handle value as a
-   fixed-width integer with instance/target/generation/frame IDs, coded and
-   visible size, format, color space, timestamp and content rectangle. Never
-   send the browser-local handle number and assume it works in prtsd.
-4. **prtsd** adopts/closes its received NT handle and opens the texture using
-   `ID3D11Device1::OpenSharedResource1` on the matching GPU adapter. The Chromium
-   equivalent is `OpenSharedHandleTexture`,
-   `gpu/command_buffer/service/dxgi_shared_handle_manager.cc:22–38`. Identify
-   adapter LUID during negotiation; do not assume QSV and Chrome chose the same
-   adapter. Browser metadata may need an additional adapter query because the
-   capture callback does not carry an adapter LUID.
-5. prtsd acquires `IDXGIKeyedMutex` with **key 0**, reads/encodes, releases with
-   **key 0**, and sends frame release only when the encoder's GPU read is
-   complete. Chromium uses the same key for acquire and release:
-   `DXGISharedHandleState::AcquireKeyedMutex/ReleaseKeyedMutex`,
-   `gpu/command_buffer/service/dxgi_shared_handle_manager.cc:129–183`, and
-   `gpu/command_buffer/common/constants.h:100`. Do not invent alternating keys
-   0/1 for these existing allocations. Use a bounded wait in prtsd and handle
-   timeout/device loss. The producer-completed notification and frame lease are
-   essential: a mutex alone does not identify which frame is ready or prevent
-   pool reuse after an early `Done()`.
-6. Browser maps the release ID to the retained Mojo callback and invokes
-   `Done()` on its owning sequence, returning the texture to the pool. For a
-   dropped frame that was never given to prtsd, close owned handles and call
-   `Done()` immediately. Bound outstanding leases and the writer queue. Handle
-   duplicate releases, resize generations, disconnects and partial pipe writes.
-   If prtsd dies, its handles close with the process; if delivery fails while it
-   remains alive, arrange explicit remote-handle cleanup. Never reclaim a lease
-   solely on timeout while a live encoder may still be reading it.
+This supersedes the original Phase 0 direct-lease/key-0 proposal. See
+`phase2-m4.md` and normative `protocol.md` for the implemented contract.
 
-Keyed mutex versus fence: use this validated GMB allocator's keyed-mutex path
-first. A GPU `SyncToken`/SharedImage mailbox is Chromium synchronization, not a
-Windows fence usable by Rust. The ordinary D3D SharedImage allocator elsewhere
-in `d3d_image_backing_factory.cc:732–795` can instead choose shared fences on
-supported devices; that is a **different allocation path**. If PRTS later uses
-it, export/duplicate a real shared D3D fence handle plus monotonically increasing
-ready/release values and implement both producer and consumer waits. The current
-GMB capture union arm supplies no such external fence. Do not replace the
-mappable completion wait with the Linux native-handle preference without
-designing that synchronization boundary.
+1. Viz captures ARGB using `kPreferMappableSharedImage`, delivers a native BGRA
+   DXGI GMB after GPU completion, and retains its lease until `Done()`.
+2. The browser opens that local NT handle on the adapter matching both Chromium's
+   active hardware GPU and HELLO's LUID. It acquires Viz's existing key-0 mutex.
+3. It GPU-copies the visible image into a PRTS-owned shared NT/keyed texture
+   acquired at key 0, waits for completion, releases the source at key 0 and
+   export at key 1, then ends the Viz lease. The export pool uses M3's two-credit
+   bound, registration/unregistration, retirement and passive refresh behavior.
+4. prtsd duplicates the browser-local export handle through its retained browser
+   process handle (`DuplicateHandle`, SAME_ACCESS, noninheritable). No prtsd
+   process handle is inherited and no GPU-process handle value crosses the pipe.
+5. It validates metadata and the actual texture descriptor and opens with
+   `OpenSharedResource1` on the negotiated hardware adapter, acquires key 1,
+   copies to a private GPU BGRA surface, waits for reads to finish, releases at
+   key 0 and sends FRAME_RELEASE. Even coalesced/dropped frames perform this
+   transition; private copies can be discarded independently.
+6. QSV converts BGRA to private NV12 using the D3D11 video processor and submits
+   an MF DXGI surface buffer/device manager. Software uses staging BGRA readback
+   plus CPU I420 conversion, explicitly reported as `staging`. Import rejection
+   before acquisition triggers sticky CPU fallback and a new target generation.
+
+No upstream SharedImage mutex convention changes. GPU copies occur but no CPU
+pixel readback occurs in the QSV texture path. The completion waits currently
+run on the browser UI sequence (bounded) and serialized daemon/encoder callers;
+an asynchronous capture worker would improve responsiveness under driver stalls.
 
 #### Frame pacing, damage, and visibility
 

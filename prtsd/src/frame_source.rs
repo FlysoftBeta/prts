@@ -2,11 +2,13 @@ use crate::model::Target;
 use std::time::Instant;
 
 pub struct Captured {
+    #[cfg(windows)]
+    pub texture: Option<crate::d3d::Frame>,
     pub pixels: Vec<u8>,
     pub capture: Instant,
 }
-/// M3 CPU fallback ingress. A GPU surface variant can extend Captured in M4;
-/// subscription/refresh and encoder publication remain independent of capture.
+/// CPU or private GPU ingress. Subscription/refresh and encoder publication
+/// remain independent of capture and browser shared-resource credits.
 pub trait FrameSource: Send {
     fn capture(
         &mut self,
@@ -26,6 +28,8 @@ impl FrameSource for Synthetic {
     fn capture(&mut self, t: &Target, _: u32, _: bool) -> anyhow::Result<Option<Captured>> {
         self.frame += 1;
         Ok(Some(Captured {
+            #[cfg(windows)]
+            texture: None,
             capture: Instant::now(),
             pixels: crate::video::render(t, self.frame, self.origin.elapsed().as_secs_f64()),
         }))
@@ -91,6 +95,7 @@ impl FrameSource for BrowserSource {
             return Ok(None);
         }
         Ok(Some(Captured {
+            texture: frame.texture,
             pixels: frame.pixels,
             capture: frame.received,
         }))

@@ -1,5 +1,5 @@
-//! Registered shared-memory CPU readback FALLBACK. M4 can add a GPU resource
-//! variant here without changing browser targets or the video source contract.
+//! Bounded registered CPU sections and keyed D3D11 textures. Texture frames
+//! become private GPU copies before release; only CPU sections map pixels.
 use crate::browser_wire::{Decoder, Record};
 use anyhow::{Result, ensure};
 use std::{
@@ -13,6 +13,7 @@ use windows::Win32::{
 };
 
 pub struct CpuFrame {
+    pub texture: Option<crate::d3d::Frame>,
     pub target: u64,
     pub generation: u64,
     pub width: u32,
@@ -22,6 +23,7 @@ pub struct CpuFrame {
     pub timestamp_us: u64,
 }
 struct Section {
+    texture: Option<crate::d3d::Frame>,
     handle: HANDLE,
     address: usize,
     target: u64,
@@ -48,14 +50,18 @@ impl Drop for Section {
 }
 #[derive(Default)]
 pub struct Resources {
+    gpu_luid: u64,
     sections: BTreeMap<u64, Section>,
     // Coalesce within a target, never across independent subscriptions. At
-    // most two registered sections can contribute a pending CPU copy.
+    // most two registered resources can contribute a pending CPU/GPU copy.
     pending: VecDeque<CpuFrame>,
     pub received: u64,
     pub coalesced: u64,
 }
 impl Resources {
+    pub fn set_gpu_adapter(&mut self, luid: u64) {
+        self.gpu_luid = luid;
+    }
     pub fn take_frame(&mut self) -> Option<CpuFrame> {
         self.pending.pop_front()
     }
@@ -89,23 +95,25 @@ impl Resources {
                         && source != 0
                         && source <= usize::MAX as u64
                         && source != usize::MAX as u64
-                        && kind == 2
+                        && (kind == 1 || kind == 2)
                         && format == 1
-                        && luid == 0,
-                    "Invalid CPU section identity/format"
+                        && ((kind == 2 && luid == 0) || (kind == 1 && luid != 0)),
+                    "Invalid frame resource identity/format"
                 );
                 ensure!(
                     (1..=16384).contains(&width)
                         && (1..=16384).contains(&height)
-                        && stride >= width as usize * 4
-                        && stride.is_multiple_of(4)
-                        && length == stride as u64 * height as u64
-                        && length <= 256 * 1024 * 1024,
-                    "Invalid section layout"
+                        && ((kind == 2
+                            && stride >= width as usize * 4
+                            && stride.is_multiple_of(4)
+                            && length == stride as u64 * height as u64
+                            && length <= 256 * 1024 * 1024)
+                            || (kind == 1 && stride == 0 && length == 0)),
+                    "Invalid frame resource layout"
                 );
                 ensure!(
                     self.sections.len() < 2 && !self.sections.contains_key(&id),
-                    "Section pool exceeds two resources"
+                    "Frame pool exceeds two resources"
                 );
                 let mut handle = HANDLE::default();
                 unsafe {
@@ -120,6 +128,7 @@ impl Resources {
                     )?;
                 }
                 let mut section = Section {
+                    texture: None,
                     handle,
                     address: 0,
                     target,
@@ -130,29 +139,39 @@ impl Resources {
                     length: length as usize,
                     last_frame: 0,
                 };
-                let map = unsafe { MapViewOfFile(handle, FILE_MAP_READ, 0, 0, section.length) };
-                ensure!(
-                    !map.Value.is_null(),
-                    "Cannot map CPU section (type/size/access)"
-                );
-                section.address = map.Value as usize;
-                // A successful map is not proof that its pages can be read:
-                // SEC_RESERVE can map uncommitted pages, and SEC_IMAGE ignores
-                // the requested view length. Only accept a contiguous committed
-                // read-only data view covering the entire declared layout.
-                let mut region = MEMORY_BASIC_INFORMATION::default();
-                let queried =
-                    unsafe { VirtualQuery(Some(map.Value), &mut region, size_of_val(&region)) };
-                ensure!(
-                    queried == size_of_val(&region)
-                        && region.BaseAddress == map.Value
-                        && region.AllocationBase == map.Value
-                        && region.State == MEM_COMMIT
-                        && region.Type == MEM_MAPPED
-                        && region.Protect == PAGE_READONLY
-                        && region.RegionSize >= section.length,
-                    "CPU section is not a committed readable data view of the declared size"
-                );
+                if kind == 1 {
+                    ensure!(
+                        luid == self.gpu_luid && luid != 0,
+                        "GPU mode/LUID not negotiated"
+                    );
+                    let gpu = crate::d3d::shared()?;
+                    let texture = gpu.lock().unwrap().open(handle, width, height, luid)?;
+                    section.texture = Some(crate::d3d::Frame { texture, gpu });
+                } else {
+                    let map = unsafe { MapViewOfFile(handle, FILE_MAP_READ, 0, 0, section.length) };
+                    ensure!(
+                        !map.Value.is_null(),
+                        "Cannot map CPU section (type/size/access)"
+                    );
+                    section.address = map.Value as usize;
+                    // A successful map is not proof that its pages can be read:
+                    // SEC_RESERVE can map uncommitted pages, and SEC_IMAGE ignores
+                    // the requested view length. Only accept a contiguous committed
+                    // read-only data view covering the entire declared layout.
+                    let mut region = MEMORY_BASIC_INFORMATION::default();
+                    let queried =
+                        unsafe { VirtualQuery(Some(map.Value), &mut region, size_of_val(&region)) };
+                    ensure!(
+                        queried == size_of_val(&region)
+                            && region.BaseAddress == map.Value
+                            && region.AllocationBase == map.Value
+                            && region.State == MEM_COMMIT
+                            && region.Type == MEM_MAPPED
+                            && region.Protect == PAGE_READONLY
+                            && region.RegionSize >= section.length,
+                        "CPU section is not a committed readable data view of the declared size"
+                    );
+                }
                 self.sections.insert(id, section);
                 Record {
                     kind: 7,
@@ -182,7 +201,7 @@ impl Resources {
                     payload: vec![],
                 }
             }
-            0x311 => {
+            0x310 | 0x311 => {
                 ensure!(r.id == 0, "Frame notification has request ID");
                 let target = d.u64()?;
                 let generation = d.u64()?;
@@ -212,16 +231,35 @@ impl Resources {
                 ensure!(
                     (target, generation, width, height, format)
                         == (s.target, s.generation, s.width, s.height, 1)
-                        && frame > s.last_frame,
+                        && frame > s.last_frame
+                        && (r.kind == 0x310) == s.texture.is_some(),
                     "Frame metadata mismatch/reuse"
                 );
                 fence(Ordering::Acquire);
                 let capture = Instant::now();
-                let src = unsafe { std::slice::from_raw_parts(s.address as *const u8, s.length) };
-                let row = width as usize * 4;
-                let mut pixels = vec![0; row * height as usize];
-                for (dst, src) in pixels.chunks_exact_mut(row).zip(src.chunks_exact(s.stride)) {
-                    dst.copy_from_slice(&src[..row]);
+                let texture = if let Some(input) = &s.texture {
+                    let image =
+                        input
+                            .gpu
+                            .lock()
+                            .unwrap()
+                            .copy_shared(&input.texture, width, height)?;
+                    Some(crate::d3d::Frame {
+                        texture: image,
+                        gpu: input.gpu.clone(),
+                    })
+                } else {
+                    None
+                };
+                let mut pixels = Vec::new();
+                if texture.is_none() {
+                    let src =
+                        unsafe { std::slice::from_raw_parts(s.address as *const u8, s.length) };
+                    let row = width as usize * 4;
+                    pixels = vec![0; row * height as usize];
+                    for (dst, src) in pixels.chunks_exact_mut(row).zip(src.chunks_exact(s.stride)) {
+                        dst.copy_from_slice(&src[..row]);
+                    }
                 }
                 s.last_frame = frame;
                 self.received += 1;
@@ -229,6 +267,7 @@ impl Resources {
                 self.pending.retain(|f| f.target != target);
                 self.coalesced += (before - self.pending.len()) as u64;
                 self.pending.push_back(CpuFrame {
+                    texture,
                     target,
                     generation,
                     width,
@@ -237,7 +276,8 @@ impl Resources {
                     received: capture,
                     timestamp_us,
                 });
-                // All section reads have completed. The encoder owns its CPU copy.
+                // All shared-resource reads have completed. The encoder owns a
+                // private CPU or GPU copy, independent of browser pool credits.
                 let mut payload = id.to_le_bytes().to_vec();
                 payload.extend(frame.to_le_bytes());
                 payload.push(0);

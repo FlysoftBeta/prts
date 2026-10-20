@@ -161,3 +161,20 @@ resize/DPR2, switching/static refresh, close, two instances and displayed stats.
 Browser creation returns starting immediately; cold component DLL loading can
 take much longer than a normal five-second command deadline. Close/EOF cancels
 startup. See phase2-m3.md for frame lifetimes and final acceptance results.
+
+## M4 frame mode and path diagnostics
+
+Start the server with `PRTS_FRAME_MODE=auto` (default), `gpu`, or `cpu` in its
+environment; the spawned daemon inherits this setting. It is trusted process
+configuration, not tenant-controlled Chromium arguments. `gpu` prefers native
+textures with mandatory CPU recovery. To require the fast path, inspect the
+actual interval stats displayed in the encoder panel: `frames.backend` must
+be `gpu-texture` and QSV `encoder.input_path` must be `d3d11-zero-copy`.
+Software/OpenH264 with texture capture reports `staging`; forced CPU reports
+`cpu-section` and `cpu-nv12` for QSV or `cpu-i420` for OpenH264.
+
+`npm run e2e:browser` now asserts the expected actual backend/input path in
+addition to decoded pixels/input/lifecycle. Set `PRTS_TEST_ENCODER=qsv` for
+native GPU QSV qualification, and `PRTS_FRAME_MODE=cpu` for CPU regression.
+`npm run e2e` continues to select the synthetic source. M4 acceptance and
+comparable capture/encode measurements are documented in `phase2-m4.md`.

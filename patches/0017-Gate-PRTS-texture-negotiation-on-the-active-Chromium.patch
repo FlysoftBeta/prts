@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 10:47:05 +0800
+Subject: [PATCH 17/19] Gate PRTS texture negotiation on the active Chromium
+ hardware adapter
+
+Require the actual GPU-process adapter LUID to match the daemon and reject SwiftShader before enabling D3D texture capture.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_controller.cc b/chrome/browser/prts/prts_controller.cc
+index e5642d15f8..f307e9aff8 100644
+--- a/chrome/browser/prts/prts_controller.cc
++++ b/chrome/browser/prts/prts_controller.cc
+@@ -4,6 +4,8 @@
+ #include "chrome/browser/prts/prts_controller.h"
+ 
+ #include "base/functional/bind.h"
++#include "content/public/browser/gpu_data_manager.h"
++#include "gpu/config/gpu_info.h"
+ #include "base/logging.h"
+ #include "base/process/process_handle.h"
+ #include "base/task/single_thread_task_runner.h"
+@@ -184,7 +186,18 @@ void PrtsController::Receive(Record record) {
+       }
+       return;
+     }
+-    const bool gpu = (modes & 1) && targets_->EnableGpuFrames(luid);
++    const auto gpu_info = content::GpuDataManager::GetInstance()->GetGPUInfo();
++    const auto& active = gpu_info.active_gpu();
++    const uint64_t browser_luid =
++        (static_cast<uint64_t>(static_cast<uint32_t>(active.luid.HighPart)) << 32) |
++        active.luid.LowPart;
++    const bool hardware = !gpu_info.UsesSwiftShader() &&
++        content::GpuDataManager::GetInstance()->HardwareAccelerationEnabled();
++    const bool gpu = (modes & 1) && hardware && luid &&
++        browser_luid == luid && targets_->EnableGpuFrames(luid);
++    LOG(INFO) << "PRTS GPU adapter vendor=" << active.vendor_id
++              << " device=" << active.device_id << " luid=" << browser_luid
++              << " hardware=" << hardware << " texture_mode=" << gpu;
+     Encoder ack;
+     ack.Int(1, 2);
+     ack.Int(0, 2);

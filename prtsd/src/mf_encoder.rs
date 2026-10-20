@@ -1,6 +1,6 @@
 //! Hardware H.264 MFT, with a dedicated COM MTA and bounded synchronous requests.
-//! The input sample boundary is deliberately separate from BGRA conversion: a later
-//! DXGI surface buffer/device manager can replace `cpu_sample` without changing RC.
+//! CPU NV12 samples and GPU NV12 DXGI surface samples share the same async
+//! transform, rate control, bounded requests and output publication.
 use crate::encoder::VideoEncoder;
 use anyhow::{Context, Result, bail, ensure};
 use std::{
@@ -19,6 +19,7 @@ use windows::{
 
 enum Request {
     Encode(Vec<u8>, bool, mpsc::SyncSender<Result<Vec<u8>>>),
+    Texture(crate::d3d::Frame, bool, mpsc::SyncSender<Result<Vec<u8>>>),
     Bitrate(u32, mpsc::SyncSender<Result<()>>),
 }
 pub struct MfEncoder {
@@ -64,6 +65,9 @@ impl MfEncoder {
                                 Request::Encode(data, key, reply) => {
                                     let _ = reply.send(hw.encode(&data, key));
                                 }
+                                Request::Texture(frame, key, reply) => {
+                                    let _ = reply.send(hw.encode_input(&[], Some(&frame), key));
+                                }
                                 Request::Bitrate(bps, reply) => {
                                     let _ = reply.send(hw.reconfigure_bitrate(bps));
                                 }
@@ -91,6 +95,14 @@ impl MfEncoder {
                 Err(e)
             }
         }
+    }
+    pub fn encode_texture(&mut self, frame: &crate::d3d::Frame, key: bool) -> Result<Vec<u8>> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.tx
+            .as_ref()
+            .unwrap()
+            .send(Request::Texture(frame.clone(), key, tx))?;
+        rx.recv()?
     }
     pub fn name(&self) -> &str {
         &self.name
@@ -131,6 +143,8 @@ impl Drop for MfEncoder {
 }
 
 struct Hardware {
+    activation: IMFActivate,
+    manager: Option<IMFDXGIDeviceManager>,
     mft: IMFTransform,
     events: IMFMediaEventGenerator,
     codec: ICodecAPI,
@@ -156,6 +170,10 @@ impl Hardware {
             if let Ok(shutdown) = self.mft.cast::<IMFShutdown>() {
                 let _ = shutdown.Shutdown();
             }
+            // Match ActivateObject with ShutdownObject as well as releasing COM
+            // interfaces. The Intel registry watcher leak is tracked by M4's
+            // lifetime acceptance; these successful calls do not resolve it.
+            let _ = self.activation.ShutdownObject();
         }
     }
     fn reconfigure_bitrate(&mut self, bps: u32) -> Result<()> {
@@ -249,7 +267,27 @@ impl Hardware {
             {
                 return Err(e.into());
             }
+            let manager = if attrs.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) != 0 {
+                if let Ok(gpu) = crate::d3d::shared() {
+                    let mut token = 0;
+                    let mut manager = None;
+                    MFCreateDXGIDeviceManager(&mut token, &mut manager)?;
+                    let manager = manager.context("Missing DXGI device manager")?;
+                    manager.ResetDevice(&gpu.lock().unwrap().device, token)?;
+                    mft.ProcessMessage(
+                        MFT_MESSAGE_SET_D3D_MANAGER,
+                        Interface::as_raw(&manager) as usize,
+                    )?;
+                    Some(manager)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let mut hw = Self {
+                activation: activate.clone(),
+                manager,
                 mft,
                 events,
                 codec,
@@ -374,6 +412,14 @@ impl Hardware {
         }
     }
     fn encode(&mut self, bgra: &[u8], key: bool) -> Result<Vec<u8>> {
+        self.encode_input(bgra, None, key)
+    }
+    fn encode_input(
+        &mut self,
+        bgra: &[u8],
+        texture: Option<&crate::d3d::Frame>,
+        key: bool,
+    ) -> Result<Vec<u8>> {
         unsafe {
             let mut pending = Vec::new();
             let deadline = Instant::now() + Duration::from_secs(2);
@@ -394,7 +440,24 @@ impl Hardware {
             if key {
                 self.set(&CODECAPI_AVEncVideoForceKeyFrame, VARIANT::from(1u32))?;
             }
-            let sample = self.cpu_sample(bgra)?;
+            let sample = if let Some(frame) = texture {
+                ensure!(self.manager.is_some(), "MFT does not support D3D11 input");
+                let gpu = frame.gpu.lock().unwrap();
+                let nv12 = gpu.nv12(&frame.texture, self.width, self.height)?;
+                let buffer = MFCreateDXGISurfaceBuffer(
+                    &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D::IID,
+                    &nv12,
+                    0,
+                    false,
+                )?;
+                let sample = MFCreateSample()?;
+                sample.AddBuffer(&buffer)?;
+                sample.SetSampleTime(self.frame * 10_000_000 / self.fps as i64)?;
+                sample.SetSampleDuration(10_000_000 / self.fps as i64)?;
+                sample
+            } else {
+                self.cpu_sample(bgra)?
+            };
             self.mft.ProcessInput(self.input_id, &sample, 0)?;
             self.input_credit -= 1;
             self.frame += 1;

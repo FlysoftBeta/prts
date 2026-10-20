@@ -32,6 +32,8 @@ pub struct State {
 }
 #[derive(Default)]
 pub struct Metrics {
+    pub frame_backend: String,
+    pub encoder_input: String,
     pub captured: u64,
     pub encoded: u64,
     pub dropped: u64,
@@ -70,6 +72,7 @@ impl Video {
         let encoder_name = Arc::new(Mutex::new("initializing".to_string()));
         let name = encoder_name.clone();
         let preference = options.encoder.clone();
+        let source_name = options.source.clone();
         let initial_size = options.size.device();
         let initial_bps = options.bitrate_caps.max_bps;
         let initial_fps = options.fps;
@@ -198,6 +201,13 @@ impl Video {
                     }
                     let bgra = captured.pixels;
                     let encode_start = Instant::now();
+                    #[cfg(windows)]
+                    let mut result = if let Some(texture) = &captured.texture {
+                        encoder.encode_texture(texture, force_key)
+                    } else {
+                        encoder.encode(&bgra, w as usize, h as usize, force_key)
+                    };
+                    #[cfg(not(windows))]
                     let mut result = encoder.encode(&bgra, w as usize, h as usize, force_key);
                     if result.is_err() && !hardware_disabled {
                         m.lock().unwrap().warnings.push(format!(
@@ -206,7 +216,45 @@ impl Video {
                         ));
                         encoder.fallback()?;
                         hardware_disabled = true;
-                        result = encoder.encode(&bgra, w as usize, h as usize, true);
+                        #[cfg(windows)]
+                        {
+                            result = if let Some(texture) = &captured.texture {
+                                encoder.encode_texture(texture, true)
+                            } else {
+                                encoder.encode(&bgra, w as usize, h as usize, true)
+                            };
+                        }
+                        #[cfg(not(windows))]
+                        {
+                            result = encoder.encode(&bgra, w as usize, h as usize, true);
+                        }
+                    }
+                    {
+                        let mut metrics = m.lock().unwrap();
+                        #[cfg(windows)]
+                        let texture = captured.texture.is_some();
+                        #[cfg(not(windows))]
+                        let texture = false;
+                        metrics.frame_backend = if texture {
+                            "gpu-texture"
+                        } else if source_name == "synthetic" {
+                            "synthetic"
+                        } else {
+                            "cpu-section"
+                        }
+                        .into();
+                        metrics.encoder_input = if texture {
+                            if encoder.name() == "software/openh264" {
+                                "staging"
+                            } else {
+                                "d3d11-zero-copy"
+                            }
+                        } else if encoder.name() == "software/openh264" {
+                            "cpu-i420"
+                        } else {
+                            "cpu-nv12"
+                        }
+                        .into();
                     }
                     *name.lock().unwrap() = encoder.name().to_string();
                     encode_ms = encode_start.elapsed().as_secs_f64() * 1000.0;

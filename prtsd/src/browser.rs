@@ -2,7 +2,7 @@
 use crate::browser_wire::{self as wire, *};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     fs::File,
     io::Write,
     mem::size_of,
@@ -319,6 +319,7 @@ struct Session {
     outgoing: Option<SyncSender<Vec<u8>>>,
     command_bytes: Arc<AtomicUsize>,
     features: u32,
+    gpu_import_failed: BTreeSet<u64>,
     incoming: Receiver<Incoming>,
     queued_bytes: Arc<AtomicUsize>,
     queued_messages: Arc<AtomicUsize>,
@@ -353,13 +354,13 @@ impl Session {
                 loop {
                     match Record::read(&mut file) {
                         Ok(record) => {
-                            if is_frame && record.kind != 0x311 {
+                            if is_frame && !matches!(record.kind, 0x310 | 0x311) {
                                 let _ = tx.try_send(Incoming::Failure(
                                     "Invalid frame pipe direction".into(),
                                 ));
                                 break;
                             }
-                            if !is_frame && record.kind == 0x311 {
+                            if !is_frame && matches!(record.kind, 0x310 | 0x311) {
                                 let _ =
                                     tx.try_send(Incoming::Failure("Frame on event pipe".into()));
                                 break;
@@ -417,6 +418,7 @@ impl Session {
             outgoing: Some(outgoing),
             command_bytes,
             features: 0,
+            gpu_import_failed: BTreeSet::new(),
             incoming,
             queued_bytes,
             queued_messages,
@@ -479,9 +481,27 @@ impl Session {
         }
     }
     fn stash(&mut self, record: Record) -> Result<()> {
-        if matches!(record.kind, 0x300 | 0x301 | 0x311) {
+        if matches!(record.kind, 0x300 | 0x301 | 0x310 | 0x311) {
             let reply = match self.frames.process(&record, handle(&self.process)) {
                 Ok(reply) => reply,
+                Err(e) if record.kind == 0x300 && record.payload.get(24) == Some(&1) => {
+                    let target = u64::from_le_bytes(record.payload[..8].try_into().unwrap());
+                    if self.gpu_import_failed.insert(target) {
+                        eprintln!(
+                            "prtsd: GPU import failed target={target}; requesting CPU fallback: {e:#}"
+                        );
+                    }
+                    let mut p = 9u32.to_le_bytes().to_vec();
+                    let message = b"GPU texture import failed; use CPU sections";
+                    p.extend((message.len() as u32).to_le_bytes());
+                    p.extend(message);
+                    p.push(0);
+                    Record {
+                        kind: 3,
+                        id: record.id,
+                        payload: p,
+                    }
+                }
                 Err(e) => return self.fail(format!("Frame resource error: {e:#}")),
             };
             return self.enqueue(reply.encode()?);
@@ -631,8 +651,20 @@ impl Browser {
             hello.extend(v.to_le_bytes());
         }
         hello.extend(std::process::id().to_le_bytes());
-        hello.extend(0u64.to_le_bytes());
-        hello.extend(2u32.to_le_bytes());
+        let mode = std::env::var("PRTS_FRAME_MODE").unwrap_or_else(|_| "auto".into());
+        ensure!(
+            matches!(mode.as_str(), "auto" | "gpu" | "cpu"),
+            "PRTS_FRAME_MODE must be auto|gpu|cpu"
+        );
+        let luid = if mode == "cpu" {
+            0
+        } else {
+            crate::d3d::shared()
+                .map(|d| d.lock().unwrap().luid)
+                .unwrap_or(0)
+        };
+        hello.extend(luid.to_le_bytes());
+        hello.extend((if luid == 0 { 2u32 } else { 3u32 }).to_le_bytes());
         hello.extend(3u32.to_le_bytes());
         let hello_sent = Instant::now();
         let response = session.request(HELLO, hello, HELLO_ACK)?;
@@ -660,7 +692,8 @@ impl Browser {
         d.finish()?;
         ensure!(
             hello.browser_pid == session.pid
-                && hello.frame_modes == 2
+                && (hello.frame_modes == 2
+                    || (hello.frame_modes == 3 && hello.adapter_luid == luid && luid != 0))
                 && (1..=3).contains(&hello.max_inflight)
                 && hello.max_width > 0
                 && hello.max_height > 0
@@ -668,6 +701,17 @@ impl Browser {
                 && hello.features & !3 == 0,
             "Invalid HELLO_ACK capabilities"
         );
+        eprintln!(
+            "prtsd: frame negotiation modes={} adapter_luid={:#018x}",
+            hello.frame_modes, hello.adapter_luid
+        );
+        session
+            .frames
+            .set_gpu_adapter(if hello.frame_modes & 1 != 0 {
+                hello.adapter_luid
+            } else {
+                0
+            });
         session.features = hello.features;
         let session = Arc::new(Mutex::new(session));
         let weak = Arc::downgrade(&session);
@@ -719,7 +763,13 @@ impl Browser {
             "Invalid frame credit limit"
         );
         let mut p = target.to_le_bytes().to_vec();
-        p.push(if fps == 0 { 0 } else { 2 });
+        p.push(if fps == 0 {
+            0
+        } else if self.hello.frame_modes & 1 != 0 {
+            1
+        } else {
+            2
+        });
         p.extend((if fps == 0 { 0u32 } else { max_inflight }).to_le_bytes());
         p.extend(fps.to_le_bytes());
         self.target_request(0x321, p)

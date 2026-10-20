@@ -17,8 +17,7 @@ pub trait VideoEncoder {
     ) -> anyhow::Result<Vec<u8>>;
 }
 
-/// CPU frame adapter. A future DXGI surface adapter can feed the same MF backend
-/// without changing selection, recovery, or the WebRTC publication path.
+/// CPU/GPU frame adapter with hardware selection and sticky software recovery.
 pub struct Selected {
     backend: Backend,
     bps: u32,
@@ -71,6 +70,25 @@ impl Selected {
             },
             warning,
         ))
+    }
+    #[cfg(windows)]
+    pub fn encode_texture(
+        &mut self,
+        frame: &crate::d3d::Frame,
+        key: bool,
+    ) -> anyhow::Result<Vec<u8>> {
+        match &mut self.backend {
+            Backend::Hardware(hw) => hw.encode_texture(frame, key),
+            Backend::Software(sw) => {
+                let gpu = frame.gpu.lock().unwrap();
+                let pixels = gpu.readback(&frame.texture)?;
+                let mut d = windows::Win32::Graphics::Direct3D11::D3D11_TEXTURE2D_DESC::default();
+                unsafe {
+                    frame.texture.GetDesc(&mut d);
+                }
+                sw.encode(&pixels, d.Width as usize, d.Height as usize, key)
+            }
+        }
     }
     pub fn name(&self) -> &str {
         match &self.backend {

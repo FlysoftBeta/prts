@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 10:49:59 +0800
+Subject: [PATCH 18/19] Handle pending GPU information during PRTS handshake
+
+The active adapter is unknown before the first capture on cold startup. Probe the hardware export device during HELLO and validate/log active GPU information at first native frame, while rejecting known adapter mismatches.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_capture.cc b/chrome/browser/prts/prts_capture.cc
+index 98807c7e2c..39ef90b9a2 100644
+--- a/chrome/browser/prts/prts_capture.cc
++++ b/chrome/browser/prts/prts_capture.cc
+@@ -15,6 +15,8 @@
+ #include "base/timer/timer.h"
+ #include "components/viz/host/client_frame_sink_video_capturer.h"
+ #include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/gpu_data_manager.h"
++#include "gpu/config/gpu_info.h"
+ #include "content/public/browser/render_widget_host.h"
+ #include "content/public/browser/render_widget_host_view.h"
+ #include "content/public/browser/web_contents.h"
+@@ -105,6 +107,20 @@ class PrtsCapture::Impl {
+       VLOG(2) << "PRTS capture target=" << target
+               << " generation=" << generation
+               << " size=" << info->visible_rect.size().ToString();
++      if (mode == 1 && !gpu_checked) {
++        const auto info_gpu = content::GpuDataManager::GetInstance()->GetGPUInfo();
++        const auto& active = info_gpu.active_gpu();
++        const uint64_t luid =
++            (static_cast<uint64_t>(static_cast<uint32_t>(active.luid.HighPart)) << 32) |
++            active.luid.LowPart;
++        LOG(INFO) << "PRTS native capture GPU vendor=" << active.vendor_id
++                  << " device=" << active.device_id << " luid=" << luid
++                  << " swiftshader=" << info_gpu.UsesSwiftShader();
++        if (info_gpu.UsesSwiftShader() || (luid && luid != owner->adapter_luid)) {
++          owner->Fallback(target);
++        }
++        gpu_checked = true;
++      }
+       if (mode == 1 && data->is_gpu_memory_buffer_handle() &&
+           data->get_gpu_memory_buffer_handle().type == gfx::DXGI_SHARED_HANDLE &&
+           info->visible_rect.size() == size) {
+@@ -152,6 +168,7 @@ class PrtsCapture::Impl {
+     uint32_t fps, max_inflight, mode;
+     bool waiting_for_credit = false;
+     bool recovering = false;
++    bool gpu_checked = false;
+     viz::FrameSinkId sink;
+     base::ScopedClosureRunner visibility;
+     base::RepeatingTimer timer;
+diff --git a/chrome/browser/prts/prts_controller.cc b/chrome/browser/prts/prts_controller.cc
+index f307e9aff8..f23062c92f 100644
+--- a/chrome/browser/prts/prts_controller.cc
++++ b/chrome/browser/prts/prts_controller.cc
+@@ -194,7 +194,7 @@ void PrtsController::Receive(Record record) {
+     const bool hardware = !gpu_info.UsesSwiftShader() &&
+         content::GpuDataManager::GetInstance()->HardwareAccelerationEnabled();
+     const bool gpu = (modes & 1) && hardware && luid &&
+-        browser_luid == luid && targets_->EnableGpuFrames(luid);
++        (!browser_luid || browser_luid == luid) && targets_->EnableGpuFrames(luid);
+     LOG(INFO) << "PRTS GPU adapter vendor=" << active.vendor_id
+               << " device=" << active.device_id << " luid=" << browser_luid
+               << " hardware=" << hardware << " texture_mode=" << gpu;

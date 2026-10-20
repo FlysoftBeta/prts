@@ -1,0 +1,399 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 11:05:59 +0800
+Subject: [PATCH 19/19] Recover PRTS native capture startup and probe keyed
+ export support
+
+Fall back to CPU if native GMB capture never starts or delivers an unsupported handle; test NT keyed texture allocation before advertising GPU mode. Format the M4 capture/export code.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_capture.cc b/chrome/browser/prts/prts_capture.cc
+index 39ef90b9a2..3b358efc57 100644
+--- a/chrome/browser/prts/prts_capture.cc
++++ b/chrome/browser/prts/prts_capture.cc
+@@ -8,19 +8,19 @@
+ #include <map>
+ 
+ #include "base/functional/bind.h"
+-#include "chrome/browser/prts/prts_d3d.h"
+ #include "base/logging.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/read_only_shared_memory_region.h"
+ #include "base/timer/timer.h"
++#include "chrome/browser/prts/prts_d3d.h"
+ #include "components/viz/host/client_frame_sink_video_capturer.h"
+-#include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/gpu_data_manager.h"
+-#include "gpu/config/gpu_info.h"
++#include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/render_widget_host.h"
+ #include "content/public/browser/render_widget_host_view.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_contents_observer.h"
++#include "gpu/config/gpu_info.h"
+ #include "media/capture/mojom/video_capture_buffer.mojom.h"
+ #include "mojo/public/cpp/bindings/remote.h"
+ 
+@@ -58,7 +58,8 @@ class PrtsCapture::Impl {
+           generation(generation),
+           size(size),
+           fps(fps),
+-          max_inflight(max_inflight), mode(mode) {
++          max_inflight(max_inflight),
++          mode(mode) {
+       visibility =
+           contents->IncrementCapturerCount(gfx::Size(), false, false, false);
+       timer.Start(FROM_HERE, base::Milliseconds(100), this, &Source::Tick);
+@@ -76,6 +77,11 @@ class PrtsCapture::Impl {
+       if (!web_contents()) {
+         return;
+       }
++      if (mode == 1 && capturer && !saw_gpu_frame &&
++          base::TimeTicks::Now() - gpu_started_at > base::Seconds(5)) {
++        owner->Fallback(target);
++        return;
++      }
+       auto* view = web_contents()->GetRenderWidgetHostView();
+       if (!view) {
+         return;
+@@ -85,14 +91,18 @@ class PrtsCapture::Impl {
+         Stop();
+         sink = current;
+         capturer = view->CreateVideoCapturer();
++        saw_gpu_frame = false;
++        gpu_started_at = base::TimeTicks::Now();
+         capturer->SetFormat(media::PIXEL_FORMAT_ARGB);
+         capturer->SetMinCapturePeriod(base::Seconds(1.0 / fps));
+         capturer->SetMinSizeChangePeriod(base::TimeDelta());
+         capturer->SetResolutionConstraints(size, size, false);
+         capturer->SetAutoThrottlingEnabled(false);
+-        capturer->Start(this, mode == 1
+-            ? viz::mojom::BufferFormatPreference::kPreferMappableSharedImage
+-            : viz::mojom::BufferFormatPreference::kDefault);
++        capturer->Start(
++            this,
++            mode == 1
++                ? viz::mojom::BufferFormatPreference::kPreferMappableSharedImage
++                : viz::mojom::BufferFormatPreference::kDefault);
+         capturer->RequestRefreshFrame();
+       }
+     }
+@@ -108,28 +118,36 @@ class PrtsCapture::Impl {
+               << " generation=" << generation
+               << " size=" << info->visible_rect.size().ToString();
+       if (mode == 1 && !gpu_checked) {
+-        const auto info_gpu = content::GpuDataManager::GetInstance()->GetGPUInfo();
++        const auto info_gpu =
++            content::GpuDataManager::GetInstance()->GetGPUInfo();
+         const auto& active = info_gpu.active_gpu();
+         const uint64_t luid =
+-            (static_cast<uint64_t>(static_cast<uint32_t>(active.luid.HighPart)) << 32) |
++            (static_cast<uint64_t>(static_cast<uint32_t>(active.luid.HighPart))
++             << 32) |
+             active.luid.LowPart;
+         LOG(INFO) << "PRTS native capture GPU vendor=" << active.vendor_id
+                   << " device=" << active.device_id << " luid=" << luid
+                   << " swiftshader=" << info_gpu.UsesSwiftShader();
+-        if (info_gpu.UsesSwiftShader() || (luid && luid != owner->adapter_luid)) {
++        if (info_gpu.UsesSwiftShader() ||
++            (luid && luid != owner->adapter_luid)) {
+           owner->Fallback(target);
+         }
+         gpu_checked = true;
+       }
+       if (mode == 1 && data->is_gpu_memory_buffer_handle() &&
+-          data->get_gpu_memory_buffer_handle().type == gfx::DXGI_SHARED_HANDLE &&
++          data->get_gpu_memory_buffer_handle().type ==
++              gfx::DXGI_SHARED_HANDLE &&
+           info->visible_rect.size() == size) {
+-        owner->Frame(*this, {}, 0, false,
++        saw_gpu_frame = true;
++        owner->Frame(
++            *this, {}, 0, false,
+             info->metadata.capture_begin_time.value_or(base::TimeTicks::Now()),
+             data->get_gpu_memory_buffer_handle().dxgi_handle().buffer_handle(),
+             info->visible_rect);
+       }
+-      if (mode == 1 && !data->is_gpu_memory_buffer_handle()) {
++      if (mode == 1 && (!data->is_gpu_memory_buffer_handle() ||
++                        data->get_gpu_memory_buffer_handle().type !=
++                            gfx::DXGI_SHARED_HANDLE)) {
+         owner->Fallback(target);
+       }
+       if (mode == 2 && data->is_read_only_shmem_region() &&
+@@ -169,6 +187,8 @@ class PrtsCapture::Impl {
+     bool waiting_for_credit = false;
+     bool recovering = false;
+     bool gpu_checked = false;
++    bool saw_gpu_frame = false;
++    base::TimeTicks gpu_started_at;
+     viz::FrameSinkId sink;
+     base::ScopedClosureRunner visibility;
+     base::RepeatingTimer timer;
+@@ -187,12 +207,14 @@ class PrtsCapture::Impl {
+     if (it == sources.end() || it->second->recovering) {
+       return;
+     }
+-    LOG(WARNING) << "PRTS GPU capture unavailable; CPU fallback target=" << target;
++    LOG(WARNING) << "PRTS GPU capture unavailable; CPU fallback target="
++                 << target;
+     it->second->mode = 2;
+     it->second->recovering = true;
+     Encoder fault;
+     fault.Int(9, 4);
+-    fault.String("GPU capture/import unavailable; switching target to CPU sections");
++    fault.String(
++        "GPU capture/import unavailable; switching target to CPU sections");
+     fault.Int(0, 1);
+     send.Run(8, 0, std::move(fault.data));
+   }
+@@ -314,9 +336,10 @@ class PrtsCapture::Impl {
+       e.Int(slot.generation, 8);
+       e.Int(slot.id, 8);
+       e.Int(slot.mode, 1);
+-      e.Int(reinterpret_cast<uintptr_t>(slot.mode == 1
+-                ? slot.texture.handle.Get()
+-                : slot.memory.region.GetPlatformHandle()), 8);
++      e.Int(reinterpret_cast<uintptr_t>(
++                slot.mode == 1 ? slot.texture.handle.Get()
++                               : slot.memory.region.GetPlatformHandle()),
++            8);
+       e.Int(slot.size.width(), 4);
+       e.Int(slot.size.height(), 4);
+       e.Int(1, 1);
+@@ -346,19 +369,19 @@ class PrtsCapture::Impl {
+         return;
+       }
+     } else {
+-    auto out = free->memory.mapping.GetMemoryAsSpan<uint8_t>();
+-    const size_t row = source.size.width() * 4;
+-    for (int y = 0; y < source.size.height(); ++y) {
+-      auto dst = out.subspan(y * row, row);
+-      dst.copy_from(pixels.subspan(y * stride, row));
+-      for (size_t x = 0; x < row; x += 4) {
+-        if (rgba) {
+-          std::swap(dst[x], dst[x + 2]);
++      auto out = free->memory.mapping.GetMemoryAsSpan<uint8_t>();
++      const size_t row = source.size.width() * 4;
++      for (int y = 0; y < source.size.height(); ++y) {
++        auto dst = out.subspan(y * row, row);
++        dst.copy_from(pixels.subspan(y * stride, row));
++        for (size_t x = 0; x < row; x += 4) {
++          if (rgba) {
++            std::swap(dst[x], dst[x + 2]);
++          }
++          dst[x + 3] = 255;
+         }
+-        dst[x + 3] = 255;
+       }
+     }
+-    }
+     std::atomic_thread_fence(std::memory_order_release);
+     free->busy = true;
+     free->frame = ++next_frame;
+@@ -390,7 +413,8 @@ class PrtsCapture::Impl {
+   bool failed = false;
+   base::RepeatingTimer timer;
+ };
+-PrtsCapture::PrtsCapture(Send send, base::RepeatingCallback<void(uint64_t)> fallback)
++PrtsCapture::PrtsCapture(Send send,
++                         base::RepeatingCallback<void(uint64_t)> fallback)
+     : impl_(std::make_unique<Impl>(std::move(send), std::move(fallback))) {}
+ PrtsCapture::~PrtsCapture() = default;
+ void PrtsCapture::SetLimit(uint32_t limit) {
+@@ -418,8 +442,8 @@ void PrtsCapture::Configure(content::WebContents* c,
+                             uint32_t mode) {
+   Remove(t);
+   if (fps) {
+-    impl_->sources[t] = std::make_unique<Impl::Source>(impl_.get(), c, t, g,
+-                                                       size, fps, max_inflight, mode);
++    impl_->sources[t] = std::make_unique<Impl::Source>(
++        impl_.get(), c, t, g, size, fps, max_inflight, mode);
+     if (impl_->sources.size() > 1) {
+       std::map<uint64_t, size_t> counts;
+       for (auto& [id, slot] : impl_->slots) {
+diff --git a/chrome/browser/prts/prts_capture.h b/chrome/browser/prts/prts_capture.h
+index f7cda2055b..aba82f3986 100644
+--- a/chrome/browser/prts/prts_capture.h
++++ b/chrome/browser/prts/prts_capture.h
+@@ -12,8 +12,8 @@ namespace content {
+ class WebContents;
+ }
+ namespace prts {
+-// CPU readback FALLBACK adapter. M4 can replace the resource backend without
+-// changing target ownership, subscription, pacing, or credit accounting.
++// Native GPU capture and CPU readback fallback share bounded resource pools,
++// target ownership, subscriptions, pacing and credit accounting.
+ class PrtsCapture {
+  public:
+   using Send =
+diff --git a/chrome/browser/prts/prts_controller.cc b/chrome/browser/prts/prts_controller.cc
+index f23062c92f..bff86e591e 100644
+--- a/chrome/browser/prts/prts_controller.cc
++++ b/chrome/browser/prts/prts_controller.cc
+@@ -4,13 +4,13 @@
+ #include "chrome/browser/prts/prts_controller.h"
+ 
+ #include "base/functional/bind.h"
+-#include "content/public/browser/gpu_data_manager.h"
+-#include "gpu/config/gpu_info.h"
+ #include "base/logging.h"
+ #include "base/process/process_handle.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "chrome/browser/lifetime/application_lifetime.h"
+ #include "chrome/browser/prts/prts_target_registry.h"
++#include "content/public/browser/gpu_data_manager.h"
++#include "gpu/config/gpu_info.h"
+ 
+ namespace prts {
+ PrtsController::PrtsController() = default;
+@@ -132,8 +132,8 @@ void PrtsController::Receive(Record record) {
+     targets_->Input(record.type, record.payload);
+     return;
+   }
+-  if (ready_ &&
+-      (((record.type == 7 || record.type == 3) && !(record.id & 1)) || record.type == 0x320)) {
++  if (ready_ && (((record.type == 7 || record.type == 3) && !(record.id & 1)) ||
++                 record.type == 0x320)) {
+     if (!targets_->Frame(record)) {
+       Failed();
+     }
+@@ -189,12 +189,15 @@ void PrtsController::Receive(Record record) {
+     const auto gpu_info = content::GpuDataManager::GetInstance()->GetGPUInfo();
+     const auto& active = gpu_info.active_gpu();
+     const uint64_t browser_luid =
+-        (static_cast<uint64_t>(static_cast<uint32_t>(active.luid.HighPart)) << 32) |
++        (static_cast<uint64_t>(static_cast<uint32_t>(active.luid.HighPart))
++         << 32) |
+         active.luid.LowPart;
+-    const bool hardware = !gpu_info.UsesSwiftShader() &&
++    const bool hardware =
++        !gpu_info.UsesSwiftShader() &&
+         content::GpuDataManager::GetInstance()->HardwareAccelerationEnabled();
+     const bool gpu = (modes & 1) && hardware && luid &&
+-        (!browser_luid || browser_luid == luid) && targets_->EnableGpuFrames(luid);
++                     (!browser_luid || browser_luid == luid) &&
++                     targets_->EnableGpuFrames(luid);
+     LOG(INFO) << "PRTS GPU adapter vendor=" << active.vendor_id
+               << " device=" << active.device_id << " luid=" << browser_luid
+               << " hardware=" << hardware << " texture_mode=" << gpu;
+diff --git a/chrome/browser/prts/prts_d3d.cc b/chrome/browser/prts/prts_d3d.cc
+index 5f9b01921d..6923f7d039 100644
+--- a/chrome/browser/prts/prts_d3d.cc
++++ b/chrome/browser/prts/prts_d3d.cc
+@@ -26,19 +26,25 @@ bool PrtsD3D::Initialize(uint64_t luid) {
+     DXGI_ADAPTER_DESC1 desc;
+     if (FAILED(adapter->GetDesc1(&desc)) ||
+         (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) ||
+-        ((static_cast<uint64_t>(static_cast<uint32_t>(desc.AdapterLuid.HighPart))
+-          << 32) | desc.AdapterLuid.LowPart) != luid) {
++        ((static_cast<uint64_t>(
++              static_cast<uint32_t>(desc.AdapterLuid.HighPart))
++          << 32) |
++         desc.AdapterLuid.LowPart) != luid) {
+       continue;
+     }
+     ComPtr<ID3D11Device> device;
+-    if (FAILED(D3D11CreateDevice(adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+-                                 D3D11_CREATE_DEVICE_BGRA_SUPPORT |
+-                                     D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+-                                 nullptr, 0, D3D11_SDK_VERSION, &device, nullptr,
+-                                 &context_))) {
++    if (FAILED(D3D11CreateDevice(
++            adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
++            D3D11_CREATE_DEVICE_BGRA_SUPPORT |
++                D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
++            nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context_))) {
+       return false;
+     }
+-    return SUCCEEDED(device.As(&device_));
++    if (FAILED(device.As(&device_))) {
++      return false;
++    }
++    Texture probe;
++    return Create(gfx::Size(2, 2), probe);
+   }
+ }
+ bool PrtsD3D::Create(gfx::Size size, Texture& texture) {
+@@ -57,15 +63,17 @@ bool PrtsD3D::Create(gfx::Size size, Texture& texture) {
+       FAILED(device_->CreateTexture2D(&desc, nullptr, &texture.image)) ||
+       FAILED(texture.image.As(&texture.mutex)) ||
+       FAILED(texture.image.As(&resource)) ||
+-      FAILED(resource->CreateSharedHandle(nullptr,
+-                DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+-                nullptr, &handle))) {
++      FAILED(resource->CreateSharedHandle(
++          nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
++          nullptr, &handle))) {
+     return false;
+   }
+   texture.handle.Set(handle);
+   return true;
+ }
+-bool PrtsD3D::Copy(HANDLE handle, const gfx::Rect& visible, Texture& destination,
++bool PrtsD3D::Copy(HANDLE handle,
++                   const gfx::Rect& visible,
++                   Texture& destination,
+                    bool& unsafe_failure) {
+   ComPtr<ID3D11Texture2D> source;
+   ComPtr<IDXGIKeyedMutex> mutex;
+@@ -89,9 +97,11 @@ bool PrtsD3D::Copy(HANDLE handle, const gfx::Rect& visible, Texture& destination
+     return false;
+   }
+   D3D11_BOX box = {static_cast<UINT>(visible.x()),
+-                   static_cast<UINT>(visible.y()), 0,
++                   static_cast<UINT>(visible.y()),
++                   0,
+                    static_cast<UINT>(visible.right()),
+-                   static_cast<UINT>(visible.bottom()), 1};
++                   static_cast<UINT>(visible.bottom()),
++                   1};
+   context_->CopySubresourceRegion(destination.image.Get(), 0, 0, 0, 0,
+                                   source.Get(), 0, &box);
+   D3D11_QUERY_DESC query_desc = {D3D11_QUERY_EVENT, 0};
+@@ -102,7 +112,8 @@ bool PrtsD3D::Copy(HANDLE handle, const gfx::Rect& visible, Texture& destination
+     context_->Flush();
+     auto deadline = base::TimeTicks::Now() + base::Seconds(1);
+     HRESULT result;
+-    while ((result = context_->GetData(query.Get(), nullptr, 0, 0)) == S_FALSE &&
++    while ((result = context_->GetData(query.Get(), nullptr, 0, 0)) ==
++               S_FALSE &&
+            base::TimeTicks::Now() < deadline) {
+       base::PlatformThread::Sleep(base::Milliseconds(1));
+     }
+diff --git a/chrome/browser/prts/prts_d3d.h b/chrome/browser/prts/prts_d3d.h
+index 19ce72c577..d623eb28fc 100644
+--- a/chrome/browser/prts/prts_d3d.h
++++ b/chrome/browser/prts/prts_d3d.h
+@@ -23,8 +23,11 @@ class PrtsD3D {
+   };
+   bool Initialize(uint64_t luid);
+   bool Create(gfx::Size size, Texture& texture);
+-  // Returns only after source reads finish; the caller may release its Viz lease.
+-  bool Copy(HANDLE source, const gfx::Rect& visible, Texture& destination,
++  // Returns only after source reads finish; the caller may release its Viz
++  // lease.
++  bool Copy(HANDLE source,
++            const gfx::Rect& visible,
++            Texture& destination,
+             bool& unsafe_failure);
+ 
+  private:
+diff --git a/chrome/browser/prts/prts_target_registry.cc b/chrome/browser/prts/prts_target_registry.cc
+index 15f1ce1636..d5299f6250 100644
+--- a/chrome/browser/prts/prts_target_registry.cc
++++ b/chrome/browser/prts/prts_target_registry.cc
+@@ -121,7 +121,11 @@ void PutString(std::vector<uint8_t>& bytes, const std::string& value) {
+ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+                                  public TabStripModelObserver {
+  public:
+-  explicit Impl(SendCallback send) : send_(std::move(send)), capture_(send_, base::BindRepeating(&Impl::FallbackFrames, base::Unretained(this))) {}
++  explicit Impl(SendCallback send)
++      : send_(std::move(send)),
++        capture_(send_,
++                 base::BindRepeating(&Impl::FallbackFrames,
++                                     base::Unretained(this))) {}
+   ~Impl() override { Stop(); }
+ 
+   class StartupContents : public content::WebContentsObserver {

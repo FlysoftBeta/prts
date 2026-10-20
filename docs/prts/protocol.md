@@ -225,8 +225,8 @@ waits for OK, then may publish frames referencing it. Registration is:
 timestamp_us:u64,width:u32,height:u32,format:u8,damage:Rect[]}` (max 64 rects).
 kind/mode: 1=D3D11 texture, 2=CPU section; format: 1=BGRA8 only.
 CPU is explicitly the readback **fallback**, not the M4 GPU fast path.
-Targets start unsubscribed. FRAME_CONFIG with mode=2 subscribes the target
-using CPU sections; mode=0,max_inflight=0,max_fps=0 unsubscribes. No capture
+Targets start unsubscribed. FRAME_CONFIG with mode=1 subscribes using GPU
+textures when negotiated; mode=2 uses CPU sections; mode=0,max_inflight=0,max_fps=0 unsubscribes. No capture
 occurs for an unsubscribed target. FRAME_REFRESH requests a fresh full image
 (including static content) for a subscribed target; it returns acceptance, not
 a frame. An unsubscribed target refresh is an accepted no-op. This permits
@@ -267,6 +267,15 @@ stride and byte_length are zero for textures. CPU adapter_luid is zero. Texture
 adapter LUID MUST match HELLO_ACK and the daemon's selected adapter.
 Legacy GetSharedHandle handles are forbidden; [Microsoft distinguishes them
 from NT handles](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgiresource-getsharedhandle).
+M4 captures native Windows BGRA GMBs without mapping pixels. Existing Viz GMB
+mutexes use key 0 internally; the browser GPU-copies the completed visible image
+into its own bounded export texture pool so those mutexes never cross the wire.
+The source lease ends after GPU copy completion. prtsd GPU-copies each acquired
+export into a private BGRA texture and completes those reads before release/ACK.
+This decouples browser credits from MF encoder-owned NV12 surfaces and MFT
+retention. These are GPU copies; `d3d11-zero-copy` means no CPU pixel readback,
+not absence of GPU copies.
+
 The exported image excludes the cursor; encode-side BGRA->NV12 conversion is
 allowed on the GPU. Retain ownership until all encoder/conversion reads finish.
 
@@ -281,9 +290,15 @@ v1 uses keyed mutexes, not shared fences. Every buffer repeats this sequence:
 Keys 0/1 are constant because at most one frame can occupy a buffer. Even a
 dropped texture frame MUST acquire key 1 and release key 0 before its ACK.
 Check exact AcquireSync return codes; WAIT_TIMEOUT is not success. A timeout
-(1000 ms maximum), WAIT_ABANDONED or device removal invalidates the generation:
+(1000 ms maximum), WAIT_ABANDONED or device removal during an acquired read invalidates the generation:
 send fatal FAULT and restart the instance; never forge a release or reuse it.
 [AcquireSync documents initial key 0 and abandoned-resource handling](https://learn.microsoft.com/en-us/windows/win32/api/dxgi/nf-dxgi-idxgikeyedmutex-acquiresync).
+Import/registration failure before a mutex is acquired is recoverable: prtsd
+returns ERROR for BUFFER_REGISTER and closes partial imports. The browser drops
+that unregistered resource, logs once, increments the target generation, emits
+TARGET_CHANGED and restarts CPU capture; later GPU requests for that target use
+CPU until browser restart. Unsupported GMBs/export creation follow the same
+sticky CPU transition. No failed or uncertain read is acknowledged.
 Fences can be added only as a future negotiated mode, with explicit values.
 
 CPU fallback uses an unnamed pagefile-backed file-mapping section. Browser maps
@@ -646,3 +661,16 @@ completion, handle cleanup on crash, DPR mapping and non-ASCII committed text.
 Phase 1 acceptance: create synthetic instance, connect viewer through trickle
 ICE, see animated video, type/click, create/switch/resize/close two targets,
 apply shaping, observe measured stats, and close with no retained resources.
+
+
+### M4 frame-path diagnostics
+
+`PRTS_FRAME_MODE=auto|gpu|cpu` controls daemon negotiation (default auto). `gpu`
+requests GPU preference with mandatory CPU recovery; inspect actual stats to
+require GPU, as acceptance does. `cpu` offers only sections and no adapter LUID.
+Chromium compares its active hardware GPU LUID, rejects SwiftShader, and creates
+a matching hardware D3D11 export device before advertising bit 1. No WARP.
+Interval `stats.frames.backend` is `gpu-texture`, `cpu-section`, or `synthetic`;
+`stats.encoder.input_path` is `d3d11-zero-copy`, `staging` (GPU BGRA readback then
+software I420 conversion), `cpu-nv12` (QSV CPU input), or `cpu-i420` (software).
+Paths describe the last processed frame and persist over idle intervals.
