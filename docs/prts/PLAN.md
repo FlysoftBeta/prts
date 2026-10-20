@@ -43,7 +43,10 @@ PRTS (custom headless Chromium)  --anonymous pipes-->  prtsd (Rust, windows-rs)
   Job Objects (limits, kill-on-close, UI restrictions), AppContainer / LPAC, restricted tokens,
   separate desktops/window stations, integrity levels. MUST keep GPU acceleration working
   (Chromium GPU process inside AppContainer needs care — verify GPU is not falling back to SwiftShader/WARP).
-- Encoders: Intel QSV (oneVPL, or Media Foundation HW MFT on Intel) required; NVENC optional.
+- Encoders: Intel QSV via **oneVPL directly** required (the Intel MF hardware MFT is only an
+  interim backend — fewer low-latency knobs, more overhead); D3D11 texture input zero-copy
+  (MFX_IOPATTERN_IN_VIDEO_MEMORY / external D3D11 surfaces), AsyncDepth=1, LowDelayBRC,
+  no B-frames, intra refresh option; keep the MF backend as fallback; NVENC optional.
   Also a software fallback (e.g. openh264 / libvpx) is fine for development on machines without QSV.
 - Manages browser instances; talks to each browser over anonymous pipes (frames/texture handles,
   input, control).
