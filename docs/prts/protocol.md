@@ -431,11 +431,12 @@ fps?:number (synthetic production ceiling, default 30; 1..60 in Phase 1;
 effective value and supported range are reported in options/capabilities),
 encoder=`"auto"|"qsv"|"software"` (default auto), bitrate_caps=
 `{min_bps?:number=100000,max_bps?:number=4000000}` with 1<=min<=max<=100000000,
-isolation_profile:string (default `"job"`). Auto prefers QSV, then software;
+isolation_profile:`"none"|"job"|"appcontainer"|"lpac"` (daemon default `"job"`). Auto prefers QSV, then software;
 explicit qsv attempts the hardware H.264 MFT too. Hardware initialization or
 encoding failure falls back to software and emits a warning log; stats and
-instance.ready report the actual backend name. Optional profiles `appcontainer`
-and `lpac` are accepted only if advertised and GPU compatibility is validated.
+instance.ready report the actual backend name. Profiles `appcontainer`
+and `lpac` fail closed with `isolation_error` while unqualified; no fallback
+to another profile is implicit. Only advertised profiles are available.
 `job` means managed process-tree Job Object containment, not a security sandbox.
 The Chromium executable is configured by the trusted daemon environment
 `PRTS_CHROME_PATH` (default `C:/src/chromium/src/out/Default/chrome.exe`); it is
@@ -443,10 +444,55 @@ not accepted from viewer input. Browser startup is asynchronous and has a separa
 loader deadline; close/EOF cancels startup. The Windows launcher creates the
 browser suspended, assigns a kill-on-close Job Object, then resumes it. This
 provides process-tree lifetime containment while preserving Chromium sandbox/GPU
-operation; AppContainer/LPAC tenant security is deferred.
+operation. `none` omits the **outer** job and is for diagnostics; Chromium's
+child sandboxes remain enabled. It offers no daemon-crash tree cleanup guarantee.
 Synthetic uses the same validated options; isolation records policy but there is
-no browser process to isolate. Unknown/unimplemented profiles return unsupported.
+no browser process to isolate. Unknown/unavailable profiles return `isolation_error`.
 Size omission on target.create inherits instance default, not another tab's size.
+
+I1 daemon configuration: `PRTS_ISOLATION_CONFIG` names a strict JSON file
+`{"profile":"job","job_limits":{...}}`; see `isolation-config.example.json`.
+`PRTS_ISOLATION_PROFILE` overrides the default profile and `PRTS_JOB_LIMITS`
+overrides default limits with a JSON object. Invalid configuration fails startup.
+Node inherits these variables and applies its profile default to create requests
+that omit `isolation_profile`. An explicit instance profile wins. `lpac` is a
+distinct requested profile, never an alias for ordinary AppContainer.
+
+Optional `InstanceOptions.job_limits` contains `active_processes` (default 64,
+1..4096), `process_memory_bytes` (default 4294967296, at least 16 MiB),
+`job_memory_bytes` (default 8589934592, at least the process limit), `cpu_rate`
+(null or 1..10000, hundredths of a percent, hard cap), `ui_restrictions`
+(0..255, Win32 UI mask, default zero). An omitted object inherits daemon defaults;
+an explicit object replaces policy, using baseline defaults for omitted fields.
+Unknown fields/types are rejected before launch. Nonzero UI masks failed this
+host's nested Chromium launch gates; none is recommended. No breakaway flags
+are set. Job limits cover browser commit/processes/CPU, not prtsd allocations,
+disk, GPU VRAM or GPU scheduling.
+
+Chromium state is ephemeral under `%LOCALAPPDATA%/prts/instances/prts.<UUID>`:
+separate profile/cache/temp/downloads, protected DACL and low mandatory label.
+Environment inheritance is allowlisted; TEMP/TMP and working directory are
+private. Host registry extensions are disabled. Normal shutdown removes state;
+broker-owned owner manifests authorize stale cleanup on daemon startup. `job`
+does not deny another same-user tenant's files/processes. `none` also lacks
+outer-job crash cleanup and descendant resource accounting.
+
+Chromium daemon readiness requires the active Intel hardware GPU report and
+revalidates it each heartbeat. Invalid/unknown/software reports fail the
+instance with `isolation_error`. CPU frame capture and software encoding remain
+usable with hardware rendering. `stats.isolation` is null for synthetic; an
+outer job reports active/total/terminated process counts, peak process/job commit,
+CPU seconds, configured commit/process limits, verified member PIDs, browser PID,
+state path and last validated `active_gpu`. Query errors appear as an error object.
+
+I1 browser-wire extension, common to v1/v2: request `GPU_INFO=0x0009`, empty
+payload, odd request ID; correlated `GPU_INFO_RESULT=0x000a`. The result is
+`gpu_pid:u32,vendor:u32,device:u32,luid:u64,hardware:bool,swiftshader:bool,`
+`sandboxed:bool,driver:string,gl_renderer:string,gl_version:string,`
+`feature_count:u32,status:u32[feature_count]` (at most 64). Status values follow
+Chromium GpuFeatureStatus. This reports active GPUInfo, not the hardware cache.
+HELLO_ACK remains unchanged; qualification also requires actual texture/QSV/pixel
+evidence. See `phase3-i1.md` for availability and qualification limits.
 
 create returns starting immediately after reserving an ID; later instance.ready
 contains the initial active target. Failure is instance.failed with error.

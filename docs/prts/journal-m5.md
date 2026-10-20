@@ -228,3 +228,39 @@ phase2-m4.md, journal-m4.md. Chromium `work` = patches 0001-0019; infra HEAD 66b
 - 2026-10-20 20:00 [codex m5a2] FINAL full sequence PASS: all17 verified gate exits0 and PASS sentinel; release/Rust18/Clippy/fmt/Node7, M5GPU+CPU all steps, M1-M4/recovery, MF3 (strict20cycle266 throughout), v1+v2GPU/QSV and CPU/software E2E. M4 handles359/357/358. No Chrome/prtsd/browser_m processes remain. Starting final detached quick incremental build after squash/qualification. | work5a7769bea8 clean, tree1c188c132a6e884952b8bd53181b42a45eedafcf unchanged | inspect prts-m5a2-build-final.exit; fill final report results and stage task artifacts only.
 - 2026-10-20 20:01 [codex m5a2] COMPLETE steps1-3 qualification. Final quick incremental chrome build PASS exit0/up-to-date; final tree equals pre-squash1c188c132a6e884952b8bd53181b42a45eedafcf. Clean logical commits3e8bd3d1e3,7c700545f0,6c3a6eea60,5a7769bea8 all retain coauthor. Final report has files/commits/all gate results/deviations/open4-7; root causes M1 obsolete2.0 unsupported probe, M3 inheritedGPU inCPU test, additional M5 inherited nonblocking accepted HTTP sockets fixed with evidence. | 17verified gatesPASS; Chromium clean; task infra changes staged only, pre-existing PLAN edit left intact; no export/apply/sync | orchestrator re-export new commit chain and commit staged infra on top of20343fc; preserve connected-desktop focus/physical cursor UNVERIFIED and odd fractional QSV software recovery; isolationI1 precedes M5b per user priorities.
 - 2026-10-20 20:03 [orchestrator] m5a2 exit 0 (20:02): steps 1-3 qualified, 17 gates pass, M1/M3 failures were harness defects; Chromium squashed to 4 commits; cr export -> 23 patches; committed on top + pushed; STATUS next = I1 isolation. Orchestrator run 4 STOPS here. | done | fresh orchestrator: I1.
+- 2026-10-20 21:34 [codex m5a2] Starting final gate release. | log C:\src\chromium\prts-i1-regression-release.log | inspect result and continue qualification.
+- 2026-10-20 21:34 [codex m5a2] Final gate release exit=0. | log C:\src\chromium\prts-i1-regression-release.log | inspect any failure; complete docs and stage infra.
+- 2026-10-20 21:34 [codex m5a2] Starting final gate cargo-test. | log C:\src\chromium\prts-i1-regression-cargo-test.log | inspect result and continue qualification.
+- 2026-10-20 21:37 [codex m5a2] Final gate cargo-test exit=0. | log C:\src\chromium\prts-i1-regression-cargo-test.log | inspect any failure; complete docs and stage infra.
+- 2026-10-20 21:37 [codex m5a2] Starting final gate clippy. | log C:\src\chromium\prts-i1-regression-clippy.log | inspect result and continue qualification.
+- 2026-10-20 21:37 [codex m5a2] Final gate clippy exit=0. | log C:\src\chromium\prts-i1-regression-clippy.log | inspect any failure; complete docs and stage infra.
+- 2026-10-20 21:37 [codex m5a2] Starting final gate fmt. | log C:\src\chromium\prts-i1-regression-fmt.log | inspect result and continue qualification.
+- 2026-10-20 21:37 [codex m5a2] Final gate fmt exit=0. | log C:\src\chromium\prts-i1-regression-fmt.log | inspect any failure; complete docs and stage infra.
+- 2026-10-20 21:37 [codex m5a2] Starting final gate node-unit. | log C:\src\chromium\prts-i1-regression-node-unit.log | inspect result and continue qualification.
+- 2026-10-20 21:37 [codex m5a2] Final gate node-unit exit=0. | log C:\src\chromium\prts-i1-regression-node-unit.log | inspect any failure; complete docs and stage infra.
+- 2026-10-20 21:37 [codex m5a2] Starting final gate m5-gpu. | log C:\src\chromium\prts-i1-regression-m5-gpu.log | inspect result and continue qualification.
+- 2026-10-20 21:37 [codex m5a2] Final gate m5-gpu exit=0. | log C:\src\chromium\prts-i1-regression-m5-gpu.log | inspect any failure; complete docs and stage infra.
+- 2026-10-20 21:37 [codex m5a2] Starting final gate m5-cpu. | log C:\src\chromium\prts-i1-regression-m5-cpu.log | inspect result and continue qualification.
+- 2026-10-20 21:37 [codex m5a2] Final gate m5-cpu exit=0. | log C:\src\chromium\prts-i1-regression-m5-cpu.log | inspect any failure; complete docs and stage infra.
+- 2026-10-20 21:37 [codex m5a2] Starting final gate m1. | log C:\src\chromium\prts-i1-regression-m1.log | inspect result and continue qualification.
+- 2026-10-20 21:38 [codex m5a2] Final gate m1 exit=0. | log C:\src\chromium\prts-i1-regression-m1.log | inspect any failure; complete docs and stage infra.
+- 2026-10-20 21:38 [codex m5a2] Starting final gate m2. | log C:\src\chromium\prts-i1-regression-m2.log | inspect result and continue qualification.
+- 2026-10-20 21:38 [codex m5a2] Final gate m2 exit=0. | log C:\src\chromium\prts-i1-regression-m2.log | inspect any failure; complete docs and stage infra.
+- 2026-10-20 21:38 [codex m5a2] Starting final gate m3. | log C:\src\chromium\prts-i1-regression-m3.log | inspect result and continue qualification.
+- 2026-10-20 21:38 [codex m5a2] Final gate m3 exit=0. | log C:\src\chromium\prts-i1-regression-m3.log | inspect any failure; complete docs and stage infra.
+- 2026-10-20 21:38 [codex m5a2] Starting final gate m4. | log C:\src\chromium\prts-i1-regression-m4.log | inspect result and continue qualification.
+- 2026-10-20 21:40 [codex m5a2] Final gate m4 exit=0. | log C:\src\chromium\prts-i1-regression-m4.log | inspect any failure; complete docs and stage infra.
+- 2026-10-20 21:40 [codex m5a2] Starting final gate m4-recovery. | log C:\src\chromium\prts-i1-regression-m4-recovery.log | inspect result and continue qualification.
+- 2026-10-20 21:40 [codex m5a2] Final gate m4-recovery exit=0. | log C:\src\chromium\prts-i1-regression-m4-recovery.log | inspect any failure; complete docs and stage infra.
+- 2026-10-20 21:40 [codex m5a2] Starting final gate mf-hardware. | log C:\src\chromium\prts-i1-regression-mf-hardware.log | inspect result and continue qualification.
+- 2026-10-20 21:41 [codex m5a2] Final gate mf-hardware exit=0. | log C:\src\chromium\prts-i1-regression-mf-hardware.log | inspect any failure; complete docs and stage infra.
+- 2026-10-20 21:41 [codex m5a2] Starting final gate odd-sizes. | log C:\src\chromium\prts-i1-regression-odd-sizes.log | inspect result and continue qualification.
+- 2026-10-20 21:41 [codex m5a2] Final gate odd-sizes exit=0. | log C:\src\chromium\prts-i1-regression-odd-sizes.log | inspect any failure; complete docs and stage infra.
+- 2026-10-20 21:41 [codex m5a2] Starting final gate v1-e2e-gpu. | log C:\src\chromium\prts-i1-regression-v1-e2e-gpu.log | inspect result and continue qualification.
+- 2026-10-20 21:41 [codex m5a2] Final gate v1-e2e-gpu exit=0. | log C:\src\chromium\prts-i1-regression-v1-e2e-gpu.log | inspect any failure; complete docs and stage infra.
+- 2026-10-20 21:41 [codex m5a2] Starting final gate v2-e2e-gpu. | log C:\src\chromium\prts-i1-regression-v2-e2e-gpu.log | inspect result and continue qualification.
+- 2026-10-20 21:42 [codex m5a2] Final gate v2-e2e-gpu exit=0. | log C:\src\chromium\prts-i1-regression-v2-e2e-gpu.log | inspect any failure; complete docs and stage infra.
+- 2026-10-20 21:42 [codex m5a2] Starting final gate v1-e2e-cpu. | log C:\src\chromium\prts-i1-regression-v1-e2e-cpu.log | inspect result and continue qualification.
+- 2026-10-20 21:42 [codex m5a2] Final gate v1-e2e-cpu exit=0. | log C:\src\chromium\prts-i1-regression-v1-e2e-cpu.log | inspect any failure; complete docs and stage infra.
+- 2026-10-20 21:42 [codex m5a2] Starting final gate v2-e2e-cpu. | log C:\src\chromium\prts-i1-regression-v2-e2e-cpu.log | inspect result and continue qualification.
+- 2026-10-20 21:42 [codex m5a2] Final gate v2-e2e-cpu exit=0. | log C:\src\chromium\prts-i1-regression-v2-e2e-cpu.log | inspect any failure; complete docs and stage infra.

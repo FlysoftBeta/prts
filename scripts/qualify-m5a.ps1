@@ -39,6 +39,7 @@ $env:PRTS_FRAME_MODE = 'gpu'
 Gate 'm4' { & .\prtsd\target\release\browser_m4.exe }
 Gate 'm4-recovery' { & .\prtsd\target\release\browser_m4_recovery.exe }
 Gate 'mf-hardware' { cargo test --manifest-path prtsd\Cargo.toml --release --test mf_encoder -- --ignored --nocapture --test-threads=1 }
+Gate 'odd-sizes' { cargo test --manifest-path prtsd\Cargo.toml --release --test odd_sizes -- --include-ignored --nocapture --test-threads=1 }
 $env:PRTS_TEST_ENCODER = 'qsv'
 Gate 'v1-e2e-gpu' { & node --test server/test/e2e-browser.js }
 Gate 'v2-e2e-gpu' { & node --test server/test/e2e-window.js }

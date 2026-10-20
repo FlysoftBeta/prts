@@ -1,0 +1,10 @@
+{
+  "profile": "job",
+  "job_limits": {
+    "active_processes": 64,
+    "process_memory_bytes": 4294967296,
+    "job_memory_bytes": 8589934592,
+    "cpu_rate": null,
+    "ui_restrictions": 0
+  }
+}

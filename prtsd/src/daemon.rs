@@ -254,14 +254,21 @@ impl Daemon {
                         Some(tokio::task::spawn_blocking(move || {
                             let path = std::env::var("PRTS_CHROME_PATH")
                                 .unwrap_or_else(|_| crate::browser::DEFAULT_CHROME.into());
-                            let browser = std::sync::Arc::new(
-                                crate::browser::Browser::launch_cancellable(path, &cancel)?,
-                            );
+                            let browser =
+                                std::sync::Arc::new(crate::browser::Browser::launch_isolated(
+                                    path,
+                                    &cancel,
+                                    &crate::isolation::Config {
+                                        profile: options.isolation_profile.clone(),
+                                        job_limits: options.job_limits.clone(),
+                                    },
+                                )?);
                             let target = browser.create(
                                 &options.initial_url,
                                 browser_size(options.size),
                                 true,
                             )?;
+                            browser.enforce_hardware_gpu(&cancel)?;
                             browser.drain_events();
                             Ok((browser, target))
                         }))
@@ -641,7 +648,9 @@ impl Daemon {
             i.video.stop();
             self.out.event(
                 "instance.failed",
-                json!({"instance_id":id,"error":Error::new("internal","instance source or encoder failed")}),
+                json!({"instance_id":id,"error":if error.contains("isolation:") {
+                    Error::new("isolation_error","requested isolation could not be established; check daemon log")
+                } else { Error::new("internal","instance source or encoder failed") }}),
             );
             let sessions: Vec<_> = self
                 .sessions
@@ -729,7 +738,14 @@ impl Daemon {
                 let available = s.congestion.load(Ordering::Acquire);
                 sessions.push(json!({"session_id":id,"rtt_ms":rtt,"available_outgoing_bps":if available==0 {None}else{Some(available)},"rtp_sent_bps":s.bytes.swap(0,Ordering::AcqRel) as f64*8.0/seconds,"shaper_dropped_packets":s.shaper.dropped.load(Ordering::Relaxed),"viewer_feedback":s.feedback}));
             }
-            self.out.event("stats",json!({"instance_id":i.id,"interval_ms":elapsed.as_millis() as u64,
+            #[cfg(windows)]
+            let isolation = i.browser.as_ref().map(|b| {
+                b.isolation_stats()
+                    .unwrap_or_else(|e| json!({"error":e.to_string()}))
+            });
+            #[cfg(not(windows))]
+            let isolation: Option<Value> = None;
+            self.out.event("stats",json!({"instance_id":i.id,"interval_ms":elapsed.as_millis() as u64,"isolation":isolation,
                 "encoder":{"input_path":m.encoder_input,"name":*i.video.encoder_name.lock().unwrap(),"fps":m.encoded as f64/seconds,"bitrate_bps":m.bytes as f64*8.0/seconds,"qp_avg":null,"encode_ms_avg":encode_avg},
                 "frames":{"backend":m.frame_backend,"captured":m.captured,"encoded":m.encoded,"dropped":m.dropped,"capture_to_encode_ms_avg":capture_encode_avg,"capture_to_encode_ms_p95":p95,"capture_to_send_ms_avg":avg(&m.send_ms)},"sessions":sessions}));
         }
@@ -1187,6 +1203,9 @@ fn virtual_key(code: &str, key: &str) -> Option<u8> {
     })
 }
 pub async fn run() -> anyhow::Result<()> {
+    crate::isolation::Config::from_env()?;
+    #[cfg(windows)]
+    crate::isolation::state::cleanup_stale()?;
     #[cfg(windows)]
     eprintln!("prtsd: daemon pid {}", unsafe {
         windows::Win32::System::Threading::GetCurrentProcessId()
@@ -1225,7 +1244,7 @@ pub async fn run() -> anyhow::Result<()> {
                         if !params.is_object() || !params["versions"].as_array().is_some_and(|a| a.len()<=4096 && a.iter().all(|v|v.as_u64().is_some_and(|n|n<=MAX_SAFE)) && a.contains(&json!(1))) {
                             out.response(id,Err(Error::new("unsupported","protocol v1 required")));break;
                         }
-                        out.response(id,Ok(json!({"version":1,"daemon":"prtsd","capabilities":{"sources":["synthetic","chromium"],"encoders":["auto","qsv","software"],"isolation_profiles":["job"],"max_instances":8,"max_sessions":32,"max_width":4096,"max_height":4096,"max_pixels":8294400,"max_device_width":4096,"max_device_height":4096,"min_device_dimension":16,"device_dimension_alignment":2,"fps":{"default":30,"min":1,"max":60},"packet_shaping":true,"bitrate_cap":true,"custom_cursor":false}})));hello=true;
+                        out.response(id,Ok(json!({"version":1,"daemon":"prtsd","capabilities":{"sources":["synthetic","chromium"],"encoders":["auto","qsv","software"],"isolation_profiles":crate::isolation::available_profiles(),"max_instances":8,"max_sessions":32,"max_width":4096,"max_height":4096,"max_pixels":8294400,"max_device_width":4096,"max_device_height":4096,"min_device_dimension":16,"device_dimension_alignment":1,"fps":{"default":30,"min":1,"max":60},"packet_shaping":true,"bitrate_cap":true,"custom_cursor":false}})));hello=true;
                     } else {
                         let response=match method {
                             Some(method) if params.is_object()=>match tokio::time::timeout(Duration::from_secs(5),d.command(method,params)).await {Ok(r)=>r,Err(_)=>{out.failed.store(true,Ordering::Release);Err(Error::new("timeout","command exceeded five seconds; daemon shutting down"))}},

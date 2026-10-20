@@ -24,6 +24,8 @@ fn capture_gate(c: &mut Client, w: Window) -> Result<()> {
         (960, 640, 2.),
         (960, 640, 1.25),
         (961, 641, 1.25),
+        (1001, 777, 1.25),
+        (1203, 803, 1.),
     ] {
         let mut resize = w.id.to_le_bytes().to_vec();
         Size {
@@ -80,7 +82,7 @@ fn capture_gate(c: &mut Client, w: Window) -> Result<()> {
                 "Page DPR/viewport did not update: {title}"
             );
         }
-        let frame = loop {
+        let (frame, source_pixels) = loop {
             let f = c.frame(w.id).context("Receiving compatible root frame")?;
             ensure!(f.width == pw && f.height == ph, "Frame dimensions mismatch");
             let pixels = if let Some(texture) = &f.texture {
@@ -99,15 +101,11 @@ fn capture_gate(c: &mut Client, w: Window) -> Result<()> {
                 .zip([60u8, 30, 220])
                 .all(|(a, b)| a.abs_diff(b) <= 2)
             {
-                break f;
+                break (f, pixels);
             }
             ensure!(std::time::Instant::now() < deadline, "Page color missing");
         };
-        let preference = if pw % 2 == 0 && ph % 2 == 0 && mode == 1 {
-            "qsv"
-        } else {
-            "software"
-        };
+        let preference = "qsv";
         println!("ENCODE {pw}x{ph} preference={preference}");
         let (mut encoder, warning) =
             prtsd::encoder::Selected::new(preference, pw, ph, 4_000_000, 30)
@@ -115,37 +113,51 @@ fn capture_gate(c: &mut Client, w: Window) -> Result<()> {
         ensure!(warning.is_none(), "Encoder fallback {warning:?}");
         let mut decoder = openh264::decoder::Decoder::new()?;
         let mut rgb = None;
-        for n in 0..3 {
+        for n in 0..12 {
             let encoded = if let Some(texture) = &frame.texture {
                 encoder.encode_texture(texture, n == 0)
             } else {
                 encoder.encode(&frame.pixels, pw as usize, ph as usize, n == 0)
             };
-            let data = match encoded {
-                Ok(data) => data,
-                Err(e) if preference == "qsv" && encoder.name() != "software/openh264" => {
-                    println!("QSV size {pw}x{ph} rejected: {e:#}; exercising software recovery");
-                    encoder.fallback()?;
-                    decoder = openh264::decoder::Decoder::new()?;
-                    if let Some(texture) = &frame.texture {
-                        encoder.encode_texture(texture, true)?
-                    } else {
-                        encoder.encode(&frame.pixels, pw as usize, ph as usize, true)?
-                    }
-                }
-                Err(e) => return Err(e),
-            };
+            let data = encoded.context("QSV must encode every size without fallback")?;
             for nal in openh264::nal_units(&data) {
                 if let Some(pic) = decoder.decode(nal).with_context(|| {
                     format!("Decoding {pw}x{ph} frame {n} from {}", encoder.name())
                 })? {
-                    let mut pixels = vec![0; pw as usize * ph as usize * 3];
-                    pic.write_rgb8(&mut pixels);
+                    use openh264::formats::YUVSource;
+                    let (dw, dh) = pic.dimensions();
+                    ensure!(
+                        (dw, dh) == (((pw + 1) & !1) as usize, ((ph + 1) & !1) as usize),
+                        "Unexpected decoded aperture {dw}x{dh}"
+                    );
+                    let mut padded = vec![0; dw * dh * 3];
+                    pic.write_rgb8(&mut padded);
+                    let mut pixels = Vec::with_capacity(pw as usize * ph as usize * 3);
+                    for row in padded.chunks_exact(dw * 3).take(ph as usize) {
+                        pixels.extend_from_slice(&row[..pw as usize * 3]);
+                    }
                     rgb = Some(pixels);
                 }
             }
         }
         let rgb = rgb.context("Video decode stalled")?;
+        for (x, y) in [(pw - 1, ph - 1), (pw - 1, ph * 3 / 4), (pw / 2, ph - 1)] {
+            let source = ((y * pw + x) * 4) as usize;
+            let decoded = ((y * pw + x) * 3) as usize;
+            let expected = [
+                source_pixels[source + 2],
+                source_pixels[source + 1],
+                source_pixels[source],
+            ];
+            ensure!(
+                rgb[decoded..decoded + 3]
+                    .iter()
+                    .zip(expected)
+                    .all(|(a, b)| a.abs_diff(b) <= 45),
+                "Decoded edge {x},{y} differs from capture: {:?} vs {expected:?}",
+                &rgb[decoded..decoded + 3]
+            );
+        }
         let i = ((ph as usize * 3 / 4) * pw as usize + pw as usize / 2) * 3;
         ensure!(
             rgb[i..i + 3]

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Tue, 20 Oct 2026 04:20:26 +0800
-Subject: [PATCH 01/23] Add PRTS target registry and per-window viewport
+Subject: [PATCH 01/24] Add PRTS target registry and per-window viewport
  control
 
 Observe browser collections, tab strips and WebContents for stable target IDs, lifecycle events and headless navigation. Retain process/profile lifetime across last-window closure and apply per-target device emulation.

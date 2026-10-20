@@ -10,7 +10,7 @@ const mock = fileURLToPath(new URL('./mock-prtsd.js', import.meta.url));
 
 test('HTTP and WS control plane with fragmented/coalesced mock stdio', { timeout: 20000 }, async t => {
   const server = spawn(process.execPath, ['server'], { cwd: root, windowsHide: true,
-    env: { ...process.env, PORT: '0', PRTSD_PATH: process.execPath, PRTSD_ARGS: JSON.stringify([mock]) }, stdio: ['ignore', 'pipe', 'pipe'] });
+    env: { ...process.env, PORT: '0', PRTS_ISOLATION_PROFILE: 'none', PRTSD_PATH: process.execPath, PRTSD_ARGS: JSON.stringify([mock]) }, stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = ''; server.stderr.on('data', data => { stderr += data; });
   t.after(async () => {
     if (server.exitCode === null) {
@@ -55,6 +55,11 @@ test('HTTP and WS control plane with fragmented/coalesced mock stdio', { timeout
   assert.equal((await a.rpc('hello', { versions: [1] })).version, 1);
   const { instance } = await a.rpc('instance.create', { options: { source: 'synthetic', initial_url: 'https://example.org/路径', size: { width: 640, height: 360, dpr: 1 } } });
   assert.equal(instance.state, 'starting');
+  assert.equal(instance.options.isolation_profile, 'none', 'Node applies its configured default');
+  const explicit = await a.rpc('instance.create', { options: { source: 'synthetic', isolation_profile: 'job' } });
+  assert.equal(explicit.instance.options.isolation_profile, 'job', 'Explicit instance policy wins');
+  await a.event(e => e.event === 'instance.ready' && e.data.instance_id === explicit.instance.instance_id);
+  await a.rpc('instance.close', { instance_id: explicit.instance.instance_id });
   const iid = instance.instance_id;
   await a.event(e => e.event === 'instance.ready' && e.data.instance_id === iid);
   const list = await a.rpc('target.list', { instance_id: iid });

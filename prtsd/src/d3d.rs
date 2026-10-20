@@ -232,6 +232,79 @@ impl Device {
     }
     pub fn nv12(&self, texture: &ID3D11Texture2D, w: u32, h: u32) -> Result<ID3D11Texture2D> {
         unsafe {
+            // Intel's DXGI input requires both surface/media dimensions to be
+            // multiples of four. Replicate edges before conversion; never scale
+            // the visible image or read pixels back to the CPU.
+            let (sw, sh) = ((w + 3) & !3, (h + 3) & !3);
+            let mut source = D3D11_TEXTURE2D_DESC::default();
+            texture.GetDesc(&mut source);
+            ensure!(
+                source.Width == w && source.Height == h,
+                "NV12 source dimensions mismatch"
+            );
+            let padded;
+            let texture = if source.Width != sw || source.Height != sh {
+                padded = self.texture(sw, sh, DXGI_FORMAT_B8G8R8A8_UNORM, false)?;
+                let mut rect = D3D11_BOX {
+                    left: 0,
+                    top: 0,
+                    front: 0,
+                    right: source.Width,
+                    bottom: source.Height,
+                    back: 1,
+                };
+                self.context
+                    .CopySubresourceRegion(&padded, 0, 0, 0, 0, texture, 0, Some(&rect));
+                rect.left = source.Width - 1;
+                for x in source.Width..sw {
+                    self.context.CopySubresourceRegion(
+                        &padded,
+                        0,
+                        x,
+                        0,
+                        0,
+                        texture,
+                        0,
+                        Some(&rect),
+                    );
+                }
+                for y in source.Height..sh {
+                    rect = D3D11_BOX {
+                        left: 0,
+                        top: source.Height - 1,
+                        front: 0,
+                        right: source.Width,
+                        bottom: source.Height,
+                        back: 1,
+                    };
+                    self.context.CopySubresourceRegion(
+                        &padded,
+                        0,
+                        0,
+                        y,
+                        0,
+                        texture,
+                        0,
+                        Some(&rect),
+                    );
+                    rect.left = source.Width - 1;
+                    for x in source.Width..sw {
+                        self.context.CopySubresourceRegion(
+                            &padded,
+                            0,
+                            x,
+                            y,
+                            0,
+                            texture,
+                            0,
+                            Some(&rect),
+                        );
+                    }
+                }
+                &padded
+            } else {
+                texture
+            };
             let video = self.device.cast::<ID3D11VideoDevice>()?;
             let ctx = self.context.cast::<ID3D11VideoContext>()?;
             let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
@@ -240,10 +313,10 @@ impl Device {
                     Numerator: 30,
                     Denominator: 1,
                 },
-                InputWidth: w,
-                InputHeight: h,
-                OutputWidth: w,
-                OutputHeight: h,
+                InputWidth: sw,
+                InputHeight: sh,
+                OutputWidth: sw,
+                OutputHeight: sh,
                 OutputFrameRate: DXGI_RATIONAL {
                     Numerator: 30,
                     Denominator: 1,
@@ -252,7 +325,7 @@ impl Device {
             };
             let enumerator = video.CreateVideoProcessorEnumerator(&desc)?;
             let processor = video.CreateVideoProcessor(&enumerator, 0)?;
-            let output = self.texture(w, h, DXGI_FORMAT_NV12, false)?;
+            let output = self.texture(sw, sh, DXGI_FORMAT_NV12, false)?;
             let (mut input_view, mut output_view) = (None, None);
             video.CreateVideoProcessorInputView(
                 texture,

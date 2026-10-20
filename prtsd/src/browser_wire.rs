@@ -308,7 +308,7 @@ impl Record {
         ensure!(d.u16()? == 0, "Nonzero flags");
         let id = d.u64()?;
         ensure!(
-            matches!(kind, 1..=8 | 0x200..=0x207 | 0x300..=0x301 | 0x310..=0x311 | 0x320)
+            matches!(kind, 1..=10 | 0x200..=0x207 | 0x300..=0x301 | 0x310..=0x311 | 0x320)
                 || (major == 1
                     && matches!(kind, 0x100..=0x105 | 0x180..=0x181 | 0x190..=0x193 | 0x321..=0x322))
                 || (major == 2

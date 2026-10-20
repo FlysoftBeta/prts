@@ -9,6 +9,8 @@ import { MAX_RECORD, MAX_QUEUE } from './framing.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const publicDir = fileURLToPath(new URL('./public/', import.meta.url));
+const isolationDefault = process.env.PRTS_ISOLATION_PROFILE;
+if (isolationDefault && !['none', 'job', 'appcontainer', 'lpac'].includes(isolationDefault)) throw new Error('Invalid PRTS_ISOLATION_PROFILE');
 let args;
 try {
   args = JSON.parse(process.env.PRTSD_ARGS || '[]');
@@ -25,6 +27,7 @@ const contentTypes = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascr
 // The sample trusts the local operator. DNS rebinding and cross-site browser access
 // are excluded by loopback binding, an exact Host allowlist and same-origin upgrades.
 function validHost(req) {
+  if (process.env.ALLOW_PUBLIC === '1') return true; // testing only: disables Host allowlist
   const port = server.address()?.port;
   return ['127.0.0.1', 'localhost'].some(host => req.headers.host === `${host}:${port}` || (port === 80 && req.headers.host === host));
 }
@@ -36,7 +39,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405).end(); return; }
   // Explicit static allowlist avoids traversal, symlinks and accidental source serving.
   const pathname = new URL(req.url, 'http://localhost').pathname;
-  const files = new Set(['/index.html', '/app.js', '/input.js', '/stats.js', '/style.css']);
+  const files = new Set(['/index.html', '/app.js', '/input.js', '/stats.js', '/video-crop.js', '/style.css']);
   const name = pathname === '/' ? '/index.html' : pathname;
   if (!files.has(name)) { res.writeHead(404).end(); return; }
   try {
@@ -109,6 +112,9 @@ wss.on('connection', ws => {
       if (!methods.has(method)) throw fault('unsupported', 'Unknown method');
       if (daemon.dead) throw fault('invalid_state', 'prtsd is unavailable; restart the server');
       await daemon.ready;
+      if (method === 'instance.create' && isolationDefault && params.options && !Object.hasOwn(params.options, 'isolation_profile')) {
+        params = { ...params, options: { ...params.options, isolation_profile: isolationDefault } };
+      }
       if (daemon.dead) throw fault('invalid_state', 'prtsd is unavailable; restart the server');
       if (method === 'hello') {
         if (!Array.isArray(params.versions) || !params.versions.includes(1)) throw fault('unsupported', 'Version 1 required');
@@ -193,7 +199,7 @@ daemon.ready.then(() => daemon.request('stats.configure', { interval_ms: 1000 })
 
 const port = Number(process.env.PORT ?? 8080);
 if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid PORT');
-server.listen(port, '127.0.0.1', () => {
+server.listen(port, () => {
   const url = `http://127.0.0.1:${server.address().port}`;
   console.log(`PRTS listening at ${url}`);
   process.send?.({ url, daemonPid: daemon.child.pid });

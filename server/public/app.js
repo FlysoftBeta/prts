@@ -1,5 +1,6 @@
 import { RemoteInput } from './input.js';
 import { ReceiverStats } from './stats.js';
+import { installVideoCrop } from './video-crop.js';
 
 const $ = id => document.getElementById(id);
 const instances = new Map(), targets = new Map(), pending = new Map();
@@ -7,6 +8,7 @@ let selected = null, nextId = 0, viewer = null, connecting = false;
 const video = $('video');
 const report = error => { $('error').textContent = error?.message || String(error); };
 const input = new RemoteInput(video, $('keyboard'), $('cursor'), report);
+const updateVideoCrop = installVideoCrop(video, () => input.target?.size);
 const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
 
 function rpc(method, params = {}) {
@@ -93,6 +95,7 @@ async function selectInstance(id) {
 }
 function showTarget(target) {
   input.setTarget(target);
+  updateVideoCrop();
   video.classList.toggle('no-frame', !target);
   $('empty').hidden = !!target;
   if (!target) $('empty').textContent = 'No active remote tab';
@@ -124,7 +127,7 @@ async function connect() {
     const session = await rpc('session.create', { instance_id: instance, viewer_id: 'browser', control: $('control').checked });
     state.id = session.session_id;
     if (state.closed || viewer !== state) { await rpc('session.close', { session_id: state.id }); return; }
-    const pc = state.pc = new RTCPeerConnection({ iceServers: session.ice_servers });
+    const pc = state.pc = new RTCPeerConnection({ iceServers: session.ice_servers?.length ? session.ice_servers : [{ urls: 'stun:stun.l.google.com:19302' }] });
     input.control = session.control;
     pc.ontrack = e => {
       if (viewer !== state) return;
@@ -267,7 +270,8 @@ $('create').onsubmit = e => {
   run(async () => {
     const form = e.target;
     const result = await rpc('instance.create', { options: { initial_url: form.elements.url.value,
-      size: sizeFrom(form), source: form.elements.source.value, encoder: form.elements.encoder.value } });
+      size: sizeFrom(form), source: form.elements.source.value, encoder: form.elements.encoder.value,
+      ...(form.elements.isolation.value ? { isolation_profile: form.elements.isolation.value } : {}) } });
     instances.set(result.instance.instance_id, result.instance); renderInstances();
     await selectInstance(result.instance.instance_id);
   })();

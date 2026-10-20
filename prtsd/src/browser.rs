@@ -77,8 +77,10 @@ pub struct RawBrowser {
     pub command: File,
     pub event: File,
     pub frame: File,
-    job: OwnedHandle,
+    job: Option<OwnedHandle>,
     process: OwnedHandle,
+    state: Arc<crate::isolation::state::State>,
+    desktop_helper: Option<Box<RawBrowser>>,
     pub pid: u32,
 }
 impl RawBrowser {
@@ -95,29 +97,132 @@ impl RawBrowser {
         extra_switches: &[&str],
         headless: bool,
     ) -> Result<Self> {
+        Self::launch_isolated(
+            executable,
+            extra_switches,
+            headless,
+            &crate::isolation::Config::from_env()?,
+        )
+    }
+    pub fn launch_isolated(
+        executable: &Path,
+        extra_switches: &[&str],
+        headless: bool,
+        isolation: &crate::isolation::Config,
+    ) -> Result<Self> {
+        Self::launch_internal(executable, extra_switches, headless, isolation, None)
+    }
+    fn launch_internal(
+        executable: &Path,
+        extra_switches: &[&str],
+        headless: bool,
+        isolation: &crate::isolation::Config,
+        inherited_job: Option<&OwnedHandle>,
+    ) -> Result<Self> {
+        isolation.validate()?;
+        let container = matches!(isolation.profile.as_str(), "appcontainer" | "lpac");
+        ensure!(
+            !container || std::env::var("PRTS_I1_EXPERIMENTAL").as_deref() == Ok("1"),
+            "isolation: {} is not qualified",
+            isolation.profile
+        );
+        let state = crate::isolation::state::State::create(container)
+            .context("isolation: private state")?;
         let (command, cmd_child) = pipe(true)?;
         let (event, evt_child) = pipe(false)?;
         let (frame, frame_child) = pipe(false)?;
-        let children = [handle(&cmd_child), handle(&evt_child), handle(&frame_child)];
-        let job = adopt(unsafe { CreateJobObjectW(None, PCWSTR::null())? });
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        unsafe {
-            SetInformationJobObject(
-                handle(&job),
-                JobObjectExtendedLimitInformation,
-                &limits as *const _ as *const _,
-                size_of_val(&limits) as u32,
-            )?;
-        }
+        let mut children = vec![handle(&cmd_child), handle(&evt_child), handle(&frame_child)];
+        let provisioner = executable
+            .file_stem()
+            .is_some_and(|s| s == "isolation_desktop");
+        let log_handle = if container || provisioner {
+            let mut log = std::env::var("PRTS_BROWSER_LOG").unwrap_or_else(|_| {
+                state
+                    .path
+                    .join("browser.log")
+                    .to_string_lossy()
+                    .into_owned()
+            });
+            if provisioner {
+                log.push_str(".desktop.log");
+            }
+            let file = File::options().create(true).append(true).open(log)?;
+            unsafe {
+                SetHandleInformation(handle(&file), HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)?;
+            }
+            children.push(handle(&file));
+            Some(file)
+        } else {
+            None
+        };
+        let job = if let Some(job) = inherited_job {
+            Some(job.try_clone()?)
+        } else if isolation.profile == "none" {
+            None
+        } else {
+            Some(
+                crate::isolation::win::create_job(&isolation.job_limits)
+                    .context("isolation: create job")?,
+            )
+        };
+        let (desktop_helper, sandbox_desktop, browser_desktop) =
+            if container && !extra_switches.contains(&"--i1-native-probe") {
+                let helper_exe = std::env::current_exe()?.with_file_name("isolation_desktop.exe");
+                let helper_config = crate::isolation::Config {
+                    profile: "job".into(),
+                    job_limits: isolation.job_limits.clone(),
+                };
+                let name = format!("--prts-desktop={}", state.name);
+                let package = format!(
+                    "--prts-package={}",
+                    state.package.as_ref().context("package SID missing")?
+                );
+                let helper = Self::launch_internal(
+                    &helper_exe,
+                    &[&name, &package],
+                    false,
+                    &helper_config,
+                    job.as_ref(),
+                )
+                .context("isolation: desktop provisioner launch")?;
+                let mut event = helper.event.try_clone()?;
+                let (tx, rx) = mpsc::sync_channel(1);
+                let worker = thread::spawn(move || {
+                    let _ = tx.send(Record::read(&mut event));
+                });
+                let result = rx.recv_timeout(Duration::from_secs(20));
+                if result.is_err() {
+                    helper.terminate();
+                }
+                let _ = worker.join();
+                if result.as_ref().is_ok_and(|r| r.is_err()) {
+                    let _ = helper.wait(Duration::from_secs(2));
+                }
+                let record = result
+                    .context("isolation: desktop provisioner timeout")?
+                    .context("isolation: desktop provisioner response; inspect .desktop.log")?;
+                ensure!(
+                    record.kind == 5 && record.id == 1,
+                    "isolation: invalid desktop provisioner response"
+                );
+                let mut decoder = Decoder::new(&record.payload);
+                let desktop = decoder.string()?;
+                let browser_desktop = decoder.string()?;
+                decoder.finish()?;
+                (Some(Box::new(helper)), Some(desktop), Some(browser_desktop))
+            } else {
+                (None, None, None)
+            };
         // Vec<usize> guarantees attribute-list pointer alignment. Windows returns its byte size.
         let mut bytes = 0;
-        let _ = unsafe { InitializeProcThreadAttributeList(None, 2, None, &mut bytes) };
+        let attribute_count = 2 + u32::from(container) + u32::from(isolation.profile == "lpac");
+        let _ =
+            unsafe { InitializeProcThreadAttributeList(None, attribute_count, None, &mut bytes) };
         ensure!(bytes > 0, "No process attribute list size");
         let mut storage = vec![0usize; bytes.div_ceil(size_of::<usize>())];
         let list = LPPROC_THREAD_ATTRIBUTE_LIST(storage.as_mut_ptr().cast());
         unsafe {
-            InitializeProcThreadAttributeList(Some(list), 2, None, &mut bytes)?;
+            InitializeProcThreadAttributeList(Some(list), attribute_count, None, &mut bytes)?;
         }
         struct Attributes(LPPROC_THREAD_ATTRIBUTE_LIST);
         impl Drop for Attributes {
@@ -128,30 +233,76 @@ impl RawBrowser {
             }
         }
         let _attributes = Attributes(list);
+        let internet = crate::isolation::state::Capability::from_string("S-1-15-3-1")?;
+        let install = if container && std::env::var("PRTS_INSTALL_CAPABILITY").as_deref() == Ok("1")
+        {
+            Some(crate::isolation::state::Capability::named(
+                "prtsInstallFiles",
+            )?)
+        } else {
+            None
+        };
+        let mut capabilities = vec![internet.entry()];
+        if let Some(install) = &install {
+            capabilities.push(install.entry());
+        }
+        let security = windows::Win32::Security::SECURITY_CAPABILITIES {
+            AppContainerSid: state.sid,
+            Capabilities: capabilities.as_ptr() as _,
+            CapabilityCount: capabilities.len() as u32,
+            Reserved: 0,
+        };
+        let opt_out = 1u32; // PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT
+        if container {
+            unsafe {
+                UpdateProcThreadAttribute(
+                    list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
+                    Some(&security as *const _ as _),
+                    size_of_val(&security),
+                    None,
+                    None,
+                )?;
+                if isolation.profile == "lpac" {
+                    UpdateProcThreadAttribute(
+                        list,
+                        0,
+                        PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY as usize,
+                        Some(&opt_out as *const _ as _),
+                        size_of_val(&opt_out),
+                        None,
+                        None,
+                    )?;
+                }
+            }
+        }
         unsafe {
             UpdateProcThreadAttribute(
                 list,
                 0,
                 PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
                 Some(children.as_ptr().cast()),
-                size_of_val(&children),
+                children.len() * size_of::<HANDLE>(),
                 None,
                 None,
             )?;
         }
         // Atomic job assignment closes the parent-death race between
         // CreateProcess and a subsequent AssignProcessToJobObject call.
-        let jobs = [handle(&job)];
-        unsafe {
-            UpdateProcThreadAttribute(
-                list,
-                0,
-                PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
-                Some(jobs.as_ptr().cast()),
-                size_of_val(&jobs),
-                None,
-                None,
-            )?;
+        let jobs = [job.as_ref().map(handle).unwrap_or_default()];
+        if job.is_some() {
+            unsafe {
+                UpdateProcThreadAttribute(
+                    list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
+                    Some(jobs.as_ptr().cast()),
+                    size_of_val(&jobs),
+                    None,
+                    None,
+                )?;
+            }
         }
         let executable_text = executable.to_str().context("Chrome path is not UTF-8")?;
         ensure!(
@@ -160,7 +311,7 @@ impl RawBrowser {
         );
         let app: Vec<u16> = executable_text.encode_utf16().chain(Some(0)).collect();
         let mut text = format!(
-            "\"{}\" {} --no-first-run --no-default-browser-check --prts-pipe=cmd:0x{:X},evt:0x{:X},frame:0x{:X}",
+            "\"{}\" {} --no-first-run --no-default-browser-check --disable-extensions --disable-component-update --disable-background-networking --disable-sync --prts-pipe=cmd:0x{:X},evt:0x{:X},frame:0x{:X}",
             executable_text,
             if headless { "--headless=new" } else { "" },
             children[0].0 as usize,
@@ -178,7 +329,14 @@ impl RawBrowser {
             text.push(' ');
             text.push_str(switch);
         }
-        if let Ok(log) = std::env::var("PRTS_BROWSER_LOG") {
+        text.push_str(&format!(
+            " --user-data-dir=\"{}\" --disk-cache-dir=\"{}\"",
+            state.path.join("profile").display(),
+            state.path.join("cache").display()
+        ));
+        if container {
+            text.push_str(" --enable-logging=stderr --v=1");
+        } else if let Ok(log) = std::env::var("PRTS_BROWSER_LOG") {
             ensure!(
                 !log.contains('"') && !log.contains('\0'),
                 "Invalid browser log path"
@@ -192,8 +350,63 @@ impl RawBrowser {
         let mut command_line: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
         let mut startup = STARTUPINFOEXW::default();
         startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+        let private_desktop = browser_desktop.is_some();
+        let mut browser_desktop: Vec<u16> = browser_desktop
+            .unwrap_or_default()
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        if private_desktop {
+            startup.StartupInfo.lpDesktop = PWSTR(browser_desktop.as_mut_ptr());
+        }
+        if let Some(log) = &log_handle {
+            startup.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+            startup.StartupInfo.hStdInput = handle(&cmd_child);
+            startup.StartupInfo.hStdOutput = handle(log);
+            startup.StartupInfo.hStdError = handle(log);
+        }
         startup.lpAttributeList = list;
         let mut process = PROCESS_INFORMATION::default();
+        let mut environment = std::collections::BTreeMap::new();
+        for key in [
+            "SystemRoot",
+            "WINDIR",
+            "SystemDrive",
+            "COMSPEC",
+            "NUMBER_OF_PROCESSORS",
+            "PROCESSOR_ARCHITECTURE",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                environment.insert(key.to_owned(), value);
+            }
+        }
+        for key in ["TEMP", "TMP"] {
+            environment.insert(
+                key.into(),
+                state.path.join("temp").to_string_lossy().into_owned(),
+            );
+        }
+        if let Some(desktop) = sandbox_desktop {
+            environment.insert("PRTS_SANDBOX_DESKTOP".into(), desktop);
+            environment.insert(
+                "PRTS_TENANT_TEMP".into(),
+                state.path.join("temp").to_string_lossy().into_owned(),
+            );
+        }
+        let environment: Vec<u16> = environment
+            .iter()
+            .flat_map(|(k, v)| format!("{k}={v}\0").encode_utf16().collect::<Vec<_>>())
+            .chain(Some(0))
+            .collect();
+        let cwd: Vec<u16> = state
+            .path
+            .to_string_lossy()
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
         unsafe {
             CreateProcessW(
                 PCWSTR(app.as_ptr()),
@@ -201,16 +414,33 @@ impl RawBrowser {
                 None,
                 None,
                 true,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED,
-                None,
-                PCWSTR::null(),
+                EXTENDED_STARTUPINFO_PRESENT
+                    | CREATE_SUSPENDED
+                    | CREATE_UNICODE_ENVIRONMENT
+                    | if provisioner {
+                        CREATE_NO_WINDOW
+                    } else {
+                        PROCESS_CREATION_FLAGS(0)
+                    },
+                Some(environment.as_ptr().cast()),
+                PCWSTR(cwd.as_ptr()),
                 &startup.StartupInfo,
                 &mut process,
-            )?;
+            )
+            .context("isolation: CreateProcessW")?;
         }
         // CreateProcess grants full process access, including PROCESS_DUP_HANDLE and lifecycle rights.
         let process_handle = adopt(process.hProcess);
         let thread_handle = adopt(process.hThread);
+        if let Some(job) = &job {
+            let verified = crate::isolation::win::member(handle(&process_handle), handle(job));
+            if !matches!(verified, Ok(true)) {
+                unsafe {
+                    let _ = TerminateProcess(handle(&process_handle), 1);
+                }
+                bail!("isolation: suspended browser job membership failed: {verified:?}");
+            }
+        }
         if unsafe { ResumeThread(handle(&thread_handle)) } == u32::MAX {
             unsafe {
                 let _ = TerminateProcess(handle(&process_handle), 1);
@@ -219,12 +449,15 @@ impl RawBrowser {
         }
         drop(thread_handle);
         drop((cmd_child, evt_child, frame_child));
+        drop(log_handle);
         Ok(Self {
             command: command.into(),
             event: event.into(),
             frame: frame.into(),
             job,
             process: process_handle,
+            state,
+            desktop_helper,
             pid: process.dwProcessId,
         })
     }
@@ -238,7 +471,13 @@ impl RawBrowser {
     }
     pub fn terminate(&self) {
         unsafe {
-            let _ = TerminateProcess(handle(&self.process), 1);
+            if let Some(job) = &self.job {
+                if !crate::isolation::win::terminate_job(handle(job), 1) {
+                    self.state.cleanup_allowed.store(false, Ordering::Release);
+                }
+            } else {
+                let _ = TerminateProcess(handle(&self.process), 1);
+            }
         }
     }
     pub fn process_handle(&self) -> HANDLE {
@@ -287,7 +526,7 @@ impl RawBrowser {
 }
 impl Drop for RawBrowser {
     fn drop(&mut self) {
-        if self.pid != 0 && !self.wait(Duration::ZERO) {
+        if self.pid != 0 && (self.job.is_some() || !self.wait(Duration::ZERO)) {
             self.terminate();
             let _ = self.wait(DEADLINE);
         }
@@ -332,8 +571,10 @@ struct Session {
     selected_window: u64,
     windows: std::collections::BTreeMap<u64, ww::Window>,
     scenes: std::collections::BTreeMap<u64, ww::Scene>,
-    job: OwnedHandle,
+    job: Option<OwnedHandle>,
     process: OwnedHandle,
+    state: Arc<crate::isolation::state::State>,
+    _desktop_helper: Option<Box<RawBrowser>>,
     frames: crate::browser_frames::Resources,
     pid: u32,
     next_id: u64,
@@ -351,6 +592,9 @@ struct Session {
     last_request: Instant,
     failed: Option<String>,
     shutdown: bool,
+    hardware_required: bool,
+    active_gpu: Option<serde_json::Value>,
+    container_required: bool,
     // Ordered transcript permits acceptance checks to prove event-before-response behavior.
     transcript: VecDeque<(u16, u64)>,
 }
@@ -439,8 +683,10 @@ impl Session {
             selected_window: 0,
             windows: Default::default(),
             scenes: Default::default(),
-            job: raw.job.try_clone()?,
+            job: raw.job.as_ref().map(OwnedHandle::try_clone).transpose()?,
             process,
+            state: raw.state.clone(),
+            _desktop_helper: raw.desktop_helper.take(),
             frames: Default::default(),
             pid: unsafe { GetProcessId(handle(&raw.process)) },
             next_id: 1,
@@ -458,10 +704,59 @@ impl Session {
             last_request: Instant::now(),
             failed: None,
             shutdown: false,
+            hardware_required: false,
+            active_gpu: None,
+            container_required: false,
             transcript: VecDeque::new(),
         };
         // RawBrowser::drop skips termination for a successfully transferred launch.
         Ok(session)
+    }
+    fn verify_container_tree(&self) -> Result<()> {
+        let Some(package) = self.state.package.as_ref() else {
+            return Ok(());
+        };
+        let job = self
+            .job
+            .as_ref()
+            .context("isolation: container missing job")?;
+        let helper_pid = self._desktop_helper.as_ref().map(|h| h.pid);
+        let install = crate::isolation::state::Capability::named("prtsInstallFiles")?;
+        let install_sid = crate::isolation::state::sid_string(install.entry().Sid)?;
+        for pid in crate::isolation::win::processes(handle(job))? {
+            if Some(pid) == helper_pid {
+                continue;
+            } // authenticated, broker-owned fixed-purpose helper
+            let token = match crate::isolation::win::token_evidence(pid) {
+                Ok(v) => v,
+                Err(e)
+                    if e.downcast_ref::<windows::core::Error>()
+                        .is_some_and(|e| e.code() == windows::core::HRESULT::from_win32(87)) =>
+                {
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            let integrity = token["integrity"]
+                .as_str()
+                .and_then(|s| s.rsplit('-').next())
+                .and_then(|s| s.parse::<u32>().ok());
+            ensure!(
+                token["appcontainer"] == true
+                    && token["package_sid"] == *package
+                    && integrity.is_some_and(|v| v <= 4096),
+                "isolation: child token escaped tenant identity/integrity: {token}"
+            );
+            ensure!(
+                token["capabilities"]
+                    .as_array()
+                    .context("capabilities missing")?
+                    .iter()
+                    .all(|v| v["sid"] == "S-1-15-3-1" || v["sid"] == install_sid),
+                "isolation: child gained an unexpected capability: {token}"
+            );
+        }
+        Ok(())
     }
     fn fail<T>(&mut self, message: impl Into<String>) -> Result<T> {
         let mut code = 0;
@@ -474,7 +769,11 @@ impl Session {
         );
         self.failed = Some(message.clone());
         unsafe {
-            let _ = TerminateProcess(handle(&self.process), 1);
+            if let Some(job) = &self.job {
+                let _ = TerminateJobObject(handle(job), 1);
+            } else {
+                let _ = TerminateProcess(handle(&self.process), 1);
+            }
         }
         bail!(message)
     }
@@ -813,7 +1112,11 @@ impl Session {
 }
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = unsafe { TerminateJobObject(handle(&self.job), 0) };
+        if let Some(job) = &self.job
+            && !crate::isolation::win::terminate_job(handle(job), 0)
+        {
+            self.state.cleanup_allowed.store(false, Ordering::Release);
+        }
         // Termination closes peer ends, then CancelSynchronousIo wakes blocked local workers.
         // No reader holds a reference to the session or to the browser process handle.
         if unsafe { WaitForSingleObject(handle(&self.process), 0) } != WAIT_OBJECT_0 {
@@ -848,6 +1151,132 @@ impl Browser {
     }
     pub fn launch_cancellable(executable: impl AsRef<Path>, cancel: &AtomicBool) -> Result<Self> {
         Self::connect_internal(RawBrowser::launch(executable.as_ref())?, Some(cancel))
+    }
+    pub fn launch_isolated(
+        executable: impl AsRef<Path>,
+        cancel: &AtomicBool,
+        isolation: &crate::isolation::Config,
+    ) -> Result<Self> {
+        Self::connect_internal(
+            RawBrowser::launch_isolated(executable.as_ref(), &[], true, isolation)
+                .context("isolation: requested launch failed")?,
+            Some(cancel),
+        )
+    }
+    pub fn isolation_stats(&self) -> Result<serde_json::Value> {
+        let session = self
+            .session
+            .lock()
+            .map_err(|_| anyhow!("Session poisoned"))?;
+        match &session.job {
+            Some(job) => {
+                let mut stats = crate::isolation::win::accounting(handle(job))?;
+                stats["pids"] = serde_json::json!(crate::isolation::win::processes(handle(job))?);
+                stats["browser_pid"] = serde_json::json!(session.pid);
+                stats["state_path"] = serde_json::json!(session.state.path);
+                stats["active_gpu"] = serde_json::json!(session.active_gpu);
+                Ok(stats)
+            }
+            None => Ok(
+                serde_json::json!({"profile":"none","browser_pid":session.pid,"state_path":session.state.path,"active_gpu":session.active_gpu,
+                "pids":crate::isolation::win::descendants(session.pid)?}),
+            ),
+        }
+    }
+    pub fn process_ids(&self) -> Result<Vec<u32>> {
+        let session = self
+            .session
+            .lock()
+            .map_err(|_| anyhow!("Session poisoned"))?;
+        match &session.job {
+            Some(job) => crate::isolation::win::processes(handle(job)),
+            None => crate::isolation::win::descendants(session.pid),
+        }
+    }
+    pub fn state_path(&self) -> std::path::PathBuf {
+        self.session.lock().unwrap().state.path.clone()
+    }
+    pub fn gpu_info(&self) -> Result<serde_json::Value> {
+        let record = self.request(9, Vec::new(), 10)?;
+        Self::decode_gpu_info(record)
+    }
+    fn decode_gpu_info(record: Record) -> Result<serde_json::Value> {
+        let mut d = Decoder::new(&record.payload);
+        let pid = d.u32()?;
+        let vendor = d.u32()?;
+        let device = d.u32()?;
+        let luid = d.u64()?;
+        let hardware = d.u8()? != 0;
+        let swiftshader = d.u8()? != 0;
+        let sandboxed = d.u8()? != 0;
+        let driver = d.string()?;
+        let renderer = d.string()?;
+        let version = d.string()?;
+        let n = d.u32()?;
+        ensure!(n <= 64, "Too many GPU feature statuses");
+        let mut features = Vec::new();
+        for _ in 0..n {
+            features.push(d.u32()?);
+        }
+        d.finish()?;
+        Ok(
+            serde_json::json!({"pid":pid,"vendor":vendor,"device":device,"luid":format!("{luid:016x}"),
+            "hardware":hardware,"swiftshader":swiftshader,"sandboxed":sandboxed,"driver":driver,
+            "renderer":renderer,"version":version,"features":features}),
+        )
+    }
+    pub fn require_hardware_gpu(&self) -> Result<serde_json::Value> {
+        let info = self.gpu_info()?;
+        Self::validate_hardware_gpu(&info)?;
+        Ok(info)
+    }
+    fn validate_hardware_gpu(info: &serde_json::Value) -> Result<()> {
+        let renderer = info["renderer"].as_str().unwrap_or_default().to_lowercase();
+        let luid = crate::d3d::shared()?.lock().unwrap().luid;
+        ensure!(
+            info["hardware"] == true
+                && info["swiftshader"] == false
+                && info["sandboxed"] == true
+                && info["pid"].as_u64().is_some_and(|v| v > 0)
+                && info["vendor"] == 0x8086
+                && info["device"] == 0x9bc5
+                && info["luid"] == format!("{luid:016x}")
+                && renderer.contains("angle")
+                && renderer.contains("direct3d11")
+                && !["swiftshader", "warp", "basic render", "software"]
+                    .iter()
+                    .any(|v| renderer.contains(v))
+                && info["features"][1] == 0
+                && info["features"][6] == 0,
+            "isolation: hardware GPU gate rejected active report: {info}"
+        );
+        Ok(())
+    }
+    /// Production readiness and continuous GPU-generation validation.
+    pub fn enforce_hardware_gpu(&self, cancel: &AtomicBool) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            ensure!(
+                !cancel.load(Ordering::Acquire),
+                "isolation: startup cancelled"
+            );
+            match self.require_hardware_gpu() {
+                Ok(info) => {
+                    let mut session = self
+                        .session
+                        .lock()
+                        .map_err(|_| anyhow!("Session poisoned"))?;
+                    eprintln!("prtsd: qualified active GPU {info}");
+                    session.active_gpu = Some(info);
+                    session.hardware_required = true;
+                    session.verify_container_tree()?;
+                    session.container_required = session.state.package.is_some();
+                    return Ok(());
+                }
+                Err(e) if Instant::now() >= deadline => return Err(e),
+                Err(_) => thread::sleep(Duration::from_millis(100)),
+            }
+        }
     }
     pub fn connect(raw: RawBrowser) -> Result<Self> {
         Self::connect_internal(raw, None)
@@ -941,6 +1370,31 @@ impl Browser {
                     break;
                 };
                 if session.shutdown || session.failed.is_some() {
+                    break;
+                }
+                if session.hardware_required {
+                    let result = session
+                        .request(9, Vec::new(), 10)
+                        .and_then(Browser::decode_gpu_info)
+                        .and_then(|info| {
+                            Browser::validate_hardware_gpu(&info)?;
+                            Ok(info)
+                        });
+                    match result {
+                        Ok(info) => session.active_gpu = Some(info),
+                        Err(e) => {
+                            let _: Result<()> = session
+                                .fail(format!("isolation: active GPU revalidation failed: {e:#}"));
+                            break;
+                        }
+                    }
+                }
+                if session.container_required
+                    && let Err(e) = session.verify_container_tree()
+                {
+                    let _: Result<()> = session.fail(format!(
+                        "isolation: tenant token revalidation failed: {e:#}"
+                    ));
                     break;
                 }
                 if session.last_request.elapsed() >= Duration::from_secs(5) {
@@ -1050,16 +1504,39 @@ impl Browser {
             .map_err(|_| anyhow!("Session poisoned"))?;
         let mut cpu = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
         let mut memory = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        let Some(job) = s.job.as_ref() else {
+            let mut birth = Default::default();
+            let mut exit = Default::default();
+            let mut kernel = windows::Win32::Foundation::FILETIME::default();
+            let mut user = windows::Win32::Foundation::FILETIME::default();
+            unsafe {
+                GetProcessTimes(
+                    handle(&s.process),
+                    &mut birth,
+                    &mut exit,
+                    &mut kernel,
+                    &mut user,
+                )?;
+            }
+            let ticks = |v: windows::Win32::Foundation::FILETIME| {
+                (u64::from(v.dwHighDateTime) << 32) | u64::from(v.dwLowDateTime)
+            };
+            return Ok((
+                (ticks(kernel) + ticks(user)) as f64 / 10_000_000.,
+                0,
+                s.frames.resource_count(),
+            ));
+        };
         unsafe {
             QueryInformationJobObject(
-                Some(handle(&s.job)),
+                Some(handle(job)),
                 JobObjectBasicAccountingInformation,
                 &mut cpu as *mut _ as *mut _,
                 size_of_val(&cpu) as u32,
                 None,
             )?;
             QueryInformationJobObject(
-                Some(handle(&s.job)),
+                Some(handle(job)),
                 JobObjectExtendedLimitInformation,
                 &mut memory as *mut _ as *mut _,
                 size_of_val(&memory) as u32,

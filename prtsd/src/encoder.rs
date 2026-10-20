@@ -187,6 +187,15 @@ impl VideoEncoder for Software {
 pub fn bgra_to_i420(bgra: &[u8], w: usize, h: usize) -> YUVBuffer {
     let ew = (w + 1) & !1;
     let eh = (h + 1) & !1;
+    bgra_to_i420_padded(bgra, w, h, ew, eh)
+}
+pub(crate) fn bgra_to_i420_padded(
+    bgra: &[u8],
+    w: usize,
+    h: usize,
+    ew: usize,
+    eh: usize,
+) -> YUVBuffer {
     let size = ew * eh;
     let mut data = vec![0; size * 3 / 2];
     let clamp = |v: i32| v.clamp(0, 255) as u8;

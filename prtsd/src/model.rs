@@ -102,11 +102,9 @@ impl Size {
             || w > 4096
             || h > 4096
             || w * h > 8_294_400
-            || w % 2 != 0
-            || h % 2 != 0
         {
             return Err(invalid(
-                "software requires even device dimensions, 16..4096 per axis, at most 8294400 device pixels",
+                "device dimensions require 16..4096 per axis, at most 8294400 device pixels",
             ));
         }
         Ok(s)
@@ -126,6 +124,7 @@ pub struct Options {
     pub encoder: String,
     pub bitrate_caps: Caps,
     pub isolation_profile: String,
+    pub job_limits: crate::isolation::JobLimits,
     pub fps: u32,
 }
 #[derive(Clone, Serialize)]
@@ -156,15 +155,28 @@ impl Options {
                 "Encoder must be auto, qsv, or software",
             ));
         }
+        let defaults = crate::isolation::Config::from_env()
+            .map_err(|e| Error::new("isolation_error", format!("{e:#}")))?;
         let profile = v
             .get("isolation_profile")
-            .map_or(Ok("job"), |_| string(v, "isolation_profile"))?;
-        if profile != "job" {
+            .map_or(Ok(defaults.profile.as_str()), |_| {
+                string(v, "isolation_profile")
+            })?;
+        if !crate::isolation::available_profiles().contains(&profile) {
             return Err(Error::new(
-                "unsupported",
-                "Only job policy is supported (synthetic creates no process)",
+                "isolation_error",
+                "Requested isolation profile is unavailable; no downgrade was performed",
             ));
         }
+        let job_limits = v
+            .get("job_limits")
+            .map(|v| serde_json::from_value(v.clone()))
+            .transpose()
+            .map_err(|e| invalid(format!("job_limits: {e}")))?
+            .unwrap_or(defaults.job_limits);
+        job_limits
+            .validate()
+            .map_err(|e| invalid(format!("job_limits: {e}")))?;
         let caps = v.get("bitrate_caps").cloned().unwrap_or(json!({}));
         if !caps.is_object() {
             return Err(invalid("bitrate_caps must be an object"));
@@ -198,6 +210,7 @@ impl Options {
                 max_bps: max,
             },
             isolation_profile: profile.into(),
+            job_limits,
             fps: if v.get("fps").is_some() {
                 integer(v, "fps", 1, 60)? as u32
             } else {

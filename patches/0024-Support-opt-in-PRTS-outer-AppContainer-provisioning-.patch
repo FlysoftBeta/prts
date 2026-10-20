@@ -1,0 +1,264 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Wed, 21 Oct 2026 00:38:02 +0800
+Subject: [PATCH 24/24] Support opt-in PRTS outer AppContainer provisioning and
+ GPU qualification
+
+Preserve paused isolation development: broker-owned state, package-aware child tokens, private desktops, Crashpad naming and active GPU diagnostics. Qualification remains incomplete.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/base/files/file_util_win.cc b/base/files/file_util_win.cc
+index 4b3b7ee07b..99ecfc9eca 100644
+--- a/base/files/file_util_win.cc
++++ b/base/files/file_util_win.cc
+@@ -56,6 +56,7 @@
+ #include "base/time/time.h"
+ #include "base/uuid.h"
+ #include "base/win/scoped_handle.h"
++#include "base/win/access_token.h"
+ #include "base/win/security_util.h"
+ #include "base/win/sid.h"
+ #include "base/win/windows_types.h"
+@@ -757,6 +758,18 @@ bool DirectoryExists(const FilePath& path) {
+ }
+ 
+ bool GetTempDir(FilePath* path) {
++  wchar_t tenant_temp[MAX_PATH + 1] = {};
++  const DWORD tenant_length = ::GetEnvironmentVariableW(
++      L"PRTS_TENANT_TEMP", tenant_temp, std::size(tenant_temp));
++  if (tenant_length > 0 && tenant_length < std::size(tenant_temp)) {
++    const auto token = win::AccessToken::FromCurrentProcess();
++    if (token && token->IsAppContainer()) {
++      // Windows redirects the standard LowBox TEMP variables to package data.
++      // The trusted PRTS launcher provisions this private, low-labelled path.
++      *path = FilePath(tenant_temp).StripTrailingSeparators();
++      return path->IsAbsolute() && DirectoryExists(*path);
++    }
++  }
+   wchar_t temp_path[MAX_PATH + 1];
+   DWORD path_len = ::GetTempPath(MAX_PATH, temp_path);
+   if (path_len >= MAX_PATH || path_len <= 0) {
+@@ -1101,6 +1114,19 @@ FilePath MakeLongFilePath(const FilePath& input) {
+ 
+   DWORD path_long_len = ::GetLongPathName(input.value().c_str(), nullptr, 0);
+   if (path_long_len == 0UL) {
++    // PRTS grants a LowBox access to its own state, without granting directory
++    // listing on the launch user's ancestors. GetLongPathName needs those
++    // ancestor permissions. Resolve the existing object by handle instead;
++    // this still canonicalizes reparse points and never trusts a lexical path
++    // for IsPathSafeToSetAclOn's containment check.
++    if (::GetEnvironmentVariableW(L"PRTS_SANDBOX_DESKTOP", nullptr, 0)) {
++      const auto token = win::AccessToken::FromCurrentProcess();
++      FilePath normalized;
++      if (token && token->IsAppContainer() &&
++          NormalizeFilePath(input, &normalized)) {
++        return normalized;
++      }
++    }
+     return FilePath();
+   }
+ 
+diff --git a/chrome/browser/prts/prts_controller.cc b/chrome/browser/prts/prts_controller.cc
+index 0110212948..504b3c008a 100644
+--- a/chrome/browser/prts/prts_controller.cc
++++ b/chrome/browser/prts/prts_controller.cc
+@@ -12,6 +12,9 @@
+ #include "chrome/browser/prts/prts_target_registry.h"
+ #include "chrome/browser/prts/prts_window_registry.h"
+ #include "content/public/browser/gpu_data_manager.h"
++#include "content/browser/gpu/gpu_data_manager_impl.h"
++#include "content/browser/gpu/gpu_process_host.h"
++#include "gpu/config/gpu_feature_info.h"
+ #include "gpu/config/gpu_info.h"
+ #include "ui/views/widget/desktop_aura/desktop_headless_input.h"
+ 
+@@ -244,6 +247,38 @@ void PrtsController::Receive(Record record) {
+     }
+     return;
+   }
++  if (record.type == 9) {
++    if (!d.Done()) {
++      Failed();
++      return;
++    }
++    // Report active info. The hardware-only cache can still describe Intel
++    // when the actual renderer has fallen back to SwiftShader or WARP.
++    auto* manager = content::GpuDataManagerImpl::GetInstance();
++    const auto info = manager->GetGPUInfo();
++    const auto& active = info.active_gpu();
++    const auto* host = content::GpuProcessHost::Get(
++        content::GPU_PROCESS_KIND_SANDBOXED, false);
++    Encoder result;
++    result.Int(host ? host->process_id() : 0, 4);
++    result.Int(active.vendor_id, 4);
++    result.Int(active.device_id, 4);
++    result.Int((static_cast<uint64_t>(static_cast<uint32_t>(active.luid.HighPart))
++                << 32) | active.luid.LowPart, 8);
++    result.Int(manager->HardwareAccelerationEnabled(), 1);
++    result.Int(info.UsesSwiftShader(), 1);
++    result.Int(info.sandboxed, 1);
++    result.String(active.driver_version);
++    result.String(info.gl_renderer);
++    result.String(info.gl_version);
++    const auto features = manager->GetGpuFeatureInfo();
++    result.Int(features.status_values.size(), 4);
++    for (const auto status : features.status_values) {
++      result.Int(status, 4);
++    }
++    Send(10, record.id, std::move(result.data));
++    return;
++  }
+   if (major_ == 2 && record.type >= 0x400 && record.type <= 0x42f) {
+     windows_->Handle(record);
+     return;
+diff --git a/sandbox/policy/sandbox.cc b/sandbox/policy/sandbox.cc
+index 1ba20dade5..9ed224fd3d 100644
+--- a/sandbox/policy/sandbox.cc
++++ b/sandbox/policy/sandbox.cc
+@@ -68,7 +68,8 @@ bool Sandbox::Initialize(sandbox::mojom::Sandbox sandbox_type,
+           Desktop::kAlternateWinstation);
+       // This failure is usually caused by third-party software or by the host
+       // system exhausting its desktop heap.
+-      CHECK(result == SBOX_ALL_OK);
++      CHECK(result == SBOX_ALL_OK) << "alternate desktop result=" << result
++                                   << " win32=" << ::GetLastError();
+     }
+     return true;
+   }
+diff --git a/sandbox/policy/win/sandbox_win.cc b/sandbox/policy/win/sandbox_win.cc
+index b6eccdade4..fb635ed9ad 100644
+--- a/sandbox/policy/win/sandbox_win.cc
++++ b/sandbox/policy/win/sandbox_win.cc
+@@ -46,6 +46,7 @@
+ #include "base/time/time.h"
+ #include "base/trace_event/trace_event.h"
+ #include "base/win/iat_patch_function.h"
++#include "base/win/access_token.h"
+ #include "base/win/scoped_handle.h"
+ #include "base/win/scoped_process_information.h"
+ #include "base/win/security_util.h"
+@@ -815,6 +816,16 @@ ResultCode SandboxWin::AddAppContainerProfileToConfig(
+ bool SandboxWin::IsAppContainerEnabledForSandbox(
+     const base::CommandLine& command_line,
+     Sandbox sandbox_type) {
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("prts-pipe")) {
++    const auto token = base::win::AccessToken::FromCurrentProcess();
++    if (token && token->IsAppContainer()) {
++      // Restricted child tokens must retain the unique outer tenant package.
++      // Creating Chromium's ordinary shared service profiles from a LowBox
++      // broker is denied and would replace that identity. Keep the existing
++      // token/job/mitigation policies and inherit the outer package instead.
++      return false;
++    }
++  }
+   if (!sandbox::features::IsAppContainerSandboxSupported())
+     return false;
+ 
+@@ -1014,7 +1025,8 @@ void SandboxWin::FinishStartSandboxedProcess(
+     if (result == SBOX_ERROR_GENERIC) {
+       DPLOG(ERROR) << "Failed to launch process";
+     } else {
+-      DLOG(ERROR) << "Failed to launch process. Error: " << result;
++      DLOG(ERROR) << "Failed to launch process. Error: " << result
++                  << " win32=" << last_error;
+     }
+     std::move(result_callback).Run(base::Process(), last_error, result);
+     return;
+diff --git a/sandbox/win/src/alternate_desktop.cc b/sandbox/win/src/alternate_desktop.cc
+index f6017becb0..47d0dd47b8 100644
+--- a/sandbox/win/src/alternate_desktop.cc
++++ b/sandbox/win/src/alternate_desktop.cc
+@@ -7,6 +7,8 @@
+ #include <windows.h>
+ 
+ #include "base/win/win_util.h"
++#include "base/win/access_token.h"
++#include "base/command_line.h"
+ #include "sandbox/win/src/acl.h"
+ #include "sandbox/win/src/window.h"
+ 
+@@ -48,6 +50,27 @@ ResultCode AlternateDesktop::UpdateDesktopIntegrity(
+ // true.
+ ResultCode AlternateDesktop::Initialize(bool alternate_winstation) {
+   DCHECK(!desktop_ && !winstation_);
++  // An AppContainer cannot create USER desktops/window stations. PRTS's
++  // fixed-purpose broker helper provisions this private sandbox desktop;
++  // the browser remains on its original desktop for GPU initialization.
++  // Do not apply this opt-in to normal Chromium or a non-AppContainer token.
++  wchar_t provisioned[256] = {};
++  const DWORD length = GetEnvironmentVariableW(
++      L"PRTS_SANDBOX_DESKTOP", provisioned, std::size(provisioned));
++  const auto token = base::win::AccessToken::FromCurrentProcess();
++  if (alternate_winstation && length > 0 && length < std::size(provisioned) &&
++      base::CommandLine::ForCurrentProcess()->HasSwitch("prts-pipe") &&
++      token && token->IsAppContainer()) {
++    std::wstring name(provisioned);
++    if (!name.starts_with(L"prts.") || !name.ends_with(L".chromium_sandbox") ||
++        name.find(L'\\') != std::wstring::npos) {
++      return SBOX_ERROR_CANNOT_CREATE_DESKTOP;
++    }
++    desktop_ = OpenDesktopW(name.c_str(), 0, FALSE,
++                           DESKTOP_CREATEWINDOW | DESKTOP_READOBJECTS |
++                               READ_CONTROL | WRITE_DAC | WRITE_OWNER);
++    return desktop_ ? SBOX_ALL_OK : SBOX_ERROR_CANNOT_CREATE_DESKTOP;
++  }
+   if (alternate_winstation) {
+     // Create the window station.
+     ResultCode result = CreateAltWindowStation(&winstation_);
+diff --git a/sandbox/win/src/broker_services.cc b/sandbox/win/src/broker_services.cc
+index 1787c7f774..99d1884bb5 100644
+--- a/sandbox/win/src/broker_services.cc
++++ b/sandbox/win/src/broker_services.cc
+@@ -329,7 +329,9 @@ std::wstring CreateFilteredEnvironment() {
+                                                   L"TEMP",
+                                                   L"TMP",
+                                                   L"LOCALAPPDATA",
+-                                                  L"CHROME_CRASHPAD_PIPE_NAME"};
++                                                  L"CHROME_CRASHPAD_PIPE_NAME",
++                                                  L"PRTS_TENANT_TEMP",
++                                                  L"PRTS_SANDBOX_DESKTOP"};
+ 
+   std::wstring new_env = FilterEnvironment(old_environment, to_keep);
+   ::FreeEnvironmentStringsW(old_environment);
+diff --git a/third_party/crashpad/crashpad/client/crashpad_client_win.cc b/third_party/crashpad/crashpad/client/crashpad_client_win.cc
+index 3b4b34b5a6..fc5e6aa0dd 100644
+--- a/third_party/crashpad/crashpad/client/crashpad_client_win.cc
++++ b/third_party/crashpad/crashpad/client/crashpad_client_win.cc
+@@ -303,6 +303,23 @@ void AddUint64(std::vector<unsigned char>* data_vector, uint64_t data) {
+ //! \param[out] pipe_handle The first pipe instance corresponding for the pipe.
+ void CreatePipe(std::wstring* pipe_name, ScopedFileHANDLE* pipe_instance) {
+   int tries = 5;
++  // PRTS runs the browser itself in an AppContainer. Windows only permits
++  // named pipes below LOCAL there; the ordinary desktop Crashpad name is
++  // denied before Chromium's sandbox broker has even initialized.
++  bool prts_appcontainer = false;
++  if (wcsstr(GetCommandLineW(), L"--prts-pipe=") ||
++      GetEnvironmentVariableW(L"PRTS_SANDBOX_DESKTOP", nullptr, 0)) {
++    HANDLE token = nullptr;
++    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
++      DWORD is_appcontainer = 0;
++      DWORD size = 0;
++      prts_appcontainer =
++          GetTokenInformation(token, TokenIsAppContainer, &is_appcontainer,
++                              sizeof(is_appcontainer), &size) &&
++          is_appcontainer;
++      CloseHandle(token);
++    }
++  }
+   std::string pipe_name_base = base::StringPrintf(
+ #if defined(WINDOWS_UWP)
+       "\\\\.\\pipe\\LOCAL\\crashpad_%lu_",
+@@ -310,6 +327,12 @@ void CreatePipe(std::wstring* pipe_name, ScopedFileHANDLE* pipe_instance) {
+       "\\\\.\\pipe\\crashpad_%lu_",
+ #endif
+       GetCurrentProcessId());
++#if !defined(WINDOWS_UWP)
++  if (prts_appcontainer) {
++    pipe_name_base = base::StringPrintf("\\\\.\\pipe\\LOCAL\\crashpad_%lu_",
++                                      GetCurrentProcessId());
++  }
++#endif
+   do {
+     *pipe_name = base::UTF8ToWide(pipe_name_base + RandomString());
+ 

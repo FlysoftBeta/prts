@@ -8,6 +8,7 @@ pub mod d3d;
 pub mod daemon;
 pub mod encoder;
 pub mod frame_source;
+pub mod isolation;
 #[cfg(windows)]
 pub mod mf_encoder;
 pub mod model;
