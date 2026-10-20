@@ -1,0 +1,580 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 14:48:35 +0800
+Subject: [PATCH 20/38] WIP: add isolated PRTS v2 window registry and version
+ negotiation
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_controller.cc b/chrome/browser/prts/prts_controller.cc
+index bff86e591e..509b40adad 100644
+--- a/chrome/browser/prts/prts_controller.cc
++++ b/chrome/browser/prts/prts_controller.cc
+@@ -9,6 +9,7 @@
+ #include "base/task/single_thread_task_runner.h"
+ #include "chrome/browser/lifetime/application_lifetime.h"
+ #include "chrome/browser/prts/prts_target_registry.h"
++#include "chrome/browser/prts/prts_window_registry.h"
+ #include "content/public/browser/gpu_data_manager.h"
+ #include "gpu/config/gpu_info.h"
+ 
+@@ -44,6 +45,7 @@ void PrtsController::Stop() {
+   timer_.Stop();
+   weak_factory_.InvalidateWeakPtrs();
+   pipe_.Stop();
++  windows_.reset();
+   if (targets_) {
+     targets_->Stop();
+     targets_.reset();
+@@ -114,6 +116,10 @@ void PrtsController::Receive(Record record) {
+   if (stopping_) {
+     return;
+   }
++  if (record.major != (ready_ ? major_ : 1)) {
++    Failed();
++    return;
++  }
+   last_received_ = base::TimeTicks::Now();
+   // Requests use odd, strictly increasing IDs. Input and FAULT notifications
+   // use zero; no frame-resource responses are accepted yet.
+@@ -129,7 +135,11 @@ void PrtsController::Receive(Record record) {
+   }
+   if (ready_ && record.type >= 0x200 && record.type <= 0x207 &&
+       record.id == 0) {
+-    targets_->Input(record.type, record.payload);
++    if (major_ == 2) {
++      Error(0, 4, "Window input is not enabled");
++    } else {
++      targets_->Input(record.type, record.payload);
++    }
+     return;
+   }
+   if (ready_ && (((record.type == 7 || record.type == 3) && !(record.id & 1)) ||
+@@ -165,7 +175,8 @@ void PrtsController::Receive(Record record) {
+     if (parent != daemon_pid) {
+       LOG(WARNING) << "PRTS HELLO PID differs from parent " << parent;
+     }
+-    if (min_major > 1 || (min_major == 1 && min_minor > 0) || max_major < 1 ||
++    major_ = max_major >= 2 ? 2 : 1;
++    if (min_major > major_ || (min_major == major_ && min_minor > 0) || max_major < 1 ||
+         (max_major == min_major && max_minor < min_minor)) {
+       Encoder error;
+       error.Int(3, 4);
+@@ -202,7 +213,7 @@ void PrtsController::Receive(Record record) {
+               << " device=" << active.device_id << " luid=" << browser_luid
+               << " hardware=" << hardware << " texture_mode=" << gpu;
+     Encoder ack;
+-    ack.Int(1, 2);
++    ack.Int(major_, 2);
+     ack.Int(0, 2);
+     ack.Int(base::GetCurrentProcId(), 4);
+     ack.Int(gpu ? luid : 0, 8);
+@@ -219,6 +230,21 @@ void PrtsController::Receive(Record record) {
+     }
+     targets_->SetFrameLimit(inflight);
+     ready_ = true;
++    pipe_.SetVersion(major_);
++    if (major_ == 2) {
++      targets_->SetWindowMode();
++      windows_ = std::make_unique<PrtsWindowRegistry>(
++          base::BindRepeating(&PrtsController::Send, weak_factory_.GetWeakPtr()));
++      windows_->Start();
++    }
++    return;
++  }
++  if (major_ == 2 && record.type >= 0x400 && record.type <= 0x423) {
++    windows_->Handle(record);
++    return;
++  }
++  if (major_ == 2 && record.type >= 0x100) {
++    Error(record.id, 4, "Unsupported v2 operation");
+     return;
+   }
+   if (record.type >= 0x100 && record.type <= 0x105) {
+diff --git a/chrome/browser/prts/prts_controller.h b/chrome/browser/prts/prts_controller.h
+index 74af34471d..c268f83c42 100644
+--- a/chrome/browser/prts/prts_controller.h
++++ b/chrome/browser/prts/prts_controller.h
+@@ -11,6 +11,7 @@
+ #include "chrome/browser/prts/prts_pipe_client_win.h"
+ 
+ class PrtsTargetRegistry;
++class PrtsWindowRegistry;
+ namespace prts {
+ class PrtsController {
+  public:
+@@ -26,6 +27,7 @@ class PrtsController {
+   void Error(uint64_t id, uint32_t code, const std::string& message);
+   void Failed();
+   void Tick();
++  uint16_t major_ = 1;
+   bool ready_ = false;
+   bool stopping_ = false;
+   uint64_t last_request_ = 0;
+@@ -34,6 +36,7 @@ class PrtsController {
+   base::RepeatingTimer timer_;
+   PrtsPipeClient pipe_;
+   std::unique_ptr<PrtsTargetRegistry> targets_;
++  std::unique_ptr<PrtsWindowRegistry> windows_;
+   base::WeakPtrFactory<PrtsController> weak_factory_{this};
+ };
+ }  // namespace prts
+diff --git a/chrome/browser/prts/prts_pipe_client_win.cc b/chrome/browser/prts/prts_pipe_client_win.cc
+index fc75b2e782..415fc30540 100644
+--- a/chrome/browser/prts/prts_pipe_client_win.cc
++++ b/chrome/browser/prts/prts_pipe_client_win.cc
+@@ -118,6 +118,7 @@ struct PrtsPipeClient::State {
+         writer("PrtsWrite") {}
+   std::array<base::win::ScopedHandle, 3> handles;
+   std::atomic_bool stopped{false};
++  uint16_t major = 1;
+   base::Lock lock;
+   std::deque<Pending> outgoing;
+   size_t outgoing_bytes = 0;
+@@ -149,10 +150,15 @@ struct PrtsPipeClient::State {
+         break;
+       }
+       Decoder d(bytes);
+-      if (d.Int(4) != 0x53545250 || d.Int(2) != 1 || d.Int(2) != 0) {
++      if (d.Int(4) != 0x53545250) {
++        break;
++      }
++      auto major = d.Int(2);
++      if ((major != 1 && major != 2) || d.Int(2) != 0) {
+         break;
+       }
+       Record record;
++      record.major = major;
+       record.type = d.Int(2);
+       if (d.Int(2) != 0) {
+         break;
+@@ -260,7 +266,7 @@ bool PrtsPipeClient::Send(uint16_t type,
+   if (!state_ || state_->stopped.load() || payload.size() > kMaxRecord - 20) {
+     return false;
+   }
+-  auto bytes = Encode(type, id, std::move(payload));
++  auto bytes = Encode(type, id, std::move(payload), state_->major);
+   {
+     base::AutoLock hold(state_->lock);
+     if (state_->outgoing_count >= 1024 ||
+@@ -277,6 +283,9 @@ bool PrtsPipeClient::Send(uint16_t type,
+   state_->wake.Signal();
+   return true;
+ }
++void PrtsPipeClient::SetVersion(uint16_t major) {
++  state_->major = major;
++}
+ bool PrtsPipeClient::Stalled() const {
+   if (!state_) {
+     return false;
+diff --git a/chrome/browser/prts/prts_pipe_client_win.h b/chrome/browser/prts/prts_pipe_client_win.h
+index b22f9b2f49..32a3dc710e 100644
+--- a/chrome/browser/prts/prts_pipe_client_win.h
++++ b/chrome/browser/prts/prts_pipe_client_win.h
+@@ -24,6 +24,7 @@ class PrtsPipeClient {
+             uint64_t id,
+             std::vector<uint8_t> payload,
+             base::OnceClosure written = {});
++  void SetVersion(uint16_t major);
+   bool Stalled() const;
+   void Stop();
+ 
+diff --git a/chrome/browser/prts/prts_protocol.h b/chrome/browser/prts/prts_protocol.h
+index 2fb2ba54ba..08d94562f1 100644
+--- a/chrome/browser/prts/prts_protocol.h
++++ b/chrome/browser/prts/prts_protocol.h
+@@ -15,6 +15,7 @@
+ namespace prts {
+ constexpr uint32_t kMaxRecord = 1048576;
+ struct Record {
++  uint16_t major = 1;
+   uint16_t type = 0;
+   uint64_t id = 0;
+   std::vector<uint8_t> payload;
+@@ -67,11 +68,12 @@ class Decoder {
+ };
+ inline std::vector<uint8_t> Encode(uint16_t type,
+                                    uint64_t id,
+-                                   std::vector<uint8_t> payload) {
++                                   std::vector<uint8_t> payload,
++                                   uint16_t major = 1) {
+   Encoder e;
+   e.Int(20 + payload.size(), 4);
+   e.Int(0x53545250, 4);
+-  e.Int(1, 2);
++  e.Int(major, 2);
+   e.Int(0, 2);
+   e.Int(type, 2);
+   e.Int(0, 2);
+diff --git a/chrome/browser/prts/prts_sources.gni b/chrome/browser/prts/prts_sources.gni
+index cf62fd9559..ce541aacd8 100644
+--- a/chrome/browser/prts/prts_sources.gni
++++ b/chrome/browser/prts/prts_sources.gni
+@@ -11,4 +11,6 @@ prts_browser_sources = [
+   "//chrome/browser/prts/prts_input.h",
+   "//chrome/browser/prts/prts_target_registry.cc",
+   "//chrome/browser/prts/prts_target_registry.h",
++  "//chrome/browser/prts/prts_window_registry.cc",
++  "//chrome/browser/prts/prts_window_registry.h",
+ ]
+diff --git a/chrome/browser/prts/prts_target_registry.cc b/chrome/browser/prts/prts_target_registry.cc
+index d5299f6250..84615cebf9 100644
+--- a/chrome/browser/prts/prts_target_registry.cc
++++ b/chrome/browser/prts/prts_target_registry.cc
+@@ -401,6 +401,7 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+     started_ = true;
+   }
+ 
++  void SetWindowMode() { started_ = false; }
+   void Stop() {
+     if (!keep_alive_) {
+       return;
+@@ -852,6 +853,7 @@ void PrtsTargetRegistry::Prepare() {
+ void PrtsTargetRegistry::Start() {
+   impl_->Start();
+ }
++void PrtsTargetRegistry::SetWindowMode() { impl_->SetWindowMode(); }
+ void PrtsTargetRegistry::Stop() {
+   impl_->Stop();
+ }
+diff --git a/chrome/browser/prts/prts_target_registry.h b/chrome/browser/prts/prts_target_registry.h
+index ec01ea124a..52ebe8d119 100644
+--- a/chrome/browser/prts/prts_target_registry.h
++++ b/chrome/browser/prts/prts_target_registry.h
+@@ -32,6 +32,7 @@ class PrtsTargetRegistry {
+               uint64_t request_id,
+               const std::vector<uint8_t>& payload);
+   void Stop();
++  void SetWindowMode();
+   bool Frame(const prts::Record& record);
+   void SetFrameLimit(uint32_t limit);
+   bool EnableGpuFrames(uint64_t luid);
+diff --git a/chrome/browser/prts/prts_window_registry.cc b/chrome/browser/prts/prts_window_registry.cc
+new file mode 100644
+index 0000000000..58fea8b1a8
+--- /dev/null
++++ b/chrome/browser/prts/prts_window_registry.cc
+@@ -0,0 +1,296 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/prts/prts_window_registry.h"
++
++#include <bit>
++#include <cmath>
++#include <map>
++#include <set>
++#include <utility>
++#include "base/functional/bind.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/scoped_observation.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/single_thread_task_runner.h"
++#include "chrome/browser/profiles/profile.h"
++#include "chrome/browser/profiles/profile_manager.h"
++#include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
++#include "chrome/browser/ui/browser_window/public/create_browser_window.h"
++#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
++#include "chrome/browser/ui/navigator/browser_navigator.h"
++#include "chrome/browser/ui/navigator/browser_navigator_params.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
++#include "content/public/browser/navigation_controller.h"
++#include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "ui/base/base_window.h"
++#include "ui/base/page_transition_types.h"
++#include "ui/base/window_open_disposition.h"
++#include "url/gurl.h"
++
++class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
++                                 public TabStripModelObserver {
++ public:
++  explicit Impl(PrtsTargetRegistry::SendCallback send) : send_(std::move(send)) {}
++  ~Impl() override {
++    observation_.Reset();
++    for (const auto& [id, w] : windows_) {
++      w.browser->GetTabStripModel()->RemoveObserver(this);
++    }
++  }
++  struct Size {
++    uint32_t width = 960, height = 640;
++    double dpr = 1;
++  };
++  struct Window {
++    uint64_t id, source;
++    raw_ptr<BrowserWindowInterface> browser;
++    Size size;
++    uint64_t generation = 1;
++    bool announced = false, closing = false;
++  };
++  class Tab : public content::WebContentsObserver {
++   public:
++    Tab(Impl* owner, content::WebContents* contents, uint64_t id)
++        : WebContentsObserver(contents), owner(owner), id(id) {}
++    void DidStartLoading() override { owner->Schedule(); }
++    void DidStopLoading() override { owner->Schedule(); }
++    void TitleWasSet(content::NavigationEntry*) override { owner->Schedule(); }
++    void DidFinishNavigation(content::NavigationHandle*) override {
++      owner->Schedule();
++    }
++    void WebContentsDestroyed() override {
++      Observe(nullptr);
++      owner->Schedule();
++    }
++    raw_ptr<Impl> owner;
++    const uint64_t id;
++    uint64_t opener = 0;
++  };
++  void Start() {
++    observation_.Observe(GlobalBrowserCollection::GetInstance());
++    prts::Encoder e;
++    for (uint32_t v : {2u, 0u, 256u, 2u}) e.Int(v, 4);
++    e.Int(512ull * 1024 * 1024, 8);
++    e.Int(512ull * 1024 * 1024, 8);
++    e.Int(1, 4); e.Int(1, 4);
++    send_.Run(0x494, 0, std::move(e.data));
++    GlobalBrowserCollection::GetInstance()->ForEach([this](auto* browser) {
++      OnBrowserCreated(browser);
++      return true;
++    });
++  }
++  void Error(uint64_t request, uint32_t code, const char* message) {
++    prts::Encoder e;
++    e.Int(code, 4); e.String(message); e.Int(0, 1);
++    send_.Run(3, request, std::move(e.data));
++  }
++  void Schedule() {
++    if (pending_) return;
++    pending_ = true;
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&Impl::Reconcile, weak_.GetWeakPtr()));
++  }
++  Tab* Find(content::WebContents* contents) {
++    for (auto& [id, t] : tabs_) if (t->web_contents() == contents) return t.get();
++    return nullptr;
++  }
++  Tab* Track(content::WebContents* contents) {
++    if (auto* t = Find(contents)) return t;
++    auto t = std::make_unique<Tab>(this, contents, ++next_);
++    if (auto* opener = Find(contents->GetFirstWebContentsInLiveOriginalOpenerChain()))
++      t->opener = opener->id;
++    auto* result = t.get();
++    tabs_.emplace(t->id, std::move(t));
++    return result;
++  }
++  void TabSnapshot(prts::Encoder& e, Window& w, content::WebContents* contents) {
++    auto* t = Track(contents);
++    e.Int(t->id, 8); e.Int(w.id, 8); e.Int(t->opener, 8);
++    e.String(base::TruncateUTF8ToByteSize(contents->GetVisibleURL().spec(), 65536));
++    e.String(base::TruncateUTF8ToByteSize(base::UTF16ToUTF8(contents->GetTitle()), 65536));
++    e.Int(contents->IsLoading() ? 1 : 2, 1);
++    e.Int(w.browser->GetTabStripModel()->GetActiveWebContents() == contents, 1);
++  }
++  std::vector<uint8_t> Snapshot(Window& w) {
++    auto* strip = w.browser->GetTabStripModel();
++    prts::Encoder e;
++    e.Int(w.id, 8);
++    e.Int(w.browser->GetType() == BrowserWindowInterface::TYPE_NORMAL ? 1 : 2, 1);
++    e.Int(0, 8);
++    e.Int(w.size.width, 4); e.Int(w.size.height, 4);
++    e.Int(std::bit_cast<uint64_t>(w.size.dpr), 8);
++    e.Int(w.generation, 8);
++    auto* active = strip->GetActiveWebContents();
++    e.Int(active ? Track(active)->id : 0, 8);
++    e.Int(input_ == w.id, 1); e.Int(w.closing, 1);
++    e.Int(strip->count(), 4);
++    for (int i = 0; i < strip->count(); ++i) TabSnapshot(e, w, strip->GetWebContentsAt(i));
++    return std::move(e.data);
++  }
++  void Publish(Window& w) {
++    auto bytes = Snapshot(w);
++    auto it = snapshots_.find(w.id);
++    if (!w.announced || it == snapshots_.end() || it->second != bytes) {
++      snapshots_[w.id] = bytes;
++      send_.Run(w.announced ? 0x491 : 0x490, 0, std::move(bytes));
++      w.announced = true;
++    }
++  }
++  void Reconcile() {
++    pending_ = false;
++    if (mutating_) { Schedule(); return; }
++    for (auto it = tabs_.begin(); it != tabs_.end();) {
++      if (!it->second->web_contents()) it = tabs_.erase(it);
++      else ++it;
++    }
++    for (auto& [id, w] : windows_) Publish(w);
++  }
++  void OnBrowserCreated(BrowserWindowInterface* browser) override {
++    for (const auto& [id, w] : windows_) if (w.browser == browser) return;
++    uint64_t id = ++next_, source = ++next_;
++    windows_.emplace(id, Window{id, source, browser, {}});
++    browser->GetTabStripModel()->AddObserver(this);
++    Schedule();
++  }
++  void OnBrowserClosed(BrowserWindowInterface* browser) override {
++    for (auto it = windows_.begin(); it != windows_.end(); ++it) {
++      if (it->second.browser != browser) continue;
++      browser->GetTabStripModel()->RemoveObserver(this);
++      auto id = it->first;
++      bool announced = it->second.announced;
++      windows_.erase(it); snapshots_.erase(id);
++      if (input_ == id) input_ = 0;
++      if (announced) {
++        prts::Encoder e; e.Int(id, 8); e.String("closed");
++        send_.Run(0x492, 0, std::move(e.data));
++      }
++      return;
++    }
++  }
++  void OnTabStripModelChanged(TabStripModel*, const TabStripModelChange& change,
++                             const TabStripSelectionChange&) override {
++    if (change.type() == TabStripModelChange::kReplaced) {
++      auto* r = change.GetReplace();
++      if (auto* t = Find(r->old_contents)) t->Observe(r->new_contents);
++    }
++    Schedule();
++  }
++  bool ReadSize(prts::Decoder& d, Size& size) {
++    size.width = d.Int(4); size.height = d.Int(4);
++    size.dpr = std::bit_cast<double>(d.Int(8));
++    return size.width && size.width <= 8192 && size.height && size.height <= 8192 &&
++      std::isfinite(size.dpr) && size.dpr >= .5 && size.dpr <= 4 &&
++      std::ceil(size.width * size.dpr) * std::ceil(size.height * size.dpr) <= 64000000;
++  }
++  void Handle(const prts::Record& r) {
++    prts::Decoder d(r.payload);
++    if (r.type == 0x402) {
++      if (!d.Done()) { Error(r.id, 1, "Invalid window list"); return; }
++      Reconcile();
++      prts::Encoder e; e.Int(windows_.size(), 4);
++      for (auto& [id, w] : windows_) {
++        auto bytes = Snapshot(w); e.data.insert(e.data.end(), bytes.begin(), bytes.end());
++      }
++      send_.Run(0x481, r.id, std::move(e.data)); return;
++    }
++    if (r.type == 0x400) {
++      auto url = d.String(); Size size;
++      bool valid = ReadSize(d, size); auto activate = d.Int(1);
++      if (!valid || activate > 1 || !d.Done() || !GURL(url).is_valid() || url.find('\0') != std::string::npos) {
++        Error(r.id, 1, "Invalid window create"); return;
++      }
++      if (windows_.size() >= 2) { Error(r.id, 5, "Window capacity"); return; }
++      mutating_ = true;
++      BrowserWindowCreateParams create(BrowserWindowInterface::TYPE_NORMAL,
++                                      *ProfileManager::GetLastUsedProfile(), false);
++      auto* browser = CreateBrowserWindow(std::move(create));
++      NavigateParams params(browser, GURL(url), ui::PAGE_TRANSITION_TYPED);
++      params.disposition = WindowOpenDisposition::NEW_FOREGROUND_TAB;
++      params.window_action = NavigateParams::WindowAction::kShowWindowInactive;
++      Navigate(&params);
++      OnBrowserCreated(browser);
++      mutating_ = false;
++      for (auto& [id, w] : windows_) if (w.browser == browser) {
++        w.size = size;
++        if (activate) input_ = id;
++        Reconcile(); send_.Run(0x480, r.id, Snapshot(w)); return;
++      }
++      Error(r.id, 9, "Window creation failed"); return;
++    }
++    auto id = d.Int(8);
++    if (r.type >= 0x420 && r.type <= 0x423) {
++      std::string url;
++      auto activate = uint64_t{0};
++      if (r.type == 0x420 || r.type == 0x423) url = d.String();
++      if (r.type == 0x420) activate = d.Int(1);
++      if (!d.Done() || activate > 1 ||
++          ((r.type == 0x420 || r.type == 0x423) && (!GURL(url).is_valid() || url.find('\0') != std::string::npos))) {
++        Error(r.id, 1, "Invalid tab command"); return;
++      }
++      Window* owner = nullptr; Tab* tab = nullptr;
++      if (r.type == 0x420) {
++        auto it = windows_.find(id);
++        if (it != windows_.end()) owner = &it->second;
++      } else {
++        auto it = tabs_.find(id);
++        if (it != tabs_.end() && it->second->web_contents()) {
++          tab = it->second.get();
++          auto* browser = GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(tab->web_contents());
++          for (auto& [wid, w] : windows_) if (w.browser == browser) owner = &w;
++        }
++      }
++      if (!owner || owner->closing) { Error(r.id, 2, "Unknown or unavailable tab/window"); return; }
++      auto* strip = owner->browser->GetTabStripModel();
++      if (r.type == 0x420) {
++        if (tabs_.size() >= 256) { Error(r.id, 5, "Tab capacity"); return; }
++        NavigateParams params(owner->browser, GURL(url), ui::PAGE_TRANSITION_TYPED);
++        params.disposition = activate ? WindowOpenDisposition::NEW_FOREGROUND_TAB : WindowOpenDisposition::NEW_BACKGROUND_TAB;
++        Navigate(&params);
++        if (!params.navigated_or_inserted_contents) { Error(r.id, 9, "Tab creation failed"); return; }
++        tab = Track(params.navigated_or_inserted_contents);
++      } else if (r.type == 0x421) {
++        strip->CloseWebContents(tab->web_contents(), 0);
++        Reconcile(); send_.Run(7, r.id, {}); return;
++      } else if (r.type == 0x422) {
++        strip->ActivateTabAt(strip->GetIndexOfWebContents(tab->web_contents()));
++      } else {
++        tab->web_contents()->GetController().LoadURL(GURL(url), content::Referrer(), ui::PAGE_TRANSITION_TYPED, "");
++        Reconcile(); send_.Run(7, r.id, {}); return;
++      }
++      Reconcile(); prts::Encoder e; TabSnapshot(e, *owner, tab->web_contents());
++      send_.Run(0x482, r.id, std::move(e.data)); return;
++    }
++    if (!d.Done() || (r.type != 0x401 && r.type != 0x404)) {
++      Error(r.id, 1, "Unsupported or malformed window command"); return;
++    }
++    auto it = windows_.find(id);
++    if (it == windows_.end()) { Error(r.id, 2, "Unknown window"); return; }
++    auto& w = it->second;
++    if (r.type == 0x401) {
++      w.closing = true; Publish(w);
++      auto* browser = w.browser.get();
++      send_.Run(7, r.id, {});
++      browser->GetWindow()->Close(); return;
++    }
++    input_ = id; Reconcile(); send_.Run(0x480, r.id, Snapshot(w));
++  }
++ private:
++  PrtsTargetRegistry::SendCallback send_;
++  uint64_t next_ = 0, input_ = 0;
++  bool pending_ = false, mutating_ = false;
++  std::map<uint64_t, Window> windows_;
++  std::map<uint64_t, std::unique_ptr<Tab>> tabs_;
++  std::map<uint64_t, std::vector<uint8_t>> snapshots_;
++  base::ScopedObservation<GlobalBrowserCollection, BrowserCollectionObserver> observation_{this};
++  base::WeakPtrFactory<Impl> weak_{this};
++};
++PrtsWindowRegistry::PrtsWindowRegistry(PrtsTargetRegistry::SendCallback send)
++    : impl_(std::make_unique<Impl>(std::move(send))) {}
++PrtsWindowRegistry::~PrtsWindowRegistry() = default;
++void PrtsWindowRegistry::Start() { impl_->Start(); }
++void PrtsWindowRegistry::Handle(const prts::Record& record) { impl_->Handle(record); }
+diff --git a/chrome/browser/prts/prts_window_registry.h b/chrome/browser/prts/prts_window_registry.h
+new file mode 100644
+index 0000000000..4eace291c4
+--- /dev/null
++++ b/chrome/browser/prts/prts_window_registry.h
+@@ -0,0 +1,21 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_PRTS_PRTS_WINDOW_REGISTRY_H_
++#define CHROME_BROWSER_PRTS_PRTS_WINDOW_REGISTRY_H_
++#include <memory>
++#include "chrome/browser/prts/prts_target_registry.h"
++
++// UI sequence only. Browser, logical tab and root source identities share one
++// allocator; native pointers are never exposed as protocol identities.
++class PrtsWindowRegistry {
++ public:
++  explicit PrtsWindowRegistry(PrtsTargetRegistry::SendCallback send);
++  ~PrtsWindowRegistry();
++  void Start();
++  void Handle(const prts::Record& record);
++ private:
++  class Impl;
++  std::unique_ptr<Impl> impl_;
++};
++#endif

@@ -269,11 +269,15 @@ pub struct Record {
 }
 impl Record {
     pub fn encode(&self) -> Result<Vec<u8>> {
+        self.encode_version(1)
+    }
+    pub fn encode_version(&self, major: u16) -> Result<Vec<u8>> {
+        ensure!(matches!(major, 1 | 2), "Unsupported envelope version");
         ensure!(self.payload.len() <= MAX_RECORD - 20, "Record too large");
         let mut out = Vec::with_capacity(24 + self.payload.len());
         out.extend((20u32 + self.payload.len() as u32).to_le_bytes());
         out.extend(b"PRTS");
-        out.extend(1u16.to_le_bytes());
+        out.extend(major.to_le_bytes());
         out.extend(0u16.to_le_bytes());
         out.extend(self.kind.to_le_bytes());
         out.extend(0u16.to_le_bytes());
@@ -282,6 +286,10 @@ impl Record {
         Ok(out)
     }
     pub fn read(reader: &mut impl Read) -> Result<Self> {
+        Self::read_version(reader, 1)
+    }
+    pub fn read_version(reader: &mut impl Read, major: u16) -> Result<Self> {
+        ensure!(matches!(major, 1 | 2), "Unsupported envelope version");
         let mut prefix = [0; 4];
         reader.read_exact(&mut prefix)?;
         let len = u32::from_le_bytes(prefix) as usize;
@@ -293,14 +301,18 @@ impl Record {
         reader.read_exact(&mut bytes)?;
         let mut d = Decoder::new(&bytes);
         ensure!(
-            d.u32()? == 0x53545250 && d.u16()? == 1 && d.u16()? == 0,
+            d.u32()? == 0x53545250 && d.u16()? == major && d.u16()? == 0,
             "Invalid magic/version"
         );
         let kind = d.u16()?;
         ensure!(d.u16()? == 0, "Nonzero flags");
         let id = d.u64()?;
         ensure!(
-            matches!(kind, 1..=8 | 0x100..=0x105 | 0x180..=0x181 | 0x190..=0x193 | 0x200..=0x207 | 0x300..=0x301 | 0x310..=0x311 | 0x320..=0x322),
+            matches!(kind, 1..=8 | 0x200..=0x207 | 0x300..=0x301 | 0x310..=0x311 | 0x320)
+                || (major == 1
+                    && matches!(kind, 0x100..=0x105 | 0x180..=0x181 | 0x190..=0x193 | 0x321..=0x322))
+                || (major == 2
+                    && matches!(kind, 0x400..=0x404 | 0x410..=0x411 | 0x420..=0x423 | 0x480..=0x482 | 0x48f | 0x490..=0x495)),
             "Unknown record type"
         );
         Ok(Self {

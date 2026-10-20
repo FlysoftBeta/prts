@@ -1,0 +1,1049 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 15:40:04 +0800
+Subject: [PATCH 31/38] WIP: route PRTS window input through Aura with observed
+ renderer completion
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_controller.cc b/chrome/browser/prts/prts_controller.cc
+index cfb9d71520..0110212948 100644
+--- a/chrome/browser/prts/prts_controller.cc
++++ b/chrome/browser/prts/prts_controller.cc
+@@ -141,11 +141,7 @@ void PrtsController::Receive(Record record) {
+   if (ready_ && record.type >= 0x200 && record.type <= 0x207 &&
+       record.id == 0) {
+     if (major_ == 2) {
+-      Encoder fault;
+-      fault.Int(4, 4);
+-      fault.String("Window input is not enabled");
+-      fault.Int(0, 1);
+-      Send(8, 0, std::move(fault.data));
++      windows_->Input(record.type, record.payload);
+     } else {
+       targets_->Input(record.type, record.payload);
+     }
+diff --git a/chrome/browser/prts/prts_sources.gni b/chrome/browser/prts/prts_sources.gni
+index ce541aacd8..e353f93fda 100644
+--- a/chrome/browser/prts/prts_sources.gni
++++ b/chrome/browser/prts/prts_sources.gni
+@@ -13,4 +13,6 @@ prts_browser_sources = [
+   "//chrome/browser/prts/prts_target_registry.h",
+   "//chrome/browser/prts/prts_window_registry.cc",
+   "//chrome/browser/prts/prts_window_registry.h",
++  "//chrome/browser/prts/prts_window_input.cc",
++  "//chrome/browser/prts/prts_window_input.h",
+ ]
+diff --git a/chrome/browser/prts/prts_window_input.cc b/chrome/browser/prts/prts_window_input.cc
+new file mode 100644
+index 0000000000..18292c9bdc
+--- /dev/null
++++ b/chrome/browser/prts/prts_window_input.cc
+@@ -0,0 +1,431 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "chrome/browser/prts/prts_window_input.h"
++
++#include <array>
++#include <bit>
++#include <cmath>
++#include <map>
++
++#include "base/containers/circular_deque.h"
++#include "base/functional/bind.h"
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "base/strings/utf_string_conversions.h"
++#include "base/task/single_thread_task_runner.h"
++#include "base/timer/timer.h"
++#include "content/public/browser/aura_input_barrier.h"
++#include "ui/aura/client/capture_client.h"
++#include "ui/aura/window.h"
++#include "ui/aura/window_observer.h"
++#include "ui/aura/window_tree_host.h"
++#include "ui/base/ime/input_method.h"
++#include "ui/base/ime/text_input_client.h"
++#include "ui/display/win/screen_win_headless.h"
++#include "ui/events/event.h"
++#include "ui/events/event_constants.h"
++#include "ui/events/keycodes/dom/dom_code.h"
++#include "ui/events/keycodes/dom/dom_key.h"
++#include "ui/events/keycodes/dom/keycode_converter.h"
++#include "ui/gfx/geometry/point_conversions.h"
++#include "ui/views/widget/desktop_aura/desktop_capture_client.h"
++#include "ui/views/widget/widget.h"
++
++namespace prts {
++namespace {
++int Flags(uint32_t modifiers, uint32_t buttons) {
++  int flags = 0;
++  const std::array mods = {ui::EF_SHIFT_DOWN,   ui::EF_CONTROL_DOWN,
++                           ui::EF_ALT_DOWN,     ui::EF_COMMAND_DOWN,
++                           ui::EF_CAPS_LOCK_ON, ui::EF_NUM_LOCK_ON};
++  const std::array mouse = {ui::EF_LEFT_MOUSE_BUTTON, ui::EF_RIGHT_MOUSE_BUTTON,
++                            ui::EF_MIDDLE_MOUSE_BUTTON,
++                            ui::EF_BACK_MOUSE_BUTTON,
++                            ui::EF_FORWARD_MOUSE_BUTTON};
++  for (int i = 0; i < 6; ++i) {
++    if (modifiers & (1u << i)) {
++      flags |= mods[i];
++    }
++  }
++  for (int i = 0; i < 5; ++i) {
++    if (buttons & (1u << i)) {
++      flags |= mouse[i];
++    }
++  }
++  return flags;
++}
++int Button(uint64_t b) {
++  return b == 1   ? ui::EF_LEFT_MOUSE_BUTTON
++         : b == 2 ? ui::EF_MIDDLE_MOUSE_BUTTON
++         : b == 3 ? ui::EF_RIGHT_MOUSE_BUTTON
++         : b == 4 ? ui::EF_BACK_MOUSE_BUTTON
++                  : ui::EF_FORWARD_MOUSE_BUTTON;
++}
++bool TextValid(const std::string& text) {
++  return text.size() <= 4096 && text.find('\0') == std::string::npos;
++}
++}  // namespace
++class PrtsWindowInput::Impl : public aura::WindowObserver {
++ public:
++  Impl(aura::Window* root,
++       base::RepeatingCallback<content::WebContents*()> contents,
++       base::RepeatingCallback<void(uint32_t)> fault)
++      : root_(root), contents_(std::move(contents)), fault_(std::move(fault)) {
++    root_->AddObserver(this);
++  }
++  ~Impl() override {
++    Reset();
++    if (root_) {
++      root_->RemoveObserver(this);
++    }
++  }
++  void OnWindowDestroying(aura::Window* window) override {
++    Reset();
++    root_->RemoveObserver(this);
++    root_ = nullptr;
++  }
++  views::Widget* Widget() {
++    if (root_) {
++      for (auto* child : root_->children()) {
++        if (auto* widget = views::Widget::GetWidgetForNativeWindow(child)) {
++          return widget;
++        }
++      }
++    }
++    return nullptr;
++  }
++  base::TimeTicks Stamp() {
++    auto now = base::TimeTicks::Now();
++    last_stamp_ = std::max(now, last_stamp_ + base::Microseconds(1));
++    return last_stamp_;
++  }
++  ui::TextInputClient* Client() {
++    return root_ && root_->GetHost()->GetInputMethod()
++               ? root_->GetHost()->GetInputMethod()->GetTextInputClient()
++               : nullptr;
++  }
++  void Done(bool success = true) {
++    deadline_.Stop();
++    busy_ = false;
++    if (!success) {
++      fault_.Run(7);
++      Reset();
++      return;
++    }
++    Next();
++  }
++  void Next() {
++    if (busy_ || queue_.empty() || !root_) {
++      return;
++    }
++    busy_ = true;
++    deadline_.Start(FROM_HERE, base::Seconds(5),
++                    base::BindOnce(&Impl::Done, weak_.GetWeakPtr(), false));
++    auto action = std::move(queue_.front());
++    queue_.pop_front();
++    std::move(action).Run();
++  }
++  void Enqueue(base::OnceClosure action) {
++    queue_.push_back(std::move(action));
++    Next();
++  }
++  void Send(std::unique_ptr<ui::Event> event,
++            base::OnceCallback<void(bool)> done) {
++    if (!root_) {
++      std::move(done).Run(false);
++      return;
++    }
++    auto stamp = event->time_stamp();
++    content::DispatchWithAuraInputBarrier(
++        contents_.Run(), stamp,
++        base::BindOnce(&Impl::SendNow, weak_.GetWeakPtr(), std::move(event)),
++        std::move(done));
++  }
++  void SendNow(std::unique_ptr<ui::Event> event) {
++    if (!root_) {
++      return;
++    }
++    root_->GetHost()->SendEventToSink(event.get());
++  }
++  void Reset() {
++    weak_.InvalidateWeakPtrs();
++    deadline_.Stop();
++    queue_.clear();
++    busy_ = false;
++    if (!root_) {
++      return;
++    }
++    auto* host = root_->GetHost();
++    for (const auto& [vk, key] : keys_) {
++      ui::KeyEvent release(ui::EventType::kKeyReleased, key.key_code(),
++                           key.code(), ui::EF_IS_SYNTHESIZED, key.GetDomKey(),
++                           Stamp());
++      host->SendEventToSink(&release);
++    }
++    keys_.clear();
++    for (uint32_t bit = 1; bit <= 16; bit <<= 1) {
++      if (buttons_ & bit) {
++        buttons_ &= ~bit;
++        gfx::PointF point = point_;
++        host->ConvertDIPToPixels(&point);
++        ui::MouseEvent up(ui::EventType::kMouseReleased, point, point, Stamp(),
++                          Flags(0, buttons_), Flags(0, bit));
++        host->SendEventToSink(&up);
++      }
++    }
++    if (auto* capture = views::DesktopCaptureClient::GetCaptureWindowGlobal();
++        capture && capture->GetRootWindow() == root_) {
++      capture->ReleaseCapture();
++    }
++    if (hover_) {
++      gfx::PointF point = point_;
++      host->ConvertDIPToPixels(&point);
++      ui::MouseEvent exit(ui::EventType::kMouseExited, point, point, Stamp(), 0,
++                          0);
++      host->SendEventToSink(&exit);
++    }
++    hover_ = false;
++    wheel_x_ = wheel_y_ = 0;
++  }
++  uint32_t Dispatch(uint16_t type, Decoder& d, uint32_t modifiers) {
++    if (!root_) {
++      return 4;
++    }
++    if (queue_.size() >= 1024) {
++      return 5;
++    }
++    if (type <= 0x203) {
++      double x = std::bit_cast<double>(d.Int(8)),
++             y = std::bit_cast<double>(d.Int(8));
++      double dx = 0, dy = 0;
++      uint64_t b = 0, count = 0;
++      if (type == 0x203) {
++        dx = std::bit_cast<double>(d.Int(8));
++        dy = std::bit_cast<double>(d.Int(8));
++      }
++      if (type == 0x201 || type == 0x202) {
++        b = d.Int(1);
++      }
++      auto buttons = d.Int(4);
++      if (b) {
++        count = d.Int(1);
++      }
++      if (!d.Done() || !std::isfinite(x) || !std::isfinite(y) ||
++          std::abs(x) > 100000 || std::abs(y) > 100000 || !std::isfinite(dx) ||
++          !std::isfinite(dy) || std::abs(dx) > 100000 ||
++          std::abs(dy) > 100000 || buttons > 31 ||
++          ((type == 0x201 || type == 0x202) &&
++           (!b || b > 5 || !count || count > 3))) {
++        return 1;
++      }
++      if (b) {
++        uint32_t bit = 1u << (b == 2 ? 2 : b == 3 ? 1 : b - 1);
++        if ((type == 0x201) != !!(buttons & bit)) {
++          return 1;
++        }
++      }
++      Enqueue(base::BindOnce(&Impl::Pointer, base::Unretained(this), type,
++                             gfx::PointF(x, y), dx, dy, b, buttons, count,
++                             modifiers));
++      return 0;
++    }
++    if (type == 0x207) {
++      auto focused = d.Int(1);
++      if (!d.Done() || focused > 1) {
++        return 1;
++      }
++      Enqueue(
++          base::BindOnce(&Impl::Focus, base::Unretained(this), focused != 0));
++      return 0;
++    }
++    if (type == 0x206) {
++      auto text = d.String();
++      if (!d.Done() || !TextValid(text)) {
++        return 1;
++      }
++      Enqueue(base::BindOnce(&Impl::Commit, base::Unretained(this),
++                             base::UTF8ToUTF16(text), modifiers, false));
++      return 0;
++    }
++    auto vk = d.Int(4);
++    auto code = d.String();
++    auto key = d.String();
++    auto text = d.String();
++    auto location = d.Int(1), repeat = d.Int(1), system = d.Int(1);
++    auto dom_code = ui::KeycodeConverter::CodeStringToDomCode(code);
++    auto dom_key = ui::KeycodeConverter::KeyStringToDomKey(key);
++    if (!d.Done() || vk > 255 || location > 3 || repeat > 1 || system > 1 ||
++        !TextValid(text) || code.find('\0') != std::string::npos ||
++        key.find('\0') != std::string::npos ||
++        (code.empty() && key != "Unidentified") ||
++        (!code.empty() && dom_code == ui::DomCode::NONE) ||
++        dom_key == ui::DomKey::NONE ||
++        (type == 0x205 && (!text.empty() || repeat))) {
++      return 1;
++    }
++    int flags = Flags(modifiers, 0) | ui::EF_IS_SYNTHESIZED;
++    if (repeat) {
++      flags |= ui::EF_IS_REPEAT;
++    }
++    if (location == 3) {
++      flags |= ui::EF_NUMPAD_KEY;
++    }
++    ui::KeyEvent event(type == 0x204 ? ui::EventType::kKeyPressed
++                                     : ui::EventType::kKeyReleased,
++                       static_cast<ui::KeyboardCode>(vk), dom_code, flags,
++                       dom_key, Stamp());
++    Enqueue(base::BindOnce(&Impl::Key, base::Unretained(this), event));
++    return 0;
++  }
++  void Pointer(uint16_t type,
++               gfx::PointF point,
++               double dx,
++               double dy,
++               uint64_t b,
++               uint32_t buttons,
++               uint64_t count,
++               uint32_t modifiers) {
++    auto* captured = views::DesktopCaptureClient::GetCaptureWindowGlobal();
++    if (captured && captured->GetRootWindow() != root_) {
++      fault_.Run(4);
++      Done();
++      return;
++    }
++    point_ = point;
++    buttons_ = buttons;
++    hover_ = true;
++    gfx::Point screen = root_->GetBoundsInScreen().origin() +
++                        gfx::ToRoundedPoint(point).OffsetFromOrigin();
++    display::win::GetScreenWinHeadless()->SetCursorScreenPointForTesting(
++        screen);
++    root_->GetHost()->ConvertDIPToPixels(&point);
++    auto stamp = Stamp();
++    std::unique_ptr<ui::Event> event;
++    if (type == 0x203) {
++      wheel_x_ -= dx;
++      wheel_y_ -= dy;
++      int ix = static_cast<int>(wheel_x_), iy = static_cast<int>(wheel_y_);
++      wheel_x_ -= ix;
++      wheel_y_ -= iy;
++      event = std::make_unique<ui::MouseWheelEvent>(
++          gfx::Vector2d(ix, iy), point, point, stamp,
++          Flags(modifiers, buttons) | ui::EF_PRECISION_SCROLLING_DELTA, 0);
++    } else {
++      auto mouse = std::make_unique<ui::MouseEvent>(
++          type == 0x201   ? ui::EventType::kMousePressed
++          : type == 0x202 ? ui::EventType::kMouseReleased
++          : buttons       ? ui::EventType::kMouseDragged
++                          : ui::EventType::kMouseMoved,
++          point, point, stamp, Flags(modifiers, buttons), b ? Button(b) : 0);
++      if (b) {
++        mouse->SetClickCount(count);
++      }
++      event = std::move(mouse);
++    }
++    Send(std::move(event), base::BindOnce(&Impl::Done, weak_.GetWeakPtr()));
++  }
++  void Focus(bool focused) {
++    if (auto* widget = Widget()) {
++      if (focused) {
++        widget->Activate();
++      } else {
++        Reset();
++        widget->Deactivate();
++      }
++    }
++    Done();
++  }
++  void Key(ui::KeyEvent event) {
++    event.set_time_stamp(Stamp());
++    if (event.type() == ui::EventType::kKeyPressed) {
++      keys_.insert_or_assign(event.key_code(), event);
++    } else {
++      keys_.erase(event.key_code());
++    }
++    const bool enter =
++        event.type() == ui::EventType::kKeyPressed &&
++        event.key_code() == ui::VKEY_RETURN &&
++        !(event.flags() &
++          (ui::EF_CONTROL_DOWN | ui::EF_ALT_DOWN | ui::EF_COMMAND_DOWN)) &&
++        content::IsAuraContentTextClient(contents_.Run(), Client());
++    Send(std::make_unique<ui::KeyEvent>(event),
++         base::BindOnce(&Impl::KeyDone, weak_.GetWeakPtr(), enter));
++  }
++  void KeyDone(bool enter, bool success) {
++    if (enter && success &&
++        content::IsAuraContentTextClient(contents_.Run(), Client())) {
++      Commit(u"\r", 0, true);
++      return;
++    }
++    Done(success);
++  }
++  void Commit(std::u16string text, uint32_t modifiers, bool enter = false) {
++    auto* client = Client();
++    if (!client ||
++        (!enter && client->GetTextInputType() == ui::TEXT_INPUT_TYPE_NONE)) {
++      fault_.Run(4);
++      Done();
++      return;
++    }
++    if (text.empty()) {
++      Done();
++      return;
++    }
++    bool content_client =
++        content::IsAuraContentTextClient(contents_.Run(), client);
++    if (text.size() == 1) {
++      auto event = ui::KeyEvent::FromCharacter(
++          text[0], enter ? ui::VKEY_RETURN : ui::VKEY_UNKNOWN,
++          ui::DomCode::NONE, Flags(modifiers, 0), Stamp());
++      content::DispatchWithAuraInputBarrier(
++          contents_.Run(), event.time_stamp(),
++          base::BindOnce([](ui::TextInputClient* target,
++                            ui::KeyEvent event) { target->InsertChar(event); },
++                         base::Unretained(client), event),
++          base::BindOnce(&Impl::Done, weak_.GetWeakPtr()));
++    } else {
++      client->InsertText(
++          text,
++          ui::TextInputClient::InsertTextCursorBehavior::kMoveCursorAfterText);
++      if (content_client) {
++        content::FinishAuraTextCommit(
++            contents_.Run(),
++            base::BindOnce(&Impl::Done, weak_.GetWeakPtr(), true));
++      } else {
++        Done();
++      }
++    }
++  }
++
++ private:
++  raw_ptr<aura::Window> root_;
++  base::RepeatingCallback<content::WebContents*()> contents_;
++  base::RepeatingCallback<void(uint32_t)> fault_;
++  base::circular_deque<base::OnceClosure> queue_;
++  std::map<ui::KeyboardCode, ui::KeyEvent> keys_;
++  gfx::PointF point_;
++  uint32_t buttons_ = 0;
++  double wheel_x_ = 0, wheel_y_ = 0;
++  bool busy_ = false, hover_ = false;
++  base::TimeTicks last_stamp_;
++  base::OneShotTimer deadline_;
++  base::WeakPtrFactory<Impl> weak_{this};
++};
++PrtsWindowInput::PrtsWindowInput(
++    aura::Window* root,
++    base::RepeatingCallback<content::WebContents*()> contents,
++    base::RepeatingCallback<void(uint32_t)> fault)
++    : impl_(
++          std::make_unique<Impl>(root, std::move(contents), std::move(fault))) {
++}
++PrtsWindowInput::~PrtsWindowInput() = default;
++uint32_t PrtsWindowInput::Dispatch(uint16_t type,
++                                   Decoder& d,
++                                   uint32_t modifiers) {
++  return impl_->Dispatch(type, d, modifiers);
++}
++void PrtsWindowInput::Reset() {
++  impl_->Reset();
++}
++}  // namespace prts
+diff --git a/chrome/browser/prts/prts_window_input.h b/chrome/browser/prts/prts_window_input.h
+new file mode 100644
+index 0000000000..c12a606157
+--- /dev/null
++++ b/chrome/browser/prts/prts_window_input.h
+@@ -0,0 +1,31 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CHROME_BROWSER_PRTS_PRTS_WINDOW_INPUT_H_
++#define CHROME_BROWSER_PRTS_PRTS_WINDOW_INPUT_H_
++#include <memory>
++
++#include "base/functional/callback.h"
++#include "chrome/browser/prts/prts_protocol.h"
++namespace aura {
++class Window;
++}
++namespace content {
++class WebContents;
++}
++namespace prts {
++class PrtsWindowInput {
++ public:
++  PrtsWindowInput(aura::Window* root,
++                  base::RepeatingCallback<content::WebContents*()> contents,
++                  base::RepeatingCallback<void(uint32_t)> fault);
++  ~PrtsWindowInput();
++  uint32_t Dispatch(uint16_t type, Decoder&, uint32_t modifiers);
++  void Reset();
++
++ private:
++  class Impl;
++  std::unique_ptr<Impl> impl_;
++};
++}  // namespace prts
++#endif
+diff --git a/chrome/browser/prts/prts_window_registry.cc b/chrome/browser/prts/prts_window_registry.cc
+index 2322068153..2eb2552dda 100644
+--- a/chrome/browser/prts/prts_window_registry.cc
++++ b/chrome/browser/prts/prts_window_registry.cc
+@@ -19,6 +19,7 @@
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+ #include "chrome/browser/prts/prts_capture.h"
++#include "chrome/browser/prts/prts_window_input.h"
+ #include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
+ #include "chrome/browser/ui/browser_window/public/create_browser_window.h"
+ #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+@@ -39,6 +40,7 @@
+ #include "ui/aura/window.h"
+ #include "ui/aura/window_tree_host.h"
+ #include "ui/base/base_window.h"
++#include "ui/base/cursor/cursor.h"
+ #include "ui/base/page_transition_types.h"
+ #include "ui/base/window_open_disposition.h"
+ #include "ui/compositor/compositor.h"
+@@ -46,6 +48,7 @@
+ #include "ui/display/headless/headless_screen_manager.h"
+ #include "ui/display/screen.h"
+ #include "ui/views/widget/desktop_aura/desktop_headless_input.h"
++#include "ui/views/widget/widget.h"
+ #include "url/gurl.h"
+ 
+ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -57,6 +60,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+                  base::BindRepeating(&Impl::Fallback, base::Unretained(this))) {
+   }
+   ~Impl() override {
++    views::SetHeadlessCursorObserver({});
+     observation_.Reset();
+     for (const auto& [id, w] : windows_) {
+       capture_.Remove(w.source);
+@@ -80,6 +84,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+     uint64_t source_generation = 1, revision = 0;
+     uint32_t fps = 0, inflight = 0, mode = 0;
+     bool gpu_failed = false;
++    std::unique_ptr<prts::PrtsWindowInput> input = nullptr;
+   };
+   class Tab : public content::WebContentsObserver {
+    public:
+@@ -88,7 +93,11 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+     void DidStartLoading() override { owner->Schedule(); }
+     void DidStopLoading() override { owner->Schedule(); }
+     void TitleWasSet(content::NavigationEntry*) override { owner->Schedule(); }
+-    void DidFinishNavigation(content::NavigationHandle*) override {
++    void DidFinishNavigation(content::NavigationHandle* nav) override {
++      if (nav->IsInPrimaryMainFrame() && nav->HasCommitted() &&
++          !nav->IsSameDocument()) {
++        owner->Navigated(web_contents());
++      }
+       owner->Schedule();
+     }
+     void WebContentsDestroyed() override {
+@@ -101,6 +110,8 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+     uint64_t opener = 0;
+   };
+   void Start(uint64_t gpu_luid, uint32_t frame_limit) {
++    views::SetHeadlessCursorObserver(
++        base::BindRepeating(&Impl::Cursor, weak_.GetWeakPtr()));
+     frame_limit_ = std::min(2u, frame_limit);
+     capture_.SetLimit(frame_limit_);
+     gpu_enabled_ = gpu_luid && capture_.EnableGpu(gpu_luid);
+@@ -127,6 +138,159 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+     e.Int(0, 1);
+     send_.Run(3, request, std::move(e.data));
+   }
++  void Fault(uint32_t code) {
++    prts::Encoder e;
++    e.Int(code, 4);
++    e.String(code == 10  ? "Stale window input"
++             : code == 7 ? "Aura input completion timed out"
++             : code == 4 ? "Focused input client unavailable"
++                         : "Invalid window input");
++    e.Int(0, 1);
++    send_.Run(8, 0, std::move(e.data));
++  }
++  content::WebContents* Contents(uint64_t id) {
++    auto it = windows_.find(id);
++    return it == windows_.end()
++               ? nullptr
++               : it->second.browser->GetTabStripModel()->GetActiveWebContents();
++  }
++  void EnsureInput(Window& w) {
++    if (!w.input && Root(w)) {
++      w.input = std::make_unique<prts::PrtsWindowInput>(
++          Root(w),
++          base::BindRepeating(&Impl::Contents, weak_.GetWeakPtr(), w.id),
++          base::BindRepeating(&Impl::Fault, weak_.GetWeakPtr()));
++    }
++  }
++  void Navigated(content::WebContents* contents) {
++    for (auto& [id, w] : windows_) {
++      if (Contents(id) == contents && w.input) {
++        w.input->Reset();
++      }
++    }
++  }
++  void SelectInput(uint64_t id) {
++    if (input_ == id) {
++      return;
++    }
++    if (auto it = windows_.find(input_); it != windows_.end()) {
++      if (it->second.input) {
++        it->second.input->Reset();
++      }
++      if (auto* view =
++              BrowserView::GetBrowserViewForBrowser(it->second.browser)) {
++        view->GetWidget()->Deactivate();
++      }
++    }
++    input_ = id;
++    if (auto it = windows_.find(id); it != windows_.end()) {
++      EnsureInput(it->second);
++      if (auto* view =
++              BrowserView::GetBrowserViewForBrowser(it->second.browser)) {
++        view->GetWidget()->Activate();
++      }
++    }
++  }
++  void Input(uint16_t type, const std::vector<uint8_t>& payload) {
++    prts::Decoder d(payload);
++    auto id = d.Int(8), generation = d.Int(8), sequence = d.Int(8),
++         modifiers = d.Int(4);
++    if (payload.size() < 28 || modifiers > 63 || !sequence) {
++      Fault(1);
++      return;
++    }
++    if (sequence <= input_sequence_) {
++      Fault(10);
++      return;
++    }
++    input_sequence_ = sequence;
++    auto it = windows_.find(id);
++    if (it == windows_.end() || generation != it->second.generation ||
++        it->second.closing) {
++      Fault(10);
++      return;
++    }
++    auto& w = it->second;
++    if (type == 0x207) {
++      prts::Decoder focus(base::span(payload).subspan(28));
++      auto value = focus.Int(1);
++      if (!focus.Done() || value > 1) {
++        Fault(1);
++        return;
++      }
++      if (value) {
++        SelectInput(id);
++      } else if (input_ == id) {
++        SelectInput(0);
++      }
++      Reconcile();
++    } else if (input_ != id) {
++      Fault(10);
++      return;
++    }
++    EnsureInput(w);
++    if (!w.input) {
++      Fault(4);
++      return;
++    }
++    if (auto code = w.input->Dispatch(type, d, modifiers)) {
++      Fault(code);
++    }
++  }
++  void Cursor(aura::WindowTreeHost* host,
++              const ui::Cursor& cursor,
++              bool visible) {
++    auto it = windows_.find(input_);
++    if (it == windows_.end()) {
++      return;
++    }
++    auto& w = it->second;
++    if (!Root(w) || Root(w)->GetHost() != host) {
++      return;
++    }
++    uint8_t shape = 0;
++    using C = ui::mojom::CursorType;
++    switch (cursor.type()) {
++      case C::kHand:
++        shape = 1;
++        break;
++      case C::kIBeam:
++        shape = 2;
++        break;
++      case C::kCross:
++        shape = 3;
++        break;
++      case C::kMove:
++        shape = 4;
++        break;
++      case C::kEastResize:
++      case C::kWestResize:
++      case C::kEastWestResize:
++        shape = 5;
++        break;
++      case C::kNorthResize:
++      case C::kSouthResize:
++      case C::kNorthSouthResize:
++        shape = 6;
++        break;
++      case C::kNone:
++        shape = 7;
++        break;
++      default:
++        break;
++    }
++    if (!visible) {
++      shape = 7;
++    }
++    prts::Encoder e;
++    e.Int(w.id, 8);
++    e.Int(w.generation, 8);
++    e.Int(shape, 1);
++    for (int i = 0; i < 5; ++i) {
++      e.Int(0, 4);
++    }
++    send_.Run(0x495, 0, std::move(e.data));
++  }
+   void Schedule() {
+     if (pending_) {
+       return;
+@@ -343,6 +507,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+       browser->GetTabStripModel()->RemoveObserver(this);
+       auto id = it->first;
+       bool announced = it->second.announced;
++      it->second.input.reset();
+       capture_.Remove(it->second.source);
+       if (it->second.display) {
+         display::HeadlessScreenManager::Get()->RemoveDisplay(
+@@ -431,7 +596,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+           w.size = size;
+           ApplySize(w);
+           if (activate) {
+-            input_ = id;
++            SelectInput(id);
+           }
+           Reconcile();
+           send_.Run(0x480, r.id, Snapshot(w));
+@@ -496,6 +661,9 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+       bool valid = true;
+       uint64_t mode = 0, limit = 0, fps = 0;
+       if (r.type == 0x403) {
++        if (w.input) {
++          w.input->Reset();
++        }
+         valid = ReadSize(d, size);
+       }
+       if (r.type == 0x410) {
+@@ -672,6 +840,9 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+     }
+     auto& w = it->second;
+     if (r.type == 0x401) {
++      if (w.input) {
++        w.input->Reset();
++      }
+       w.closing = true;
+       Publish(w);
+       auto* browser = w.browser.get();
+@@ -679,7 +850,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+       browser->GetWindow()->Close();
+       return;
+     }
+-    input_ = id;
++    SelectInput(id);
+     Reconcile();
+     send_.Run(0x480, r.id, Snapshot(w));
+   }
+@@ -690,6 +861,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+   uint32_t frame_limit_ = 2;
+   bool gpu_enabled_ = false;
+   uint64_t next_ = 0, input_ = 0;
++  uint64_t input_sequence_ = 0;
+   bool pending_ = false, mutating_ = false;
+   std::map<uint64_t, Window> windows_;
+   std::map<uint64_t, std::unique_ptr<Tab>> tabs_;
+@@ -707,6 +879,10 @@ void PrtsWindowRegistry::Start(uint64_t gpu_luid, uint32_t frame_limit) {
+ bool PrtsWindowRegistry::Frame(const prts::Record& record) {
+   return impl_->Frame(record);
+ }
++void PrtsWindowRegistry::Input(uint16_t type,
++                               const std::vector<uint8_t>& payload) {
++  impl_->Input(type, payload);
++}
+ void PrtsWindowRegistry::Handle(const prts::Record& record) {
+   impl_->Handle(record);
+ }
+diff --git a/chrome/browser/prts/prts_window_registry.h b/chrome/browser/prts/prts_window_registry.h
+index 2718153776..9b212666b8 100644
+--- a/chrome/browser/prts/prts_window_registry.h
++++ b/chrome/browser/prts/prts_window_registry.h
+@@ -15,6 +15,7 @@ class PrtsWindowRegistry {
+   ~PrtsWindowRegistry();
+   void Start(uint64_t gpu_luid, uint32_t frame_limit);
+   bool Frame(const prts::Record& record);
++  void Input(uint16_t type, const std::vector<uint8_t>& payload);
+   void Handle(const prts::Record& record);
+ 
+  private:
+diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
+index 6f5203698b..63b17354af 100644
+--- a/content/browser/BUILD.gn
++++ b/content/browser/BUILD.gn
+@@ -1906,6 +1906,7 @@ source_set("browser") {
+     "renderer_host/stored_page.cc",
+     "renderer_host/stored_page.h",
+     "renderer_host/synthetic_input.cc",
++    "renderer_host/aura_input_barrier.cc",
+     "renderer_host/subframe_history_navigation_throttle.cc",
+     "renderer_host/subframe_history_navigation_throttle.h",
+     "renderer_host/text_input_manager.cc",
+diff --git a/content/browser/renderer_host/aura_input_barrier.cc b/content/browser/renderer_host/aura_input_barrier.cc
+new file mode 100644
+index 0000000000..9e2171c3a8
+--- /dev/null
++++ b/content/browser/renderer_host/aura_input_barrier.cc
+@@ -0,0 +1,175 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#include "content/public/browser/aura_input_barrier.h"
++
++#include <map>
++#include <set>
++
++#include "base/functional/bind.h"
++#include "base/task/single_thread_task_runner.h"
++#include "base/timer/timer.h"
++#include "components/input/render_widget_host_input_event_router.h"
++#include "content/browser/renderer_host/render_widget_host_impl.h"
++#include "content/browser/renderer_host/render_widget_host_view_aura.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/render_widget_host_observer.h"
++#include "content/public/browser/synthetic_input.h"
++#include "content/public/browser/web_contents.h"
++#include "content/public/browser/web_contents_observer.h"
++#include "third_party/blink/public/common/input/web_input_event.h"
++
++namespace content {
++namespace {
++class AuraBarrier final : public WebContentsObserver,
++                          public RenderWidgetHost::InputEventObserver,
++                          public RenderWidgetHostObserver {
++ public:
++  AuraBarrier(WebContents* contents,
++              base::TimeTicks stamp,
++              base::OnceCallback<void(bool)> done)
++      : WebContentsObserver(contents), stamp_(stamp), done_(std::move(done)) {
++    contents->ForEachRenderFrameHost([&](RenderFrameHost* frame) {
++      auto* host = frame->GetRenderWidgetHost();
++      if (hosts_.insert(host).second) {
++        host->AddInputEventObserver(this);
++        host->AddObserver(this);
++      }
++    });
++    timeout_.Start(
++        FROM_HERE, base::Seconds(5),
++        base::BindOnce(&AuraBarrier::Finish, weak_.GetWeakPtr(), false));
++  }
++  ~AuraBarrier() override {
++    for (auto* host : hosts_) {
++      host->RemoveInputEventObserver(this);
++      host->RemoveObserver(this);
++    }
++  }
++  void Begin(base::OnceClosure dispatch) {
++    auto weak = weak_.GetWeakPtr();
++    std::move(dispatch).Run();
++    if (weak) {
++      PostPoll();
++    }
++  }
++  void OnInputEvent(const RenderWidgetHost& host,
++                    const blink::WebInputEvent& event,
++                    InputEventSource) override {
++    if (event.TimeStamp() == stamp_) {
++      saw_dispatch_ = true;
++      ++pending_[{&host, event.GetType()}];
++    }
++  }
++  void OnInputEventAck(const RenderWidgetHost& host,
++                       blink::mojom::InputEventResultSource,
++                       blink::mojom::InputEventResultState,
++                       const blink::WebInputEvent& event) override {
++    if (event.TimeStamp() != stamp_) {
++      return;
++    }
++    auto it = pending_.find({&host, event.GetType()});
++    if (it != pending_.end() && --it->second == 0) {
++      pending_.erase(it);
++    }
++  }
++  void RenderWidgetHostDestroyed(RenderWidgetHost* host) override {
++    host->RemoveInputEventObserver(this);
++    host->RemoveObserver(this);
++    hosts_.erase(host);
++    std::erase_if(pending_, [host](const auto& entry) {
++      return entry.first.first == host;
++    });
++  }
++  void WebContentsDestroyed() override { Finish(false); }
++  void PostPoll() {
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE, base::BindOnce(&AuraBarrier::Poll, weak_.GetWeakPtr()),
++        base::Milliseconds(1));
++  }
++  void Poll() {
++    if (!web_contents()) {
++      Finish(false);
++      return;
++    }
++    auto* root = RenderWidgetHostImpl::From(
++        web_contents()->GetPrimaryMainFrame()->GetRenderWidgetHost());
++    // The router's production pending-dispatch predicate includes asynchronous
++    // targeting; an empty ACK observer set alone is not completion.
++    if (!pending_.empty() ||
++        (root->GetInputEventRouter() &&
++         root->GetInputEventRouter()->HasEventsPendingDispatch())) {
++      PostPoll();
++      return;
++    }
++    if (!saw_dispatch_) {
++      Finish(true);
++      return;
++    }  // Views consumed / target lost.
++    auto* focused =
++        RenderWidgetHostImpl::From(FocusedSyntheticInputWidget(web_contents()));
++    if (!focused) {
++      Finish(false);
++      return;
++    }
++    focused->WaitForInputProcessed(
++        base::BindOnce(&AuraBarrier::Processed, weak_.GetWeakPtr()));
++  }
++  void Processed() {
++    if (!web_contents()) {
++      Finish(false);
++      return;
++    }
++    auto* root = web_contents()->GetPrimaryMainFrame()->GetRenderWidgetHost();
++    root->InsertVisualStateCallback(
++        base::BindOnce(&AuraBarrier::Finish, weak_.GetWeakPtr()));
++  }
++  void Finish(bool success) {
++    timeout_.Stop();
++    if (done_) {
++      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(std::move(done_), success));
++    }
++    delete this;
++  }
++
++ private:
++  const base::TimeTicks stamp_;
++  base::OnceCallback<void(bool)> done_;
++  std::set<RenderWidgetHost*> hosts_;
++  std::map<std::pair<const RenderWidgetHost*, blink::WebInputEvent::Type>,
++           size_t>
++      pending_;
++  bool saw_dispatch_ = false;
++  base::OneShotTimer timeout_;
++  base::WeakPtrFactory<AuraBarrier> weak_{this};
++};
++}  // namespace
++void DispatchWithAuraInputBarrier(WebContents* contents,
++                                  base::TimeTicks stamp,
++                                  base::OnceClosure dispatch,
++                                  base::OnceCallback<void(bool)> done) {
++  if (!contents) {
++    std::move(dispatch).Run();
++    std::move(done).Run(true);
++    return;
++  }
++  (new AuraBarrier(contents, stamp, std::move(done)))
++      ->Begin(std::move(dispatch));
++}
++bool IsAuraContentTextClient(WebContents* contents,
++                             const ui::TextInputClient* client) {
++  auto* view = contents ? contents->GetRenderWidgetHostView() : nullptr;
++  return view && static_cast<const ui::TextInputClient*>(
++                     static_cast<RenderWidgetHostViewAura*>(view)) == client;
++}
++void FinishAuraTextCommit(WebContents* contents, base::OnceClosure done) {
++  auto* focused =
++      RenderWidgetHostImpl::From(FocusedSyntheticInputWidget(contents));
++  if (focused) {
++    focused->WaitForInputProcessed(std::move(done));
++  } else {
++    std::move(done).Run();
++  }
++}
++}  // namespace content
+diff --git a/content/public/browser/BUILD.gn b/content/public/browser/BUILD.gn
+index 8ccddc64e7..f63c905cbe 100644
+--- a/content/public/browser/BUILD.gn
++++ b/content/public/browser/BUILD.gn
+@@ -815,6 +815,7 @@ source_set("synthetic_input") {
+   sources = [
+     "render_widget_host_cursor_observer.h",
+     "synthetic_input.h",
++    "aura_input_barrier.h",
+   ]
+   public_deps = [
+     "//base",
+diff --git a/content/public/browser/aura_input_barrier.h b/content/public/browser/aura_input_barrier.h
+new file mode 100644
+index 0000000000..ae72bddb50
+--- /dev/null
++++ b/content/public/browser/aura_input_barrier.h
+@@ -0,0 +1,25 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef CONTENT_PUBLIC_BROWSER_AURA_INPUT_BARRIER_H_
++#define CONTENT_PUBLIC_BROWSER_AURA_INPUT_BARRIER_H_
++#include "base/functional/callback.h"
++#include "base/time/time.h"
++#include "content/common/content_export.h"
++namespace ui {
++class TextInputClient;
++}
++namespace content {
++class WebContents;
++// Observes a normal Aura dispatch, including asynchronous OOPIF targeting and
++// renderer ACKs. Never injects a second renderer event. UI sequence only.
++CONTENT_EXPORT void DispatchWithAuraInputBarrier(
++    WebContents*,
++    base::TimeTicks,
++    base::OnceClosure dispatch,
++    base::OnceCallback<void(bool)> done);
++CONTENT_EXPORT bool IsAuraContentTextClient(WebContents*,
++                                            const ui::TextInputClient*);
++CONTENT_EXPORT void FinishAuraTextCommit(WebContents*, base::OnceClosure done);
++}  // namespace content
++#endif

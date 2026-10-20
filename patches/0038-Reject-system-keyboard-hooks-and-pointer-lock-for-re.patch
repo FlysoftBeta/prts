@@ -1,0 +1,339 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 16:41:18 +0800
+Subject: [PATCH 38/38] Reject system keyboard hooks and pointer lock for
+ remote headless input
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/content/browser/renderer_host/render_widget_host_view_event_handler.cc b/content/browser/renderer_host/render_widget_host_view_event_handler.cc
+index 225224a587..d32d98635f 100644
+--- a/content/browser/renderer_host/render_widget_host_view_event_handler.cc
++++ b/content/browser/renderer_host/render_widget_host_view_event_handler.cc
+@@ -25,6 +25,7 @@
+ #include "content/public/browser/render_widget_host.h"
+ #include "ui/aura/client/cursor_client.h"
+ #include "ui/aura/client/focus_client.h"
++#include "ui/aura/headless_root_size.h"
+ #include "ui/aura/scoped_keyboard_hook.h"
+ #include "ui/aura/window.h"
+ #include "ui/aura/window_delegate.h"
+@@ -91,15 +92,17 @@ void MarkUnchangedTouchPointsAsStationary(blink::WebTouchEvent* event,
+   if (event->GetType() == blink::WebInputEvent::Type::kTouchMove ||
+       event->GetType() == blink::WebInputEvent::Type::kTouchCancel) {
+     for (size_t i = 0; i < event->touches_length; ++i) {
+-      if (event->touches[i].id != changed_touch_id)
++      if (event->touches[i].id != changed_touch_id) {
+         event->touches[i].state = blink::WebTouchPoint::State::kStateStationary;
++      }
+     }
+   }
+ }
+ 
+ bool NeedsInputGrab(content::RenderWidgetHostViewBase* view) {
+-  if (!view)
++  if (!view) {
+     return false;
++  }
+   return view->GetWidgetType() == content::WidgetType::kPopup;
+ }
+ 
+@@ -138,25 +141,32 @@ void RenderWidgetHostViewEventHandler::ResetHost() {
+ blink::mojom::PointerLockResult RenderWidgetHostViewEventHandler::LockPointer(
+     bool request_unadjusted_movement) {
+   aura::Window* root_window = window_->GetRootWindow();
+-  if (!root_window)
++  if (!root_window) {
+     return blink::mojom::PointerLockResult::kWrongDocument;
++  }
++  if (root_window->GetProperty(aura::kHeadlessRootSizeKey)) {
++    return blink::mojom::PointerLockResult::kUnsupportedOptions;
++  }
+ 
+-  if (mouse_locked_)
++  if (mouse_locked_) {
+     return blink::mojom::PointerLockResult::kSuccess;
++  }
+ 
+   if (request_unadjusted_movement && window_->GetHost()) {
+     mouse_locked_unadjusted_movement_ =
+         window_->GetHost()->RequestUnadjustedMovement();
+-    if (!mouse_locked_unadjusted_movement_)
++    if (!mouse_locked_unadjusted_movement_) {
+       return blink::mojom::PointerLockResult::kUnsupportedOptions;
++    }
+   }
+   mouse_locked_ = true;
+ 
+   aura::Window::ScopedDeleteBlocker delete_blocker(window_);
+   window_->GetHost()->LockMouse(window_);
+ 
+-  if (ShouldMoveToCenter(unlocked_global_mouse_position_))
++  if (ShouldMoveToCenter(unlocked_global_mouse_position_)) {
+     MoveCursorToCenter(nullptr);
++  }
+ 
+   delegate_->SetTooltipsEnabled(false);
+   return blink::mojom::PointerLockResult::kSuccess;
+@@ -166,14 +176,16 @@ blink::mojom::PointerLockResult
+ RenderWidgetHostViewEventHandler::ChangePointerLock(
+     bool request_unadjusted_movement) {
+   aura::Window* root_window = window_->GetRootWindow();
+-  if (!root_window || !window_->GetHost())
++  if (!root_window || !window_->GetHost()) {
+     return blink::mojom::PointerLockResult::kWrongDocument;
++  }
+ 
+   // If lock was lost before completing this change request
+   // it was because the user hit escape or navigated away
+   // from the page.
+-  if (!mouse_locked_)
++  if (!mouse_locked_) {
+     return blink::mojom::PointerLockResult::kUserRejected;
++  }
+ 
+   if (!request_unadjusted_movement) {
+     mouse_locked_unadjusted_movement_.reset();
+@@ -188,8 +200,9 @@ RenderWidgetHostViewEventHandler::ChangePointerLock(
+   mouse_locked_unadjusted_movement_ =
+       window_->GetHost()->RequestUnadjustedMovement();
+ 
+-  if (!mouse_locked_unadjusted_movement_)
++  if (!mouse_locked_unadjusted_movement_) {
+     return blink::mojom::PointerLockResult::kUnsupportedOptions;
++  }
+ 
+   return blink::mojom::PointerLockResult::kSuccess;
+ }
+@@ -228,8 +241,9 @@ void RenderWidgetHostViewEventHandler::UnlockPointer() {
+ bool RenderWidgetHostViewEventHandler::LockKeyboard(
+     std::optional<base::flat_set<ui::DomCode>> codes) {
+   aura::Window* root_window = window_->GetRootWindow();
+-  if (!root_window)
++  if (!root_window) {
+     return false;
++  }
+ 
+   // Remove existing hook, if registered.
+   UnlockKeyboard();
+@@ -251,8 +265,9 @@ void RenderWidgetHostViewEventHandler::OnKeyEvent(ui::KeyEvent* event) {
+ 
+   if (NeedsInputGrab(popup_child_host_view_)) {
+     popup_child_event_handler_->OnKeyEvent(event);
+-    if (event->handled())
++    if (event->handled()) {
+       return;
++    }
+   }
+ 
+   if (event->key_code() == ui::VKEY_RETURN) {
+@@ -275,14 +290,16 @@ void RenderWidgetHostViewEventHandler::OnKeyEvent(ui::KeyEvent* event) {
+ 
+   // If the key has been reserved as part of the active KeyboardLock request,
+   // then we want to mark it as such so it is not intercepted by the browser.
+-  if (IsKeyLocked(*event))
++  if (IsKeyLocked(*event)) {
+     webkit_event.skip_if_unhandled = true;
++  }
+ 
+   bool mark_event_as_handled = true;
+   delegate_->ForwardKeyboardEventWithLatencyInfo(
+       webkit_event, *event->latency(), &mark_event_as_handled);
+-  if (mark_event_as_handled)
++  if (mark_event_as_handled) {
+     event->SetHandled();
++  }
+ }
+ 
+ void RenderWidgetHostViewEventHandler::HandleMouseWheelEvent(
+@@ -337,8 +354,9 @@ void RenderWidgetHostViewEventHandler::OnMouseEvent(ui::MouseEvent* event) {
+ 
+   // CrOS will send a mouse exit event to update hover state when mouse is
+   // hidden which we want to filter out in renderer. crbug.com/723535.
+-  if (event->flags() & ui::EF_CURSOR_HIDE)
++  if (event->flags() & ui::EF_CURSOR_HIDE) {
+     return;
++  }
+ 
+   ForwardMouseEventToParent(event);
+   // Forwarding the event may have resulted in the view or window being
+@@ -380,7 +398,6 @@ void RenderWidgetHostViewEventHandler::OnMouseEvent(ui::MouseEvent* event) {
+     bool is_selection_popup = NeedsInputGrab(popup_child_host_view_);
+     if (CanRendererHandleEvent(event, mouse_locked_, is_selection_popup) &&
+         !(event->flags() & ui::EF_FROM_TOUCH)) {
+-
+       // Confirm existing composition text on mouse press, to make sure
+       // the input caret won't be moved with an ongoing composition text.
+       if (event->type() == ui::EventType::kMousePressed) {
+@@ -413,15 +430,17 @@ void RenderWidgetHostViewEventHandler::OnMouseEvent(ui::MouseEvent* event) {
+       window_->SetCapture();
+       break;
+     case ui::EventType::kMouseReleased:
+-      if (!delegate_->NeedsMouseCapture())
++      if (!delegate_->NeedsMouseCapture()) {
+         window_->ReleaseCapture();
++      }
+       break;
+     default:
+       break;
+   }
+ 
+-  if (!ShouldGenerateAppCommand(event))
++  if (!ShouldGenerateAppCommand(event)) {
+     event->SetHandled();
++  }
+ }
+ 
+ void RenderWidgetHostViewEventHandler::OnScrollEvent(ui::ScrollEvent* event) {
+@@ -446,8 +465,9 @@ void RenderWidgetHostViewEventHandler::OnScrollEvent(ui::ScrollEvent* event) {
+ #if !BUILDFLAG(IS_WIN)
+     // TODO(ananta)
+     // Investigate if this is true for Windows 8 Metro ASH as well.
+-    if (event->finger_count() != 2)
++    if (event->finger_count() != 2) {
+       return;
++    }
+ #endif
+     blink::WebMouseWheelEvent mouse_wheel_event =
+         ui::MakeWebMouseWheelEvent(*event);
+@@ -520,13 +540,16 @@ void RenderWidgetHostViewEventHandler::OnTouchEvent(ui::TouchEvent* event) {
+   }
+   pointer_state_.CleanupRemovedTouchPoints(*event);
+ 
+-  if (handled)
++  if (handled) {
+     return;
++  }
+ 
+-  if (had_no_pointer)
++  if (had_no_pointer) {
+     delegate_->selection_controller_client()->OnTouchDown();
+-  if (!pointer_state_.GetPointerCount())
++  }
++  if (!pointer_state_.GetPointerCount()) {
+     delegate_->selection_controller_client()->OnTouchUp();
++  }
+ 
+   // It is important to always mark events as being handled asynchronously when
+   // they are forwarded. This ensures that the current event does not get
+@@ -564,8 +587,9 @@ void RenderWidgetHostViewEventHandler::OnGestureEvent(ui::GestureEvent* event) {
+   }
+ 
+   HandleGestureForTouchSelection(event);
+-  if (event->handled())
++  if (event->handled()) {
+     return;
++  }
+ 
+   // Confirm existing composition text on TAP gesture, to make sure the input
+   // caret won't be moved with an ongoing composition text.
+@@ -649,14 +673,16 @@ bool RenderWidgetHostViewEventHandler::CanRendererHandleEvent(
+   }
+ 
+   if (event->type() == ui::EventType::kMouseExited) {
+-    if (mouse_locked || selection_popup)
++    if (mouse_locked || selection_popup) {
+       return false;
++    }
+ #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+     // Don't forward the mouse leave message which is received when the context
+     // menu is displayed by the page. This confuses the page and causes state
+     // changes.
+-    if (host_->delegate() && host_->delegate()->IsShowingContextMenuOnPage())
++    if (host_->delegate() && host_->delegate()->IsShowingContextMenuOnPage()) {
+       return false;
++    }
+ #endif
+     return true;
+   }
+@@ -713,11 +739,13 @@ void RenderWidgetHostViewEventHandler::ForwardMouseEventToParent(
+   // note that it might be something other than a WebContentsViewAura instance.
+   // TODO(pkotwicz): Find a better way of doing this.
+ 
+-  if (event->flags() & ui::EF_FROM_TOUCH)
++  if (event->flags() & ui::EF_FROM_TOUCH) {
+     return;
++  }
+ 
+-  if (!window_->parent() || !window_->parent()->delegate())
++  if (!window_->parent() || !window_->parent()->delegate()) {
+     return;
++  }
+ 
+   // Take a copy of |event|, to avoid ConvertLocationToTarget mutating the
+   // event.
+@@ -725,8 +753,9 @@ void RenderWidgetHostViewEventHandler::ForwardMouseEventToParent(
+   ui::MouseEvent* mouse_event = static_cast<ui::MouseEvent*>(event_copy.get());
+   mouse_event->ConvertLocationToTarget(window_.get(), window_->parent());
+   window_->parent()->delegate()->OnMouseEvent(mouse_event);
+-  if (mouse_event->handled())
++  if (mouse_event->handled()) {
+     event->SetHandled();
++  }
+ }
+ 
+ void RenderWidgetHostViewEventHandler::HandleGestureForTouchSelection(
+@@ -832,8 +861,9 @@ void RenderWidgetHostViewEventHandler::HandleMouseEventWhileLocked(
+       MoveCursorToCenter(event);
+     }
+   }
+-  if (!ShouldGenerateAppCommand(event))
++  if (!ShouldGenerateAppCommand(event)) {
+     event->SetHandled();
++  }
+ }
+ 
+ void RenderWidgetHostViewEventHandler::ModifyEventMovementAndCoords(
+@@ -927,12 +957,14 @@ bool RenderWidgetHostViewEventHandler::ShouldMoveToCenter(
+   // Do not need to move to center in unadjusted movement mode as
+   // the movement value are directly from OS.
+ #if BUILDFLAG(IS_WIN)
+-  if (mouse_locked_unadjusted_movement_)
++  if (mouse_locked_unadjusted_movement_) {
+     return false;
++  }
+ #endif
+ 
+-  if (window_->GetHost()->SupportsMouseLock())
++  if (window_->GetHost()->SupportsMouseLock()) {
+     return false;
++  }
+ 
+   gfx::Rect rect = window_->bounds();
+   rect = delegate_->ConvertRectToScreen(rect);
+@@ -953,8 +985,9 @@ bool RenderWidgetHostViewEventHandler::ShouldRouteEvents() const {
+   // Do not route events that are currently targeted to page popups such as
+   // <select> element drop-downs, since these cannot contain cross-process
+   // frames.
+-  if (!host_->delegate()->IsWidgetForPrimaryMainFrame(host_))
++  if (!host_->delegate()->IsWidgetForPrimaryMainFrame(host_)) {
+     return false;
++  }
+ 
+   return !!host_->GetInputEventRouter();
+ }
+@@ -982,8 +1015,9 @@ bool RenderWidgetHostViewEventHandler::IsKeyLocked(const ui::KeyEvent& event) {
+   // Note: We never consider 'ESC' to be locked as we don't want to prevent it
+   // from being handled by the browser.  Doing so would have adverse effects
+   // such as the user being unable to exit fullscreen mode.
+-  if (!IsKeyboardLocked() || event.code() == ui::DomCode::ESCAPE)
++  if (!IsKeyboardLocked() || event.code() == ui::DomCode::ESCAPE) {
+     return false;
++  }
+ 
+   return scoped_keyboard_hook_->IsKeyLocked(event.code());
+ }
+diff --git a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+index 9d733d756a..a5d86d909d 100644
+--- a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
++++ b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+@@ -920,6 +920,9 @@ void DesktopWindowTreeHostWin::ReleaseCapture() {
+ 
+ bool DesktopWindowTreeHostWin::CaptureSystemKeyEventsImpl(
+     std::optional<base::flat_set<ui::DomCode>> dom_codes) {
++  if (DesktopHeadlessInputEnabled()) {
++    return false;
++  }
+   // Only one KeyboardHook should be active at a time, otherwise there will be
+   // problems with event routing (i.e. which Hook takes precedence) and
+   // destruction ordering.

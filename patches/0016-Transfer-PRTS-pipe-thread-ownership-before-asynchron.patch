@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Tue, 20 Oct 2026 10:47:03 +0800
-Subject: [PATCH 16/19] Transfer PRTS pipe thread ownership before asynchronous
+Subject: [PATCH 16/38] Transfer PRTS pipe thread ownership before asynchronous
  shutdown
 
 Detach sequence checkers on their UI owner before the joining worker checks thread state; prevents a shutdown DCHECK exposed by GPU acceptance.

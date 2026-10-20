@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 15:58:38 +0800
+Subject: [PATCH 35/38] Preserve logical cursor shape across visibility changes
+ and probe actual omnibox bounds
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_window_registry.cc b/chrome/browser/prts/prts_window_registry.cc
+index e9f4ce46a7..d4e904beb0 100644
+--- a/chrome/browser/prts/prts_window_registry.cc
++++ b/chrome/browser/prts/prts_window_registry.cc
+@@ -31,6 +31,7 @@
+ #include "chrome/browser/ui/views/frame/browser_view.h"
+ #include "chrome/browser/ui/views/frame/contents_web_view.h"
+ #include "chrome/browser/ui/views/location_bar/location_bar_view.h"
++#include "chrome/browser/ui/views/omnibox/omnibox_view_views.h"
+ #include "chrome/browser/ui/views/tabs/tab_strip.h"
+ #include "chrome/browser/ui/views/toolbar/toolbar_view.h"
+ #include "content/public/browser/navigation_controller.h"
+@@ -649,7 +650,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+       };
+       bounds(view->tab_strip_view());
+       bounds(view->toolbar());
+-      bounds(view->GetLocationBarView());
++      bounds(view->GetLocationBarView()->omnibox_view());
+       bounds(view->contents_web_view_for_testing());
+       auto* strip = view->horizontal_tab_strip_for_testing();
+       e.Int(strip ? strip->GetTabCount() : 0, 4);
+diff --git a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+index ff387ea1e0..9d733d756a 100644
+--- a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
++++ b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+@@ -7,6 +7,7 @@
+ #include <dwmapi.h>
+ 
+ #include <algorithm>
++#include <map>
+ #include <string_view>
+ #include <utility>
+ #include <vector>
+@@ -90,6 +91,7 @@ struct HeadlessInputState {
+   uint64_t blocked = 0;
+   uint64_t writes = 0;
+   HeadlessCursorObserver cursor;
++  std::map<aura::WindowTreeHost*, ui::Cursor> cursors;
+ };
+ HeadlessInputState& HeadlessState() {
+   static base::NoDestructor<HeadlessInputState> state;
+@@ -237,6 +239,7 @@ DesktopWindowTreeHostWin::DesktopWindowTreeHostWin(
+       is_modal_(native_widget_delegate_->IsModal()) {}
+ 
+ DesktopWindowTreeHostWin::~DesktopWindowTreeHostWin() {
++  HeadlessState().cursors.erase(this);
+   ClearBackgroundPaintBrush();
+   desktop_native_widget_aura_->OnDesktopWindowTreeHostDestroyed(this);
+   // Normally HandleDestroying() destroys the compositor (which is called
+@@ -944,6 +947,7 @@ DesktopWindowTreeHostWin::GetKeyboardLayoutMap() {
+ 
+ void DesktopWindowTreeHostWin::SetCursorNative(gfx::NativeCursor cursor) {
+   if (SuppressHeadlessNativeCursorCall()) {
++    HeadlessState().cursors.insert_or_assign(this, cursor);
+     if (HeadlessState().cursor) {
+       HeadlessState().cursor.Run(this, cursor, is_cursor_visible_);
+     }
+@@ -960,11 +964,11 @@ void DesktopWindowTreeHostWin::OnCursorVisibilityChangedNative(bool show) {
+   if (SuppressHeadlessNativeCursorCall()) {
+     is_cursor_visible_ = show;
+     if (HeadlessState().cursor) {
+-      HeadlessState().cursor.Run(
+-          this,
+-          ui::Cursor(show ? ui::mojom::CursorType::kPointer
+-                          : ui::mojom::CursorType::kNone),
+-          show);
++      HeadlessState().cursor.Run(this,
++                                 show
++                                     ? HeadlessState().cursors[this]
++                                     : ui::Cursor(ui::mojom::CursorType::kNone),
++                                 show);
+     }
+     return;
+   }

@@ -1,0 +1,161 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 15:50:44 +0800
+Subject: [PATCH 34/38] Complete Views tab-close input when its observed
+ contents is destroyed
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_target_registry.cc b/chrome/browser/prts/prts_target_registry.cc
+index 523404530b..f8dd762dff 100644
+--- a/chrome/browser/prts/prts_target_registry.cc
++++ b/chrome/browser/prts/prts_target_registry.cc
+@@ -386,6 +386,7 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+     }
+     profile_ = startup_profile->GetOriginalProfile();
+     startup_profile->GetPrefs()->SetBoolean(prefs::kPrintingEnabled, false);
++    profile_->GetPrefs()->SetBoolean(prefs::kPrintingEnabled, false);
+     off_the_record_ = startup_profile->IsOffTheRecord();
+     profile_keep_alive_ = ScopedProfileKeepAlive::TryAcquire(
+         profile_, ProfileKeepAliveOrigin::kHeadlessCommand);
+diff --git a/chrome/browser/prts/prts_window_registry.cc b/chrome/browser/prts/prts_window_registry.cc
+index 10316485bd..e9f4ce46a7 100644
+--- a/chrome/browser/prts/prts_window_registry.cc
++++ b/chrome/browser/prts/prts_window_registry.cc
+@@ -25,6 +25,7 @@
+ #include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+ #include "chrome/browser/ui/navigator/browser_navigator.h"
+ #include "chrome/browser/ui/navigator/browser_navigator_params.h"
++#include "chrome/browser/ui/omnibox/omnibox_view.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
+ #include "chrome/browser/ui/views/frame/browser_view.h"
+@@ -34,6 +35,7 @@
+ #include "chrome/browser/ui/views/toolbar/toolbar_view.h"
+ #include "content/public/browser/navigation_controller.h"
+ #include "content/public/browser/navigation_handle.h"
++#include "content/public/browser/render_frame_host.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/browser/web_contents_observer.h"
+ #include "ui/aura/headless_root_size.h"
+@@ -47,6 +49,7 @@
+ #include "ui/display/display.h"
+ #include "ui/display/headless/headless_screen_manager.h"
+ #include "ui/display/screen.h"
++#include "ui/views/focus/focus_manager.h"
+ #include "ui/views/widget/desktop_aura/desktop_headless_input.h"
+ #include "ui/views/widget/widget.h"
+ #include "url/gurl.h"
+@@ -658,6 +661,18 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+       e.Int(views::DesktopHeadlessInputEnabled(), 1);
+       e.Int(views::BlockedHeadlessNativeCursorCalls(), 8);
+       e.Int(views::NativeCursorWriteCalls(), 8);
++      std::set<content::RenderWidgetHost*> widgets;
++      if (auto* contents = Contents(id)) {
++        contents->ForEachRenderFrameHost([&](content::RenderFrameHost* frame) {
++          widgets.insert(frame->GetRenderWidgetHost());
++        });
++      }
++      e.Int(widgets.size(), 4);
++      e.String(base::UTF16ToUTF8(
++          view->GetLocationBarView()->GetOmniboxView()->GetText()));
++      auto* focused = view->GetWidget()->GetFocusManager()->GetFocusedView();
++      e.String(focused ? focused->GetClassName() : "none");
++      e.Int(view->GetWidget()->IsActive(), 1);
+       send_.Run(0x48f, r.id, std::move(e.data));
+       return;
+     }
+diff --git a/content/browser/renderer_host/aura_input_barrier.cc b/content/browser/renderer_host/aura_input_barrier.cc
+index 9e2171c3a8..a9b9157d14 100644
+--- a/content/browser/renderer_host/aura_input_barrier.cc
++++ b/content/browser/renderer_host/aura_input_barrier.cc
+@@ -7,6 +7,7 @@
+ #include <set>
+ 
+ #include "base/functional/bind.h"
++#include "base/logging.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/timer/timer.h"
+ #include "components/input/render_widget_host_input_event_router.h"
+@@ -57,6 +58,8 @@ class AuraBarrier final : public WebContentsObserver,
+                     const blink::WebInputEvent& event,
+                     InputEventSource) override {
+     if (event.TimeStamp() == stamp_) {
++      VLOG(1) << "Aura barrier forwarded type="
++              << static_cast<int>(event.GetType()) << " stamp=" << stamp_;
+       saw_dispatch_ = true;
+       ++pending_[{&host, event.GetType()}];
+     }
+@@ -68,6 +71,8 @@ class AuraBarrier final : public WebContentsObserver,
+     if (event.TimeStamp() != stamp_) {
+       return;
+     }
++    VLOG(1) << "Aura barrier ACK type=" << static_cast<int>(event.GetType())
++            << " stamp=" << stamp_;
+     auto it = pending_.find({&host, event.GetType()});
+     if (it != pending_.end() && --it->second == 0) {
+       pending_.erase(it);
+@@ -81,7 +86,7 @@ class AuraBarrier final : public WebContentsObserver,
+       return entry.first.first == host;
+     });
+   }
+-  void WebContentsDestroyed() override { Finish(false); }
++  void WebContentsDestroyed() override { Finish(true); }
+   void PostPoll() {
+     base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+         FROM_HERE, base::BindOnce(&AuraBarrier::Poll, weak_.GetWeakPtr()),
+@@ -125,6 +130,11 @@ class AuraBarrier final : public WebContentsObserver,
+         base::BindOnce(&AuraBarrier::Finish, weak_.GetWeakPtr()));
+   }
+   void Finish(bool success) {
++    if (!success) {
++      LOG(WARNING) << "Aura barrier incomplete stamp=" << stamp_
++                   << " pending=" << pending_.size()
++                   << " forwarded=" << saw_dispatch_;
++    }
+     timeout_.Stop();
+     if (done_) {
+       base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+diff --git a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+index 62eea1434a..ff387ea1e0 100644
+--- a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
++++ b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+@@ -134,6 +134,9 @@ const int kMouseCaptureRegionBorder = 5;
+ 
+ // Updates the cursor clip region. Used for mouse locking.
+ void UpdateMouseLockRegion(aura::Window* window, bool locked) {
++  if (DesktopHeadlessInputEnabled()) {
++    return;
++  }
+   if (!locked) {
+     ::ClipCursor(nullptr);
+     return;
+@@ -1532,9 +1535,11 @@ void DesktopWindowTreeHostWin::HandleTouchEvent(ui::TouchEvent* event) {
+     // mouse pointer. If the user has their mouse outside of the window when
+     // this sync happens, when they move their mouse again it will show up in
+     // it's original location.
+-    if (touch_drag_cursor_sync && !window) {
++    if (touch_drag_cursor_sync && !window &&
++        !SuppressHeadlessNativeCursorCall()) {
+       POINT event_point(event->location().x(), event->location().y());
+       ::ClientToScreen(GetHWND(), &event_point);
++      RecordNativeCursorWrite();
+       ::SetCursorPos(event_point.x, event_point.y);
+     }
+   }
+diff --git a/ui/views/win/hwnd_message_handler.cc b/ui/views/win/hwnd_message_handler.cc
+index 8bc517f7e9..f222cbeee6 100644
+--- a/ui/views/win/hwnd_message_handler.cc
++++ b/ui/views/win/hwnd_message_handler.cc
+@@ -2922,7 +2922,10 @@ LRESULT HWNDMessageHandler::OnSetCursor(UINT message,
+       // Use the default value, IDC_ARROW.
+       break;
+   }
+-  ::SetCursor(LoadCursor(nullptr, cursor));
++  if (!SuppressHeadlessNativeCursorCall()) {
++    RecordNativeCursorWrite();
++    ::SetCursor(LoadCursor(nullptr, cursor));
++  }
+   return 1;
+ }
+ 

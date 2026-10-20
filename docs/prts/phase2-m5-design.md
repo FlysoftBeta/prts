@@ -595,3 +595,43 @@ is stale. Keep those lifetime gates. Physical acquired-device-loss recovery,
 Windows 10/other-GPU/AppContainer qualification and connected-desktop focus
 were not solved by this design. Avoid treating root capture as verification of
 an offscreen output-device change: P1/P7/P8 remain separate future work.
+
+## Implementation deviations (M5a)
+
+- Step 1/2 deliberately negotiate a partial v2 capability set (discovery=1,
+  whole-window=4 only after the root adapter lands). Popup/alpha capability bits
+  remain absent until steps 4/5; a client requiring the complete M5 feature set
+  must reject this intermediate implementation. v1 remains the default.
+- Runtime `prts-m5a-capture1.log` disproved the assumption that passing a client
+  rectangle to DesktopWindowTreeHostWin::SetBoundsInPixels yields that client
+  size. Its getter reports client bounds, but the setter forwards outer bounds
+  to HWNDMessageHandler, retaining invisible headless resize insets (960x640
+  requested yielded 938x629 at DSF1). The PRTS adapter now measures and corrects
+  those insets after moving to the synthetic display, with a bounded loop.
+  The acceptance dimensions are unchanged; fractional DSF remains a runtime gate.
+- Opt-in `--prts-test-hooks` provides real TabStripModel move/discard operations
+  and Views/control/compositor geometry diagnostics. These are test authority
+  only, do not use OS input or change the public product protocol, and are not
+  reachable without the switch. They replace hardcoded UI pixel positions.
+- Later fractional resize notifications overwrote one-shot root bounds. The
+  generic optional owned Aura `kHeadlessRootSizeKey` now preserves the requested
+  logical canvas while compositor allocation remains ceil(DIP*DSF). Runtime
+  961x641@1.25 yields Views961x641 and compositor1202x802; CSS viewport can
+  still enclose fractional renderer pixels by one CSS pixel.
+- Intel QSV can accept the first1202x802 texture then fail a later encode with
+  E_FAIL. M5 keeps M4's existing any-frame software encoder recovery, preserving
+  the captured GPU texture and using staging for software. Standard960x640 at
+  DSF1/2/1.25 passes native QSV; odd fractional dimensions are explicitly reported
+  as software recovery, never claimed zero-copy encoding.
+- In this disconnected session GetCursorInfo returns ACCESS_DENIED. Physical
+  global cursor observation is explicitly UNVERIFIED, just as foreground is;
+  no successful cursor-state observation is claimed. Production guards installed
+  before any Widget suppress SetCursor/ShowCursor/SetCursorPos (including native
+  host fallbacks), raw input, native drag and move loops. Counters at the native
+  write sites must remain zero during acceptance; suppressed calls are counted.
+  This provides direct PRTS no-native-write evidence despite the inaccessible
+  global cursor query. Reconnected physical cursor qualification remains needed.
+- `PRTS_BROWSER_PROTOCOL=2` enables a temporary single-selected-window projection
+  into the existing M4 Node/media API. Binary negotiation is exact2.0 and source
+  frames are mapped to their validated owning Window scene. The native v2 Node
+  API and simultaneous per-window workers remain step6, outside M5a scope.

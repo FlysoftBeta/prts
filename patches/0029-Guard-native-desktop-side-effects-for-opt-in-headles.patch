@@ -1,0 +1,505 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 15:30:18 +0800
+Subject: [PATCH 29/38] Guard native desktop side effects for opt-in headless
+ PRTS input
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/external_protocol/external_protocol_handler.cc b/chrome/browser/external_protocol/external_protocol_handler.cc
+index 1c59be7919..401706fba1 100644
+--- a/chrome/browser/external_protocol/external_protocol_handler.cc
++++ b/chrome/browser/external_protocol/external_protocol_handler.cc
+@@ -11,6 +11,7 @@
+ 
+ #include "base/check.h"
+ #include "base/check_op.h"
++#include "base/command_line.h"
+ #include "base/containers/fixed_flat_map.h"
+ #include "base/containers/fixed_flat_set.h"
+ #include "base/debug/dump_without_crashing.h"
+@@ -102,8 +103,9 @@ constexpr auto kDeniedSchemes = base::MakeFixedFlatSet<std::string_view>({
+ void AddMessageToConsole(const content::WeakDocumentPtr& document,
+                          blink::mojom::ConsoleMessageLevel level,
+                          const std::string& message) {
+-  if (content::RenderFrameHost* rfh = document.AsRenderFrameHostIfValid())
++  if (content::RenderFrameHost* rfh = document.AsRenderFrameHostIfValid()) {
+     rfh->AddMessageToConsole(level, message);
++  }
+ }
+ 
+ #if !BUILDFLAG(IS_ANDROID)
+@@ -112,8 +114,12 @@ void AddMessageToConsole(const content::WeakDocumentPtr& document,
+ scoped_refptr<shell_integration::DefaultSchemeClientWorker> CreateShellWorker(
+     const GURL& url,
+     ExternalProtocolHandler::Delegate* delegate) {
+-  if (delegate)
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("prts-pipe")) {
++    return;
++  }
++  if (delegate) {
+     return delegate->CreateShellWorker(url);
++  }
+   return base::MakeRefCounted<shell_integration::DefaultSchemeClientWorker>(
+       url);
+ }
+@@ -124,8 +130,9 @@ ExternalProtocolHandler::BlockState GetBlockStateWithDelegate(
+     const url::Origin* initiating_origin,
+     ExternalProtocolHandler::Delegate* delegate,
+     Profile* profile) {
+-  if (delegate)
++  if (delegate) {
+     return delegate->GetBlockState(scheme, profile);
++  }
+   return ExternalProtocolHandler::GetBlockState(scheme, initiating_origin,
+                                                 profile);
+ }
+@@ -180,8 +187,9 @@ void LaunchUrlWithoutSecurityCheckWithDelegate(
+ 
+   // |web_contents| is only passed in to find browser context. Do not assume
+   // that the external protocol request came from the main frame.
+-  if (!web_contents)
++  if (!web_contents) {
+     return;
++  }
+ 
+   AddMessageToConsole(
+       initiator_document, blink::mojom::ConsoleMessageLevel::kInfo,
+@@ -230,9 +238,14 @@ void OnDefaultSchemeClientWorkerFinished(
+     shell_integration::DefaultWebClientState state,
+     const std::u16string& program_name) {
+   CHECK_CURRENTLY_ON(content::BrowserThread::UI, base::NotFatalUntil::M161);
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("prts-pipe")) {
++    LOG(WARNING) << "PRTS: external application launch is unsupported";
++    return;
++  }
+ 
+-  if (delegate)
++  if (delegate) {
+     delegate->FinishedProcessingCheck();
++  }
+ 
+   content::WebContents* web_contents = web_contents_getter.Run();
+ 
+@@ -242,8 +255,9 @@ void OnDefaultSchemeClientWorkerFinished(
+   bool chrome_is_default_handler = state == shell_integration::IS_DEFAULT;
+ 
+   if (chrome_is_default_handler) {
+-    if (delegate)
++    if (delegate) {
+       delegate->BlockRequest();
++    }
+     return;
+   }
+ 
+@@ -297,8 +311,9 @@ void OnDefaultSchemeClientWorkerFinished(
+ bool IsSchemeOriginPairAllowedByPolicy(const std::string& scheme,
+                                        const url::Origin* initiating_origin,
+                                        PrefService* prefs) {
+-  if (!initiating_origin)
++  if (!initiating_origin) {
+     return false;
++  }
+ 
+   const base::ListValue& exempted_protocols =
+       prefs->GetList(prefs::kAutoLaunchProtocolsFromOrigins);
+@@ -315,8 +330,9 @@ bool IsSchemeOriginPairAllowedByPolicy(const std::string& scheme,
+       break;
+     }
+   }
+-  if (!origin_patterns)
++  if (!origin_patterns) {
+     return false;
++  }
+ 
+   url_matcher::URLMatcher matcher;
+   base::MatcherStringPattern::ID id(0);
+@@ -396,8 +412,9 @@ ExternalProtocolHandler::BlockState ExternalProtocolHandler::GetBlockState(
+   LogRequestForScheme(scheme);
+ 
+   // If we are being flooded with requests, block the request.
+-  if (!g_accept_requests)
++  if (!g_accept_requests) {
+     return BLOCK;
++  }
+ 
+   if (scheme.length() == 1) {
+     // We have a URL that looks something like:
+@@ -524,6 +541,9 @@ void ExternalProtocolHandler::LaunchUrl(
+ ) {
+   CHECK_CURRENTLY_ON(content::BrowserThread::UI, base::NotFatalUntil::M161);
+ 
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch("prts-pipe")) {
++    return;
++  }
+   // Disable anti-flood protection if the user is invoking a bookmark or
+   // navigating directly using the omnibox.
+   if (!g_accept_requests &&
+@@ -544,8 +564,9 @@ void ExternalProtocolHandler::LaunchUrl(
+ 
+   content::WebContents* web_contents = web_contents_getter.Run();
+   Profile* profile = nullptr;
+-  if (web_contents)  // Maybe NULL during testing.
++  if (web_contents) {  // Maybe NULL during testing.
+     profile = Profile::FromBrowserContext(web_contents->GetBrowserContext());
++  }
+   BlockState block_state = GetBlockStateWithDelegate(
+       escaped_url.GetScheme(), base::OptionalToPtr(initiating_origin),
+       g_external_protocol_handler_delegate, profile);
+@@ -555,8 +576,9 @@ void ExternalProtocolHandler::LaunchUrl(
+         "Not allowed to launch '" + url.possibly_invalid_spec() + "'" +
+             (g_accept_requests ? "." : " because a user gesture is required."));
+ 
+-    if (g_external_protocol_handler_delegate)
++    if (g_external_protocol_handler_delegate) {
+       g_external_protocol_handler_delegate->BlockRequest();
++    }
+     return;
+   }
+ 
+diff --git a/chrome/browser/prts/prts_controller.cc b/chrome/browser/prts/prts_controller.cc
+index 2b28069bda..cfb9d71520 100644
+--- a/chrome/browser/prts/prts_controller.cc
++++ b/chrome/browser/prts/prts_controller.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ #include "chrome/browser/prts/prts_controller.h"
+ 
++#include "base/command_line.h"
+ #include "base/functional/bind.h"
+ #include "base/logging.h"
+ #include "base/process/process_handle.h"
+@@ -12,6 +13,7 @@
+ #include "chrome/browser/prts/prts_window_registry.h"
+ #include "content/public/browser/gpu_data_manager.h"
+ #include "gpu/config/gpu_info.h"
++#include "ui/views/widget/desktop_aura/desktop_headless_input.h"
+ 
+ namespace prts {
+ PrtsController::PrtsController() = default;
+@@ -19,6 +21,9 @@ PrtsController::~PrtsController() {
+   Stop();
+ }
+ void PrtsController::Prepare() {
++  views::EnableDesktopHeadlessInput();
++  base::CommandLine::ForCurrentProcess()->AppendSwitch(
++      "disable-cursor-event-hook");
+   VLOG(1) << "PRTS prepare";
+   targets_ = std::make_unique<PrtsTargetRegistry>(
+       base::BindRepeating(&PrtsController::Send, weak_factory_.GetWeakPtr()));
+diff --git a/chrome/browser/prts/prts_target_registry.cc b/chrome/browser/prts/prts_target_registry.cc
+index 84615cebf9..523404530b 100644
+--- a/chrome/browser/prts/prts_target_registry.cc
++++ b/chrome/browser/prts/prts_target_registry.cc
+@@ -33,8 +33,10 @@
+ #include "chrome/browser/ui/navigator/browser_navigator_params.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model.h"
+ #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
++#include "chrome/common/pref_names.h"
+ #include "components/keep_alive_registry/keep_alive_types.h"
+ #include "components/keep_alive_registry/scoped_keep_alive.h"
++#include "components/prefs/pref_service.h"
+ #include "content/public/browser/devtools_agent_host.h"
+ #include "content/public/browser/devtools_agent_host_client.h"
+ #include "content/public/browser/navigation_controller.h"
+@@ -383,6 +385,7 @@ class PrtsTargetRegistry::Impl : public BrowserCollectionObserver,
+       startup_profile = ProfileManager::GetLastUsedProfile();
+     }
+     profile_ = startup_profile->GetOriginalProfile();
++    startup_profile->GetPrefs()->SetBoolean(prefs::kPrintingEnabled, false);
+     off_the_record_ = startup_profile->IsOffTheRecord();
+     profile_keep_alive_ = ScopedProfileKeepAlive::TryAcquire(
+         profile_, ProfileKeepAliveOrigin::kHeadlessCommand);
+@@ -853,7 +856,9 @@ void PrtsTargetRegistry::Prepare() {
+ void PrtsTargetRegistry::Start() {
+   impl_->Start();
+ }
+-void PrtsTargetRegistry::SetWindowMode() { impl_->SetWindowMode(); }
++void PrtsTargetRegistry::SetWindowMode() {
++  impl_->SetWindowMode();
++}
+ void PrtsTargetRegistry::Stop() {
+   impl_->Stop();
+ }
+diff --git a/chrome/browser/prts/prts_window_registry.cc b/chrome/browser/prts/prts_window_registry.cc
+index e49921d062..2322068153 100644
+--- a/chrome/browser/prts/prts_window_registry.cc
++++ b/chrome/browser/prts/prts_window_registry.cc
+@@ -45,6 +45,7 @@
+ #include "ui/display/display.h"
+ #include "ui/display/headless/headless_screen_manager.h"
+ #include "ui/display/screen.h"
++#include "ui/views/widget/desktop_aura/desktop_headless_input.h"
+ #include "url/gurl.h"
+ 
+ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+@@ -484,6 +485,9 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+           bounds(strip->tab_at(i));
+         }
+       }
++      e.Int(views::DesktopHeadlessInputEnabled(), 1);
++      e.Int(views::BlockedHeadlessNativeCursorCalls(), 8);
++      e.Int(views::NativeCursorWriteCalls(), 8);
+       send_.Run(0x48f, r.id, std::move(e.data));
+       return;
+     }
+diff --git a/ui/base/ui_base_features.cc b/ui/base/ui_base_features.cc
+index ea5027458f..19142fac60 100644
+--- a/ui/base/ui_base_features.cc
++++ b/ui/base/ui_base_features.cc
+@@ -173,6 +173,10 @@ bool IsSystemCursorSizeSupported() {
+ BASE_FEATURE(kUseCursorEventHook, base::FEATURE_DISABLED_BY_DEFAULT);
+ 
+ bool ShouldUseCursorEventHook() {
++  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
++          "disable-cursor-event-hook")) {
++    return false;
++  }
+   return base::FeatureList::IsEnabled(kUseCursorEventHook);
+ }
+ 
+diff --git a/ui/views/BUILD.gn b/ui/views/BUILD.gn
+index c0d1b5edde..aa7231b5d7 100644
+--- a/ui/views/BUILD.gn
++++ b/ui/views/BUILD.gn
+@@ -948,6 +948,7 @@ component("views") {
+         public += [
+           "widget/desktop_aura/desktop_drag_drop_client_win.h",
+           "widget/desktop_aura/desktop_window_tree_host_win.h",
++            "widget/desktop_aura/desktop_headless_input.h",
+         ]
+         sources += [
+           "widget/desktop_aura/desktop_drag_drop_client_win.cc",
+diff --git a/ui/views/widget/desktop_aura/desktop_drag_drop_client_win.cc b/ui/views/widget/desktop_aura/desktop_drag_drop_client_win.cc
+index cf9cd3a0f2..e90e097dc8 100644
+--- a/ui/views/widget/desktop_aura/desktop_drag_drop_client_win.cc
++++ b/ui/views/widget/desktop_aura/desktop_drag_drop_client_win.cc
+@@ -24,6 +24,7 @@
+ #include "ui/display/win/screen_win.h"
+ #include "ui/views/views_features.h"
+ #include "ui/views/widget/desktop_aura/desktop_drop_target_win.h"
++#include "ui/views/widget/desktop_aura/desktop_headless_input.h"
+ #include "ui/views/widget/desktop_aura/desktop_window_tree_host_win.h"
+ 
+ namespace views {
+@@ -82,6 +83,9 @@ ui::mojom::DragOperation DesktopDragDropClientWin::StartDragAndDrop(
+     const gfx::Point& screen_location,
+     int allowed_operations,
+     ui::mojom::DragEventSource source) {
++  if (DesktopHeadlessInputEnabled()) {
++    return ui::mojom::DragOperation::kNone;
++  }
+   CHECK(!g_is_dragging);
+   if (desktop_host_->IsInNativeMoveResizeLoop()) {
+     return ui::PreferredDragOperation(
+diff --git a/ui/views/widget/desktop_aura/desktop_headless_input.h b/ui/views/widget/desktop_aura/desktop_headless_input.h
+new file mode 100644
+index 0000000000..1c1ec2e32b
+--- /dev/null
++++ b/ui/views/widget/desktop_aura/desktop_headless_input.h
+@@ -0,0 +1,29 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++#ifndef UI_VIEWS_WIDGET_DESKTOP_AURA_DESKTOP_HEADLESS_INPUT_H_
++#define UI_VIEWS_WIDGET_DESKTOP_AURA_DESKTOP_HEADLESS_INPUT_H_
++#include <stdint.h>
++
++#include "base/functional/callback.h"
++#include "ui/views/views_export.h"
++namespace aura {
++class WindowTreeHost;
++}
++namespace ui {
++class Cursor;
++}
++namespace views {
++using HeadlessCursorObserver = base::RepeatingCallback<
++    void(aura::WindowTreeHost*, const ui::Cursor&, bool)>;
++// UI-sequence opt-in, installed before any desktop Widget is created.
++VIEWS_EXPORT void EnableDesktopHeadlessInput();
++VIEWS_EXPORT bool DesktopHeadlessInputEnabled();
++VIEWS_EXPORT void SetHeadlessCursorObserver(HeadlessCursorObserver observer);
++VIEWS_EXPORT uint64_t BlockedHeadlessNativeCursorCalls();
++VIEWS_EXPORT uint64_t NativeCursorWriteCalls();
++VIEWS_EXPORT void RecordNativeCursorWrite();
++// Returns true when the native operation must be suppressed.
++VIEWS_EXPORT bool SuppressHeadlessNativeCursorCall();
++}  // namespace views
++#endif
+diff --git a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+index 228f4a8ff9..62eea1434a 100644
+--- a/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
++++ b/ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc
+@@ -22,6 +22,7 @@
+ #include "base/memory/scoped_refptr.h"
+ #include "base/memory/weak_ptr.h"
+ #include "base/metrics/histogram_functions.h"
++#include "base/no_destructor.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/trace_event/trace_event.h"
+ #include "base/win/win_util.h"
+@@ -64,6 +65,7 @@
+ #include "ui/views/views_features.h"
+ #include "ui/views/views_switches.h"
+ #include "ui/views/widget/desktop_aura/desktop_drag_drop_client_win.h"
++#include "ui/views/widget/desktop_aura/desktop_headless_input.h"
+ #include "ui/views/widget/desktop_aura/desktop_native_cursor_manager.h"
+ #include "ui/views/widget/desktop_aura/desktop_native_cursor_manager_win.h"
+ #include "ui/views/widget/desktop_aura/desktop_native_widget_aura.h"
+@@ -82,6 +84,43 @@
+ DEFINE_UI_CLASS_PROPERTY_TYPE(views::DesktopWindowTreeHostWin*)
+ 
+ namespace views {
++namespace {
++struct HeadlessInputState {
++  bool enabled = false;
++  uint64_t blocked = 0;
++  uint64_t writes = 0;
++  HeadlessCursorObserver cursor;
++};
++HeadlessInputState& HeadlessState() {
++  static base::NoDestructor<HeadlessInputState> state;
++  return *state;
++}
++}  // namespace
++void EnableDesktopHeadlessInput() {
++  HeadlessState().enabled = true;
++}
++bool DesktopHeadlessInputEnabled() {
++  return HeadlessState().enabled;
++}
++void SetHeadlessCursorObserver(HeadlessCursorObserver observer) {
++  HeadlessState().cursor = std::move(observer);
++}
++uint64_t BlockedHeadlessNativeCursorCalls() {
++  return HeadlessState().blocked;
++}
++uint64_t NativeCursorWriteCalls() {
++  return HeadlessState().writes;
++}
++void RecordNativeCursorWrite() {
++  ++HeadlessState().writes;
++}
++bool SuppressHeadlessNativeCursorCall() {
++  if (!HeadlessState().enabled) {
++    return false;
++  }
++  ++HeadlessState().blocked;
++  return true;
++}
+ 
+ namespace {
+ 
+@@ -658,6 +697,9 @@ Widget::MoveLoopResult DesktopWindowTreeHostWin::RunMoveLoop(
+     const gfx::Vector2d& drag_offset,
+     Widget::MoveLoopSource source,
+     Widget::MoveLoopEscapeBehavior escape_behavior) {
++  if (DesktopHeadlessInputEnabled()) {
++    return Widget::MoveLoopResult::kCanceled;
++  }
+   const bool hide_on_escape =
+       escape_behavior == Widget::MoveLoopEscapeBehavior::kHide;
+ 
+@@ -898,6 +940,12 @@ DesktopWindowTreeHostWin::GetKeyboardLayoutMap() {
+ }
+ 
+ void DesktopWindowTreeHostWin::SetCursorNative(gfx::NativeCursor cursor) {
++  if (SuppressHeadlessNativeCursorCall()) {
++    if (HeadlessState().cursor) {
++      HeadlessState().cursor.Run(this, cursor, is_cursor_visible_);
++    }
++    return;
++  }
+   TRACE_EVENT1("ui,input", "DesktopWindowTreeHostWin::SetCursorNative",
+                "cursor", cursor.type());
+ 
+@@ -906,6 +954,17 @@ void DesktopWindowTreeHostWin::SetCursorNative(gfx::NativeCursor cursor) {
+ }
+ 
+ void DesktopWindowTreeHostWin::OnCursorVisibilityChangedNative(bool show) {
++  if (SuppressHeadlessNativeCursorCall()) {
++    is_cursor_visible_ = show;
++    if (HeadlessState().cursor) {
++      HeadlessState().cursor.Run(
++          this,
++          ui::Cursor(show ? ui::mojom::CursorType::kPointer
++                          : ui::mojom::CursorType::kNone),
++          show);
++    }
++    return;
++  }
+   if (base::FeatureList::IsEnabled(::features::kHideCursorWhileTyping)) {
+     // Cursor visibility is handled by setting the platform cursor to
+     // ui::mojom::CursorType::kNone in
+@@ -920,28 +979,42 @@ void DesktopWindowTreeHostWin::OnCursorVisibilityChangedNative(bool show) {
+     return;
+   }
+   is_cursor_visible_ = show;
++  RecordNativeCursorWrite();
+   ::ShowCursor(!!show);
+ }
+ 
+ void DesktopWindowTreeHostWin::MoveCursorToScreenLocationInPixels(
+     const gfx::Point& location_in_pixels) {
++  if (SuppressHeadlessNativeCursorCall()) {
++    return;
++  }
+   POINT cursor_location = location_in_pixels.ToPOINT();
+   ::ClientToScreen(GetHWND(), &cursor_location);
++  RecordNativeCursorWrite();
+   ::SetCursorPos(cursor_location.x, cursor_location.y);
+ }
+ 
+ std::unique_ptr<aura::ScopedEnableUnadjustedMouseEvents>
+ DesktopWindowTreeHostWin::RequestUnadjustedMovement() {
++  if (DesktopHeadlessInputEnabled()) {
++    return nullptr;
++  }
+   return message_handler_->RegisterUnadjustedMouseEvent();
+ }
+ 
+ void DesktopWindowTreeHostWin::LockMouse(aura::Window* window) {
++  if (DesktopHeadlessInputEnabled()) {
++    return;
++  }
+   UpdateMouseLockRegion(window, true /*locked*/);
+   message_handler_->set_mouse_locked(true);
+   WindowTreeHost::LockMouse(window);
+ }
+ 
+ void DesktopWindowTreeHostWin::UnlockMouse(aura::Window* window) {
++  if (DesktopHeadlessInputEnabled()) {
++    return;
++  }
+   UpdateMouseLockRegion(window, false /*locked*/);
+   message_handler_->set_mouse_locked(false);
+   WindowTreeHost::UnlockMouse(window);
+diff --git a/ui/views/win/hwnd_message_handler.cc b/ui/views/win/hwnd_message_handler.cc
+index 42fd008731..8bc517f7e9 100644
+--- a/ui/views/win/hwnd_message_handler.cc
++++ b/ui/views/win/hwnd_message_handler.cc
+@@ -77,6 +77,7 @@
+ #include "ui/latency/latency_info.h"
+ #include "ui/native_theme/native_theme_win.h"
+ #include "ui/views/views_delegate.h"
++#include "ui/views/widget/desktop_aura/desktop_headless_input.h"
+ #include "ui/views/widget/widget_hwnd_utils.h"
+ #include "ui/views/win/fullscreen_handler.h"
+ #include "ui/views/win/hwnd_message_handler_delegate.h"
+@@ -1044,10 +1045,15 @@ bool HWNDMessageHandler::SetTitle(const std::u16string& title) {
+ }
+ 
+ void HWNDMessageHandler::SetCursor(scoped_refptr<ui::WinCursor> cursor) {
++  if (SuppressHeadlessNativeCursorCall()) {
++    current_cursor_ = std::move(cursor);
++    return;
++  }
+   DCHECK(cursor);
+ 
+   TRACE_EVENT1("ui,input", "HWNDMessageHandler::SetCursor", "cursor",
+                static_cast<const void*>(cursor->hcursor()));
++  RecordNativeCursorWrite();
+   ::SetCursor(cursor->hcursor());
+   current_cursor_ = cursor;
+ }

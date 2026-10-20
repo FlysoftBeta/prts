@@ -1,5 +1,6 @@
 //! Windows anonymous-pipe Chromium launcher. Independent of the synthetic video source.
 use crate::browser_wire::{self as wire, *};
+use crate::window_wire as ww;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use std::{
     collections::{BTreeSet, VecDeque},
@@ -183,7 +184,7 @@ impl RawBrowser {
                 "Invalid browser log path"
             );
             text.push_str(
-                " --enable-logging --vmodule=prts_controller=1,prts_capture=1 --log-file=\"",
+                " --enable-logging --vmodule=prts_controller=1,prts_capture=1,aura_input_barrier=1 --log-file=\"",
             );
             text.push_str(&log);
             text.push('"');
@@ -310,7 +311,27 @@ enum Incoming {
     Failure(String),
     FrameClosed(String),
 }
+// Temporary single-selected-window adapter for the existing M4 media/control
+// plane. IDs and frames are windows in v2; tab metadata remains in Window.
+// Native v2 frontend/per-window workers are implemented in M5 step 6.
+fn project_window(w: &ww::Window, selected: bool) -> Result<Vec<u8>> {
+    let mut p = w.id.to_le_bytes().to_vec();
+    p.push(w.kind.min(2));
+    p.extend(w.opener.to_le_bytes());
+    let active = w.tabs.iter().find(|t| t.id == w.active_tab);
+    wire::string(active.map_or("", |t| t.url.as_str()), &mut p)?;
+    wire::string(active.map_or("", |t| t.title.as_str()), &mut p)?;
+    p.push(active.map_or(0, |t| t.load));
+    w.size.encode(&mut p)?;
+    p.extend(w.generation.to_le_bytes());
+    p.push(selected as u8);
+    Ok(p)
+}
 struct Session {
+    major: u16,
+    selected_window: u64,
+    windows: std::collections::BTreeMap<u64, ww::Window>,
+    scenes: std::collections::BTreeMap<u64, ww::Scene>,
     job: OwnedHandle,
     process: OwnedHandle,
     frames: crate::browser_frames::Resources,
@@ -334,7 +355,7 @@ struct Session {
     transcript: VecDeque<(u16, u64)>,
 }
 impl Session {
-    fn start(mut raw: RawBrowser) -> Result<Self> {
+    fn start(mut raw: RawBrowser, selected_major: u16) -> Result<Self> {
         let (tx, incoming) = mpsc::sync_channel(1024);
         let queued_bytes = Arc::new(AtomicUsize::new(0));
         let queued_messages = Arc::new(AtomicUsize::new(0));
@@ -351,9 +372,13 @@ impl Session {
             let count = queued_messages.clone();
             let overflow = overflow.clone();
             threads.push(thread::spawn(move || {
+                let mut major = if is_frame { selected_major } else { 1 };
                 loop {
-                    match Record::read(&mut file) {
+                    match Record::read_version(&mut file, major) {
                         Ok(record) => {
+                            if !is_frame && record.kind == HELLO_ACK {
+                                major = selected_major;
+                            }
                             if is_frame && !matches!(record.kind, 0x310 | 0x311) {
                                 let _ = tx.try_send(Incoming::Failure(
                                     "Invalid frame pipe direction".into(),
@@ -410,6 +435,10 @@ impl Session {
         }));
         raw.pid = 0; // Disarm raw launch RAII only after all resources have transferred.
         let session = Self {
+            major: 1,
+            selected_window: 0,
+            windows: Default::default(),
+            scenes: Default::default(),
             job: raw.job.try_clone()?,
             process,
             frames: Default::default(),
@@ -480,8 +509,134 @@ impl Session {
             };
         }
     }
-    fn stash(&mut self, record: Record) -> Result<()> {
+    fn select_window(&mut self, id: u64) -> Result<()> {
+        let previous = std::mem::replace(&mut self.selected_window, id);
+        if previous != id
+            && let Some(old) = self.windows.get(&previous)
+        {
+            let record = Record {
+                kind: CHANGED,
+                id: 0,
+                payload: project_window(old, false)?,
+            };
+            self.stash(record)?;
+        }
+        Ok(())
+    }
+    fn stash(&mut self, mut record: Record) -> Result<()> {
+        if self.major == 2 {
+            match record.kind {
+                ww::WINDOW_CAPS => {
+                    let mut d = Decoder::new(&record.payload);
+                    for _ in 0..4 {
+                        d.u32()?;
+                    }
+                    d.u64()?;
+                    d.u64()?;
+                    d.u32()?;
+                    d.u32()?;
+                    d.finish()?;
+                    return Ok(());
+                }
+                ww::WINDOW_SCENE => {
+                    let scene = ww::Scene::decode(&record.payload)?;
+                    if let Some(previous) = self.scenes.get(&scene.window) {
+                        ensure!(scene.revision > previous.revision, "Stale window scene");
+                    }
+                    let window = self
+                        .windows
+                        .get(&scene.window)
+                        .context("Scene before window")?;
+                    ensure!(
+                        window.generation == scene.generation,
+                        "Scene/window generation mismatch"
+                    );
+                    ensure!(
+                        scene.layers.len() == 1,
+                        "Single-window adapter does not compose auxiliary layers"
+                    );
+                    for layer in &scene.layers {
+                        ensure!(
+                            layer.source != window.id
+                                && !window.tabs.iter().any(|t| t.id == layer.source),
+                            "Source aliases window/tab identity"
+                        );
+                        ensure!(
+                            !self
+                                .scenes
+                                .values()
+                                .filter(|s| s.window != scene.window)
+                                .any(|s| s.layers.iter().any(|l| l.source == layer.source)),
+                            "Source crossed window owners"
+                        );
+                        ensure!(
+                            layer.role == 1
+                                && layer.parent == 0
+                                && layer.visible
+                                && layer.format == 1
+                                && layer.rect.x == 0.
+                                && layer.rect.y == 0.
+                                && layer.rect.width == f64::from(window.size.width)
+                                && layer.rect.height == f64::from(window.size.height)
+                                && layer.dpr == window.size.dpr,
+                            "Incompatible base scene geometry"
+                        );
+                    }
+                    self.scenes.insert(scene.window, scene);
+                    return Ok(());
+                }
+                ww::WINDOW_CREATED | ww::WINDOW_CHANGED => {
+                    let window = ww::Window::decode(&record.payload)?;
+                    if record.kind == ww::WINDOW_CREATED
+                        && (self.selected_window == 0 || window.input_active)
+                    {
+                        self.select_window(window.id)?;
+                    }
+                    record.payload = project_window(&window, self.selected_window == window.id)?;
+                    self.windows.insert(window.id, window);
+                    record.kind = if record.kind == ww::WINDOW_CREATED {
+                        CREATED
+                    } else {
+                        CHANGED
+                    };
+                }
+                ww::WINDOW_CLOSED => {
+                    let mut d = Decoder::new(&record.payload);
+                    let id = d.u64()?;
+                    d.string()?;
+                    d.finish()?;
+                    self.windows.remove(&id);
+                    self.scenes.remove(&id);
+                    if self.selected_window == id {
+                        let next = self.windows.keys().next().copied().unwrap_or(0);
+                        self.select_window(next)?;
+                        if let Some(w) = self.windows.get(&next) {
+                            self.stash(Record {
+                                kind: CHANGED,
+                                id: 0,
+                                payload: project_window(w, true)?,
+                            })?;
+                        }
+                    }
+                    record.kind = CLOSED;
+                }
+                ww::WINDOW_CURSOR => record.kind = CURSOR_CHANGED,
+                _ => {}
+            }
+        }
         if matches!(record.kind, 0x300 | 0x301 | 0x310 | 0x311) {
+            if self.major == 2 && record.kind == 0x300 {
+                let mut d = Decoder::new(&record.payload);
+                let source = d.u64()?;
+                let generation = d.u64()?;
+                ensure!(
+                    self.scenes.values().any(|s| s
+                        .layers
+                        .iter()
+                        .any(|l| l.source == source && l.generation == generation)),
+                    "Registration for unknown/stale source"
+                );
+            }
             let reply = match self.frames.process(&record, handle(&self.process)) {
                 Ok(reply) => reply,
                 Err(e) if record.kind == 0x300 && record.payload.get(24) == Some(&1) => {
@@ -504,7 +659,7 @@ impl Session {
                 }
                 Err(e) => return self.fail(format!("Frame resource error: {e:#}")),
             };
-            return self.enqueue(reply.encode()?);
+            return self.enqueue(reply.encode_version(self.major)?);
         }
         let size = record.payload.len() + 24;
         let event = match record.event() {
@@ -560,12 +715,42 @@ impl Session {
         ensure!(!self.shutdown, "Browser shut down");
         let id = self.next_id;
         self.next_id = self.next_id.checked_add(2).context("Request ID overflow")?;
-        let bytes = Record { kind, id, payload }.encode()?;
+        let mut wire_kind = kind;
+        let mut payload = payload;
+        if self.major == 2 {
+            wire_kind = match kind {
+                CREATE => ww::WINDOW_CREATE,
+                CLOSE => ww::WINDOW_CLOSE,
+                LIST => ww::WINDOW_LIST,
+                RESIZE => ww::WINDOW_RESIZE,
+                ACTIVATE => ww::WINDOW_ACTIVATE,
+                0x321 => ww::WINDOW_FRAME_CONFIG,
+                0x322 => ww::WINDOW_FRAME_REFRESH,
+                NAVIGATE => {
+                    ensure!(payload.len() >= 8, "Truncated window navigation");
+                    let id = u64::from_le_bytes(payload[..8].try_into()?);
+                    let tab = self
+                        .windows
+                        .get(&id)
+                        .context("Unknown navigation window")?
+                        .active_tab;
+                    payload[..8].copy_from_slice(&tab.to_le_bytes());
+                    ww::TAB_NAVIGATE
+                }
+                _ => kind,
+            };
+        }
+        let bytes = Record {
+            kind: wire_kind,
+            id,
+            payload,
+        }
+        .encode_version(self.major)?;
         self.enqueue(bytes)?;
         self.last_request = Instant::now();
         let deadline = Instant::now() + DEADLINE;
         loop {
-            let record = self.incoming(
+            let mut record = self.incoming(
                 deadline.saturating_duration_since(Instant::now()),
                 kind == SHUTDOWN,
             )?;
@@ -594,6 +779,30 @@ impl Session {
                     Err(e) => return self.fail(format!("Malformed ERROR: {e}")),
                 };
                 bail!("Browser error {code} (retryable={retryable}): {message}");
+            }
+            if self.major == 2 && record.kind == ww::WINDOW_RESULT {
+                let w = ww::Window::decode(&record.payload)?;
+                if kind == ACTIVATE {
+                    self.select_window(w.id)?;
+                    self.stash(Record {
+                        kind: CHANGED,
+                        id: 0,
+                        payload: project_window(&w, true)?,
+                    })?;
+                }
+                record.payload = project_window(&w, self.selected_window == w.id)?;
+                self.windows.insert(w.id, w);
+                record.kind = TARGET_RESULT;
+            } else if self.major == 2 && record.kind == ww::WINDOW_LIST_RESULT {
+                let windows = ww::Window::list(&record.payload)?;
+                record.payload = (windows.len() as u32).to_le_bytes().to_vec();
+                for w in windows {
+                    record
+                        .payload
+                        .extend(project_window(&w, self.selected_window == w.id)?);
+                    self.windows.insert(w.id, w);
+                }
+                record.kind = LIST_RESULT;
             }
             if record.kind != expected {
                 return self.fail(format!("Unexpected response type {}", record.kind));
@@ -645,9 +854,14 @@ impl Browser {
     }
     fn connect_internal(raw: RawBrowser, cancel: Option<&AtomicBool>) -> Result<Self> {
         raw.wait_startup_cancellable(cancel)?;
-        let mut session = Session::start(raw)?;
+        let major = match std::env::var("PRTS_BROWSER_PROTOCOL").as_deref() {
+            Ok("2") => 2,
+            Ok("1") | Err(_) => 1,
+            _ => bail!("PRTS_BROWSER_PROTOCOL must be 1|2"),
+        };
+        let mut session = Session::start(raw, major)?;
         let mut hello = Vec::new();
-        for v in [1u16, 0, 1, 0] {
+        for v in [major, 0, major, 0] {
             hello.extend(v.to_le_bytes());
         }
         hello.extend(std::process::id().to_le_bytes());
@@ -676,7 +890,7 @@ impl Browser {
         }
         let mut d = Decoder::new(&response.payload);
         ensure!(
-            d.u16()? == 1 && d.u16()? == 0,
+            d.u16()? == major && d.u16()? == 0,
             "Unsupported selected version"
         );
         let hello = HelloAck {
@@ -698,7 +912,8 @@ impl Browser {
                 && hello.max_width > 0
                 && hello.max_height > 0
                 && hello.max_pixels > 0
-                && hello.features & !3 == 0,
+                && hello.features & !63 == 0
+                && (major == 1 || hello.features & ww::WHOLE_WINDOW != 0),
             "Invalid HELLO_ACK capabilities"
         );
         eprintln!(
@@ -713,6 +928,7 @@ impl Browser {
                 0
             });
         session.features = hello.features;
+        session.major = major;
         let session = Arc::new(Mutex::new(session));
         let weak = Arc::downgrade(&session);
         let stop = Arc::new(AtomicBool::new(false));
@@ -800,10 +1016,26 @@ impl Browser {
                 Err(mpsc::TryRecvError::Disconnected) => return s.fail("Browser readers stopped"),
             }
         }
-        Ok(s.frames.take_frame())
+        while let Some(mut frame) = s.frames.take_frame() {
+            if s.major == 2 {
+                let owner = s.scenes.values().find(|scene| {
+                    scene
+                        .layers
+                        .iter()
+                        .any(|l| l.source == frame.target && l.generation == frame.generation)
+                });
+                let Some(scene) = owner else {
+                    continue;
+                };
+                frame.target = scene.window;
+                frame.generation = scene.generation;
+            }
+            return Ok(Some(frame));
+        }
+        Ok(None)
     }
     pub fn take_frame(&self) -> Option<crate::browser_frames::CpuFrame> {
-        self.session.lock().unwrap().frames.take_frame()
+        self.poll_frame().ok().flatten()
     }
     pub fn frame_counts(&self) -> (u64, u64) {
         let s = self.session.lock().unwrap();
@@ -851,12 +1083,12 @@ impl Browser {
     }
     /// Ordered, bounded notification; failures are delivered as FAULT events.
     pub fn input(&self, header: &wire::InputHeader, input: &wire::Input) -> Result<()> {
-        let bytes = input.record(header)?.encode()?;
         let mut s = self
             .session
             .lock()
             .map_err(|_| anyhow!("Session poisoned"))?;
         ensure!(s.failed.is_none() && !s.shutdown, "Browser unavailable");
+        let bytes = input.record(header)?.encode_version(s.major)?;
         s.enqueue(bytes)
     }
 

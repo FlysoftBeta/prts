@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Tue, 20 Oct 2026 10:49:59 +0800
-Subject: [PATCH 18/19] Handle pending GPU information during PRTS handshake
+Subject: [PATCH 18/38] Handle pending GPU information during PRTS handshake
 
 The active adapter is unknown before the first capture on cold startup. Probe the hardware export device during HELLO and validate/log active GPU information at first native frame, while rejecting known adapter mismatches.
 

@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Tue, 20 Oct 2026 15:44:43 +0800
+Subject: [PATCH 33/38] Fix window input callback lifetime and resize
+ validation ordering
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_window_input.cc b/chrome/browser/prts/prts_window_input.cc
+index 797322737a..debd2a3c83 100644
+--- a/chrome/browser/prts/prts_window_input.cc
++++ b/chrome/browser/prts/prts_window_input.cc
+@@ -335,7 +335,8 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+     Done();
+   }
+   void Key(ui::KeyEvent queued) {
+-    ui::KeyEvent event(queued.type(), queued.key_code(), queued.code(), queued.flags(), queued.GetDomKey(), Stamp());
++    ui::KeyEvent event(queued.type(), queued.key_code(), queued.code(),
++                       queued.flags(), queued.GetDomKey(), Stamp());
+     if (event.type() == ui::EventType::kKeyPressed) {
+       keys_.insert_or_assign(event.key_code(), event);
+     } else {
+diff --git a/chrome/browser/prts/prts_window_registry.cc b/chrome/browser/prts/prts_window_registry.cc
+index 2eb2552dda..10316485bd 100644
+--- a/chrome/browser/prts/prts_window_registry.cc
++++ b/chrome/browser/prts/prts_window_registry.cc
+@@ -158,7 +158,12 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+     if (!w.input && Root(w)) {
+       w.input = std::make_unique<prts::PrtsWindowInput>(
+           Root(w),
+-          base::BindRepeating(&Impl::Contents, weak_.GetWeakPtr(), w.id),
++          base::BindRepeating(
++              [](base::WeakPtr<Impl> owner,
++                 uint64_t id) -> content::WebContents* {
++                return owner ? owner->Contents(id) : nullptr;
++              },
++              weak_.GetWeakPtr(), w.id),
+           base::BindRepeating(&Impl::Fault, weak_.GetWeakPtr()));
+     }
+   }
+@@ -212,7 +217,7 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+     }
+     auto& w = it->second;
+     if (type == 0x207) {
+-      prts::Decoder focus(base::span(payload).subspan(28));
++      prts::Decoder focus(base::span(payload).subspan(size_t{28}));
+       auto value = focus.Int(1);
+       if (!focus.Done() || value > 1) {
+         Fault(1);
+@@ -661,9 +666,6 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+       bool valid = true;
+       uint64_t mode = 0, limit = 0, fps = 0;
+       if (r.type == 0x403) {
+-        if (w.input) {
+-          w.input->Reset();
+-        }
+         valid = ReadSize(d, size);
+       }
+       if (r.type == 0x410) {
+@@ -689,6 +691,9 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+         return;
+       }
+       if (r.type == 0x403) {
++        if (w.input) {
++          w.input->Reset();
++        }
+         w.size = size;
+         ++w.generation;
+         ++w.source_generation;

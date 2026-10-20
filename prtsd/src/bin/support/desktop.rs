@@ -148,7 +148,31 @@ impl Drop for NotepadSentinel {
         let _ = std::fs::remove_file(&self.file);
     }
 }
+fn cursor_state() -> Result<Option<(u32, usize, i32, i32)>> {
+    let mut info = CURSORINFO {
+        cbSize: size_of::<CURSORINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        if let Err(e) = GetCursorInfo(&mut info) {
+            if e.code().0 == 0x80070005u32 as i32
+                && std::env::var("PRTS_M1_ALLOW_DISCONNECTED_DESKTOP").as_deref() == Ok("1")
+            {
+                return Ok(None);
+            }
+            return Err(e.into());
+        }
+    }
+    Ok(Some((
+        info.flags.0,
+        info.hCursor.0 as usize,
+        info.ptScreenPos.x,
+        info.ptScreenPos.y,
+    )))
+}
 pub struct DesktopProbe {
+    cursor_baseline: Option<(u32, usize, i32, i32)>,
+    cursor_changed: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     sampler: Option<thread::JoinHandle<()>>,
     changes: Arc<Mutex<Vec<usize>>>,
@@ -215,6 +239,14 @@ impl DesktopProbe {
             );
         }
         let expected_foreground = foreground;
+        let cursor_baseline = cursor_state()?;
+        if cursor_baseline.is_none() {
+            println!(
+                "DESKTOP physical cursor observation UNVERIFIED: GetCursorInfo ACCESS_DENIED on disconnected input desktop; require browser native-write suppression counters separately"
+            );
+        }
+        let cursor_changed = Arc::new(AtomicBool::new(false));
+        let cursor_sampler = cursor_changed.clone();
         let baseline = windows()?.iter().map(|w| w.hwnd).collect();
         let taskbar_baseline = taskbar_buttons()?;
         println!("DESKTOP Explorer UIAutomation taskbar baseline: {taskbar_baseline:?}");
@@ -224,6 +256,11 @@ impl DesktopProbe {
         let c = changes.clone();
         let sampler = thread::spawn(move || {
             while !s.load(Ordering::Acquire) {
+                if cursor_baseline.is_some()
+                    && cursor_state().is_ok_and(|state| state != cursor_baseline)
+                {
+                    cursor_sampler.store(true, Ordering::Release);
+                }
                 let fg = unsafe { GetForegroundWindow().0 as usize };
                 if fg != expected_foreground {
                     let mut v = c.lock().unwrap();
@@ -236,6 +273,8 @@ impl DesktopProbe {
         });
         println!("DESKTOP sentinel=Notepad hwnd=0x{sentinel:X}; foreground sampled every 10ms");
         Ok(Self {
+            cursor_baseline,
+            cursor_changed,
             stop,
             sampler: Some(sampler),
             changes,
@@ -247,6 +286,15 @@ impl DesktopProbe {
         })
     }
     pub fn check(&self, pid: u32, stage: &str) -> Result<()> {
+        ensure!(
+            cursor_state()? == self.cursor_baseline && !self.cursor_changed.load(Ordering::Acquire),
+            "OS cursor shape/visibility/position changed during {stage}"
+        );
+        if self.cursor_baseline.is_some() {
+            println!(
+                "DESKTOP {stage}: OS cursor shape/visibility/position unchanged (sampled every10ms)"
+            );
+        }
         let snapshot = windows()?;
         let owned: Vec<_> = snapshot.iter().filter(|w| w.pid == pid).collect();
         for w in &owned {

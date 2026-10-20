@@ -14,3 +14,4 @@ pub mod model;
 pub mod transport;
 pub mod video;
 pub mod viewer;
+pub mod window_wire;
