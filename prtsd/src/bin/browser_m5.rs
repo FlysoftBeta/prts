@@ -304,6 +304,7 @@ mod acceptance {
     include!("support/m5_input.rs");
     include!("support/m5_hosts.rs");
     include!("support/m5_flyouts.rs");
+    include!("support/m5_context.rs");
     pub fn run() -> Result<()> {
         let desktop = DesktopProbe::start()?;
         let mut c = Client::start()?;
@@ -414,6 +415,9 @@ mod acceptance {
                 c.request(0x429, trace_request(0))?;
             }
             result?;
+        }
+        if std::env::var_os("PRTS_M5_CONTEXT").is_some() {
+            context_gate(&mut c, recreated.id, &desktop)?;
         }
         for window in c.list()? {
             let mut p = window.id.to_le_bytes().to_vec();

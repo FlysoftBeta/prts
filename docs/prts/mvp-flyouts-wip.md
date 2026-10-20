@@ -45,8 +45,15 @@ the requested pixels. Unchanged M5 GPU/CPU capture/input gates PASS in
 All other broad gates passed regression29 (including M1/M2/M3/M4/recovery,
 MF hardware/lifetime/latency, odd sizes and GPU/CPU/synthetic WebRTC).
 
-Exact next step: checkpoint/push the resize correction on WIP, then implement
-real decoded/input context-menu gates. Main must wait for all required flyout,
+Resize correction infra checkpoint `fa96c6c` is pushed. Context-menu gates now
+also PASS CPU/software and GPU/QSV, HELLO1/2, all3 DSFs in
+`C:/src/chromium/prts-flyouts-context-all1-*`; Rust22 checks PASS. They require
+real page right-click, decoded pixels/alpha within250ms, zero missing-layer
+diagnostics, exact close restoration, and pointer Reload executing page script.
+The one-command runner includes these4 additional gates. Chromium source unchanged.
+
+Exact next step: checkpoint/push context coverage on WIP, then implement
+real select-popup and omnibox gates. Main must wait for all required flyout,
 input and lifecycle gates. Keep all acceptance thresholds unchanged.
 
 ## Implemented behavior
@@ -101,8 +108,8 @@ incremental-build rule; runtime gates cover the regressions.
 
 ## Remaining work in priority order
 
-1. Extend real decoded/input gates and fix required flyouts: right-click context
-   menu, select popup/change selection, omnibox suggestions, bubbles, tooltip,
+1. Extend real decoded/input gates and fix required flyouts: select popup/change
+   selection, omnibox suggestions, bubbles, tooltip,
    JavaScript dialogs, secure-origin permission prompts (no auto-accept flags),
    nested edge menus, extension/profile popups. Require GPU/QSV and CPU/software,
    alpha/ROI/close restoration, popup-only updates, three DSFs and no desktop UI.

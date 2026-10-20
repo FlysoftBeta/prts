@@ -12,7 +12,8 @@ $env:PATH = "$env:USERPROFILE\.cargo\bin;C:\Program Files\nodejs;" + $env:PATH
 $journal = Join-Path (Get-Location) 'docs/prts/journal-mvp.md'
 $shell = (Get-Process -Id $PID).Path
 Remove-Item Env:\PRTS_BROWSER_PROTOCOL, Env:\PRTS_M5_CAPTURE, Env:\PRTS_M5_INPUT,
-    Env:\PRTS_M5_HOSTS, Env:\PRTS_M5_FLYOUTS, Env:\PRTS_M5_ONE_CREDIT, Env:\PRTS_M5_TRACE,
+    Env:\PRTS_M5_HOSTS, Env:\PRTS_M5_FLYOUTS, Env:\PRTS_M5_CONTEXT,
+    Env:\PRTS_M5_ONE_CREDIT, Env:\PRTS_M5_TRACE,
     Env:\PRTS_FRAME_MODE, Env:\PRTS_TEST_ENCODER, Env:\PRTS_M1_ALLOW_DISCONNECTED_DESKTOP -ErrorAction SilentlyContinue
 if ($AllowDisconnectedDesktop) { $env:PRTS_M1_ALLOW_DISCONNECTED_DESKTOP = '1' }
 $failed = @()
@@ -53,6 +54,15 @@ function FlyoutGates {
         }
     }
     Remove-Item Env:\PRTS_M5_FLYOUTS, Env:\PRTS_M5_ONE_CREDIT
+    $env:PRTS_M5_CONTEXT = '1'
+    foreach ($credits in @(2, 1)) {
+        if ($credits -eq 1) { $env:PRTS_M5_ONE_CREDIT = '1' }
+        foreach ($mode in @('cpu', 'gpu')) {
+            $env:PRTS_FRAME_MODE = $mode
+            Gate "context-$mode-$credits" '.\prtsd\target\release\browser_m5.exe'
+        }
+    }
+    Remove-Item Env:\PRTS_M5_CONTEXT, Env:\PRTS_M5_ONE_CREDIT
 }
 
 if ($Suite -eq 'mf') {

@@ -7,13 +7,16 @@
   are implemented. Dedicated `-Suite flyouts` PASS11 gates: ordinary checks, nine host cycles, Intel
   GPU/reference pixels, and CPU/software + GPU/QSV with HELLO inflight1/2, each DSF1/2/1.25. Decoded
   app-menu pixels/alpha/close restoration and actual pointer selection creating a new tab all pass;
-  unchanged100ms missing-layer/250ms appearance gates pass. Other flyout types remain unqualified.
+  unchanged100ms missing-layer/250ms appearance gates pass. New right-click context-menu gates
+  also PASS all4 transport/credit variants at3 DSFs, including decoded alpha, exact close restoration
+  and actual Reload selection rerunning page script (`prts-flyouts-context-all1-*`, Rust22 checks PASS).
+  The one-command flyout runner includes these4 additional gates. Other flyout types remain unqualified.
   Launcher disables Views UI GPU raster only to avoid cold shader stalls; page GPU/composition stay
   enabled. Full regression29 passed24/26 gates; two M5 resize failures came from Viz letterboxing
   an old root surface into new dimensions. Build30 rejects stale source sizes/content bounds;
   unchanged M5 GPU/CPU capture/input now PASS. All4 app-menu variants, production Intel auto GPU
   (decoded WebGL/video, QSV zero-copy) and v2 CPU WebRTC reruns PASS build30. Ineffective all-stages
-  launcher comparison removed. Other flyout gates remain next. Exact resume point:
+  launcher comparison removed. Select/omnibox and remaining flyout gates are next. Exact resume point:
   [mvp-flyouts-wip.md](mvp-flyouts-wip.md), latest journal-mvp.md. Source `work` remains5a7769bea8;
   current chrome binary is WIP. No full flyout signoff.
 - **Next action: continue MVP (PLAN priority 2), M5b steps 4-5**: host-family tracking and GPU/CPU
