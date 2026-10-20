@@ -21,7 +21,10 @@ agent is supervising you; you must plan, implement, verify, commit and record pr
    it strictly), `docs/prts/STATUS.md` (current state / next action), then the newest
    `docs/prts/journal-*.md` relevant to the current milestone. Read other docs in `docs/prts/` only as needed
    (protocol.md, chromium-hooks.md, phase2-m5-design.md, isolation.md).
-2. Current target (unless STATUS.md says it is done): the **MVP** — PLAN.md priority 2:
+2. FOLLOW PLAN.md "Priority order (revised 2026-10-21 07:30)" — it supersedes everything below in this
+   item: MVP wrap-up (keep working flyouts, lessons doc, latency report-only) -> GitHub pre-release with
+   binaries + server -> unify flyout/window code + minimize Chromium patches -> encoders + isolation ->
+   re-integrate. (Older text kept for context:) Current target: the **MVP** — PLAN.md priority 2:
    hardware GPU accel verified; Media Foundation (Intel QSV MFT) low-latency setup with measured latency;
    common flyouts (menus, context menus, omnibox dropdown, bubbles, tooltips, dialogs, permission prompts,
    select popups) visible in the stream and accepting input, one stream per browser window; touch input
@@ -37,6 +40,10 @@ agent is supervising you; you must plan, implement, verify, commit and record pr
 5. Verify every feature with the existing acceptance gates (`prtsd/src/bin/browser_*`, `server` e2e
    tests) plus new gates you add; never relax a gate to make it pass. Check the GPU process uses the Intel
    hardware adapter (not SwiftShader/WARP). Nothing may appear on the interactive desktop.
+5b. Latency budgets (e.g. flyout appearance <=250 ms) are enforced on the production path (GPU zero-copy
+   + hardware encode). On the CPU-readback / software-codec fallback path, latency is report-only
+   (log the numbers; correctness/pixel/input checks still enforced). Don't sink more than ~one 5h window
+   into a single gate — record the blocker and move on to the next MVP item, then come back.
 6. Commit to `main` at each milestone (export patches first), push to `origin main`. Commit trailer:
    `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Don't commit build outputs.
 6b. Uncompleted features never land on `main` (not even behind config): develop them on a branch

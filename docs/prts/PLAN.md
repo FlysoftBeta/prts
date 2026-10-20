@@ -98,7 +98,25 @@ PRTS (custom headless Chromium)  --anonymous pipes-->  prtsd (Rust, windows-rs)
 3. Integrate: zero-copy texture -> QSV encode; isolation (Job Object + AppContainer) with GPU verified.
 4. Polish: network simulation, quality stats, multi-instance, docs (README with run steps).
 
-**Priority order (user, revised 2026-10-21; supersedes 2026-10-20):**
+**Priority order (user, revised 2026-10-21 07:30 — SUPERSEDES the list below):**
+1. MVP WRAP-UP (now): stop chasing the flyout latency gate. Keep the flyout code that already works
+   (app menu, context menu, select, omnibox popup appear and take input) and merge it to main with gates
+   that pass (latency report-only); write the lessons learned to `docs/prts/lessons-flyouts.md`
+   (what worked, what failed, measured numbers, root causes found). Finish cleanup (README, one-command
+   tests). Touch input only if it's quick; otherwise list it as known gap.
+2. RELEASE: publish a GitHub release on FlysoftBeta/prts (e.g. `v0.1.0-preview`, marked pre-release):
+   zipped PRTS Chromium binaries (package the existing out\Default build — it's a component release+dcheck
+   build, so include every needed DLL/pak/resources, and say so in the notes; don't block on a new full
+   build), prtsd release binaries, the Node server + frontend (without node_modules; with install steps),
+   a quickstart in the release notes, and SHA256 sums. Verify the zip runs from a clean extract dir.
+   Use `gh release create`. Keep assets < 2 GB each (split if needed).
+3. Then: unify flyout and window code paths (one window/surface model); minimize Chromium patch surface
+   (fewer, smaller hooks; move logic out of Chromium into prtsd where possible).
+4. Then: encoder backends (oneVPL QSV, NVENC; MF fallback) and isolation (AppContainer + LPAC, per-tenant
+   window station; resume from `wip/i1-isolation`).
+5. Then: re-integrate everything, full regression, new release.
+
+**Older order (superseded):**
 1. Isolation PAUSED (I1 WIP parked; default profile = none).
 2. MINIMUM USABLE STATE ("MVP"), then commit + push:
    - Chromium hardware GPU acceleration verified working (not SwiftShader/WARP) in the shipped config.
