@@ -1,14 +1,24 @@
 # Chromium hook points for PRTS
 
+**M5 CHANGE (2026-10-20):** the old page-surface/content-input recommendation
+below is **SUPERSEDED** by whole-browser-window capture/input. The M5 design is
+[phase2-m5-design.md](phase2-m5-design.md); the window protocol is the proposed
+v2 section in [protocol.md](protocol.md#m5-proposed-v20-window-contract-design-not-implemented).
+M1-M4 behavior is historical/implemented; the M5 hooks in the new section below
+are source-validated proposals, not an implementation or runtime qualification.
+
 Validated on 2026-10-19 by targeted `rg` searches and reading the local checkout
 at `C:/src/chromium/src`. `chrome/VERSION` is **158.0.8111.0**;
 HEAD is `caef9db47e2cf3fe8e9f07ddceeff6ddf6957385`, matching this repo's `PIN`.
 All Chromium paths below are relative to that source root. Line numbers are
 approximate anchors actually inspected in this revision, not build validation.
 No Chromium build, runtime experiment, source modification, or commit was made.
-The optional investigation repository was not used.
+The optional investigation repository was not used in the original Phase 0
+survey. M5 thoroughly reviewed it (all four patches and documents), cloned at
+`%TEMP%/prts/coi`, HEAD `7476579f2ce0413c2708068a590c60d0b5983023`, and maps its
+hooks/patches to adopt/adapt/reject decisions in the M5 design.
 
-## Recommended design
+## Historical Phase 0 recommendation (page/input scope superseded by M5)
 
 Put browser integration in **`chrome/browser/prts/`**, not `headless/lib/`.
 Use Chrome's ordinary headless windows/tabs and a UI-sequence controller, with
@@ -258,7 +268,11 @@ single-sequence use and exposes format/rate/size/target/start controls.
 `content/browser/media/capture/frame_sink_video_capture_device.cc:587–603`
 demonstrates hopping to UI to call `content::GetHostFrameSinkManager()`.
 
-Target the page's surface, not the root browser window, to omit browser chrome.
+**SUPERSEDED BY M5:** the former decision was "Target the page's surface, not
+the root browser window, to omit browser chrome." M5 instead targets the
+browser window's root `ui::Compositor::frame_sink_id()` and composites separate
+popup-host roots. The following WebContents tracking remains a record of M3/M4,
+not the new capture-target choice.
 `content/browser/web_contents/web_contents_impl.cc:12308–12324`,
 `WebContentsImpl::GetCaptureTarget()`, resolves the current view's frame-sink ID.
 `content/browser/media/capture/web_contents_frame_tracker.cc:349–383,471–502`
@@ -506,3 +520,50 @@ Future implementation should use small milestone commits on the Chromium work
 branch and export them under orchestrator control. Do not run `apply` over
 uncommitted work. This documentation task ran none of those mutating commands,
 did not build Chromium, and made no commits.
+
+## M5 window hooks (2026-10-20, proposed; source validated)
+
+Validated against the same base PIN plus patches 0001-0019, Chromium `work`
+HEAD `7ea7adb8afc725e49f8990b2683a9dff40fa609f`. These supersede the old
+page-target/input/DSF decisions above; the M4 texture export protocol remains.
+Full ownership, synchronization, protocol and acceptance details are in
+[phase2-m5-design.md](phase2-m5-design.md), including the mandatory
+**chromium-output-investigation mapping** of all relevant hooks/patches.
+
+| Validated location | M5 use / narrow change |
+| --- | --- |
+| `chrome/browser/headless/chrome_browser_main_extra_parts_headless.cc:22,39,47` | Reuse PRTS prepare/start/stop and M1 keepalives. Add new window registry/host tracker; no second bootstrap or named-pipe service. |
+| `chrome/browser/ui/views/frame/browser_view.h:523,692`; `ui/aura/env.h:152`, `env.cc:267-273` | Resolve Browser native Aura window -> host, enumerate/observe all hosts. Browser identity owns a window stream; tabs become metadata. Initial host callback is provisional, not permission to use partially initialized focus/capture clients. |
+| `ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc:317,339`; `desktop_native_widget_aura.cc:687,768` | New generic opt-in UI-sequence metadata/readiness hook: Widget, type, parent/context, opacity, corner/shadow/z policy. Add Widget/Aura observations; stop on destroying before compositor death. Do not use test-only AnyWidgetObserver passkeys. |
+| `content/browser/media/capture/aura_window_video_capture_device.cc:80-99`; `ui/compositor/compositor.h:472`; `components/viz/host/host_frame_sink_manager.h:256` | Root FrameSinkId capture precedent and CreateVideoCaptureLock. Create client capturer and explicitly ChangeTarget(root id), without a subtree crop; retain lock while subscribed. |
+| `chrome/browser/prts/prts_capture.cc:45-108,266-401` | Replace WebContents Source/renderer sink with host source; reuse M4 native BGRA -> keyed export -> daemon private copy. ARGB+kPreferMappableSharedImage on Windows; CPU kDefault fallback. Resource identity is source id under v2. |
+| `chrome/browser/ui/views/chrome_views_delegate_win.cc:124-160`; `ui/views/controls/menu/menu_host.cc:129-168`; `ui/views/bubble/bubble_dialog_delegate_view.cc:183-221` | Preserve normal DesktopNativeWidgetAura/NativeWidgetAura selection. Capture additional root hosts only, with explicit owner, visibility, rect and virtual z metadata. Same-host UI appears once. |
+| `content/browser/renderer_host/render_widget_host_view_aura.cc:490-529`; `ui/views/widget/desktop_aura/desktop_native_widget_aura.cc:108-170,233-275` | Renderer menu/select/page popup -> separate desktop wrapper host; context/transient parent resolves owner even without Widget parent. Unlike headless_shell, unified Windows does not automatically parent all menus into the main root. |
+| `chrome/browser/ui/views/omnibox/omnibox_popup_view_views.cc:108-114,758`; `ui/views/corewm/tooltip_aura.cc:201-215`; `chrome/browser/ui/views/permissions/permission_prompt_bubble_base_view.cc:199-231` | Dropdown, tooltip and permission bubble creation paths. Observe bounds/show/hide/reuse and real popup pixels, not just WebContents/new Browser events. |
+| `ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc:444-452,585-590`; `ui/views/win/hwnd_message_handler_headless.cc:229-231` | Notify virtual stacking requests; native headless StackAbove/StackAtTop do nothing. Show/activation tie-breaking, owner/transient graph and explicit levels replace creation-order guesses. |
+| `ui/views/widget/desktop_aura/desktop_screen_win_headless.cc:108-128`; `ui/views/controls/menu/menu_controller.cc:3754` | Delegate headless Screen window-at-point queries to the same virtual order used by input and composition. Chrome menu internals otherwise use creation-order host enumeration and can disagree on reused widgets. |
+| `ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc:607`; `chrome/browser/ui/views/chrome_views_delegate.cc:184`; `ui/views/widget/widget.h:1213`; `ui/views/window/dialog_delegate.cc:328-330` | Virtualize IsStackedAbove queries too. A PRTS-only pre-init decoration adapter selects custom Views frames for Chrome-owned dialogs whose system-painted titlebar would otherwise be absent from capture; preserve their parent/modal/input semantics. |
+| `chrome/browser/prts/prts_capture.cc:374-381`; `gpu/command_buffer/common/shared_image_info.h:48-63`; `components/viz/service/display_embedder/skia_output_surface_impl_on_gpu.cc:1135-1159` | Preserve premultiplied popup alpha in CPU copies; validate native texture alpha. Daemon blends before NV12, with deterministic replacement for platform-only rounded corners/shadows. Final video remains opaque. |
+| `ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc:1387-1394,1554-1556`; `ui/aura/window_event_dispatcher.cc:293-297,510-522` | Inject ui mouse/wheel/scroll/key events through host SendEventToSink. Input wire coordinates are root DIP; transform selected-host DIP to source pixels once, Aura inversely transforms. Use ordinary Views/OOPIF routing. |
+| `ui/views/widget/desktop_aura/desktop_capture_client.cc:33-113`; `ui/views/controls/menu/menu_pre_target_handler_aura.cc:25-67` | Logical global capture and menu pretarget input are available without native capture. Route popup/capture input, hover transitions and modal focus; restrict control to one logical input window per instance. |
+| `ui/aura/window_event_dispatcher.cc:1093-1112`; `ui/views/widget/focus_manager_event_handler.cc:25`; `chrome/browser/ui/accelerator_table.cc:59,68,69` | Explicit synthesized ui KeyEvents bypass Windows server IME queue while retaining Views accelerators. Ctrl+T/L/W must operate real Chrome UI. Remove M2 unconditional skip_if_unhandled from v2's normal content route. |
+| `content/public/browser/render_widget_host.h:242-276`; `content/browser/renderer_host/render_widget_host_view_aura.cc:1658-1700`; `ui/views/controls/textfield/textfield.cc:1776-1816` | Preserve M2 ordering through completion observation, not duplicate RWH dispatch. Text resolves current host InputMethod/TextInputClient; guard TYPE_NONE; single char/IME commit exactly once in omnibox or content. |
+| `ui/views/win/hwnd_message_handler_headless.cc:54-104,233-292,383-440`; `hwnd_message_handler.cc:1596-1605` | Keep native HWNDs hidden/cloaked. Widget/Aura logical activation and stored Views focus, never OS foreground activation or forced content focus on every input. |
+| `ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc:900-930`; `ui/views/win/hwnd_message_handler.cc:1046-1052` | New cursor observer/consume hooks must suppress native SetCursor, ShowCursor and SetCursorPos. Export selected hovered/capture-host cursor, including Views/popup changes; desktop native cursor manager broadcasts are not separate pointer states. |
+| `ui/display/headless/headless_screen_manager.h:42-63`; `ui/display/win/screen_win_headless.cc:411-476,603-627`; `ui/aura/window_tree_host.cc:594-617,649-662` | One virtual display/work area per browser window using existing screen manager mutations; full UI/renderer DSF together. No page emulation override in v2. Resize suspends publication, reconciles actual root/client geometry, changes window generation and drains old resources. |
+| `ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc:807-862`; `ui/views/win/hwnd_message_handler_headless.cc:113-142,509-539` | Root capture size is client compositor pixels; translate window bounds/insets, not raw outer HWND size. Publish accepted DIP extent/DSF and test odd/fractional dimensions. |
+| `ui/views/widget/desktop_aura/desktop_window_tree_host_win.cc:352,657`; `desktop_drag_drop_client_win.cc:132` | PRTS-only no-OLE drag client and native move-loop guard. Full system drag/drop/pointer-lock is separate work; ordinary Aura selection/capture remains. |
+| `chrome/browser/chrome_browser_main.cc:1813-1818`; `components/headless/select_file_dialog/headless_select_file_dialog.cc:39-52` | Existing PIN already overrides native file dialog with cancellation. Keep safe cancellation in M5; remote file chooser/download transfer is a separate capability. Unsupported OS UI must be prevented before launch, not closed after becoming visible. |
+
+Chosen popup approach is separate-host composition in prtsd (D3D11 and CPU),
+with window scene revisions, bounded private caches and no cross-root atomic-frame
+guarantee. Extend two-resource capacity to negotiated resource/byte budgets while
+retaining global descriptor credits/key0/1; otherwise menus would starve behind
+two window bases. Per-window encoders/tracks replace the singleton active-tab
+video; initial signaling binds one viewer session to one window/track.
+
+Investigation P1 null GPU widget, P7 external BeginFrames and P8 custom shared
+offscreen output device are deferred optimizations. No Windows Ozone port,
+headless_shell replacement, DWM capture or DLL injection. M5 is source study
+only: alpha, popup pixels, focus/accelerators, DSF and connected-desktop
+invisibility remain implementation acceptance gates, not results of this task.

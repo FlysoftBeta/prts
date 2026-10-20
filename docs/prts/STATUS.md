@@ -1,6 +1,12 @@
 # PRTS status
 
 ## Current state
+- Phase 2 M5 DESIGN completed (source validation only): whole-window root capture,
+  separate popup-host GPU/CPU composition, Aura/Views input and logical focus,
+  per-window virtual displays/DSF, proposed v2 window/tab/source protocol and
+  per-window tracks. See phase2-m5-design.md and journal-m5.md for exact hooks,
+  investigation mapping, ordered implementation steps and acceptance gates.
+  Implementation, builds and popup/input/decoded-pixel qualification remain next.
 - Phase 0 DONE (protocol.md, chromium-hooks.md, isolation.md). Phase 1 DONE: prtsd (Rust, synthetic source,
   OpenH264 + Intel QSV via Media Foundation HW MFT with software fallback, webrtc, packet shaping) + Node
   server/frontend; real-browser E2E (`cd server; npm run e2e`) passes. Toolchains installed: Rust stable MSVC, Node LTS 24.
@@ -32,6 +38,19 @@
   (<=150 kbps -> auto-fallback to software), Windows 10 22H2 qualification, AppContainer/LPAC security isolation untested at runtime.
 
 ## Log
+- 2026-10-20 (Codex m5d): Reviewed the full chromium-output-investigation repo
+  (7476579f2ce0) and validated hooks against local PIN + patches 0001-0019
+  (work HEAD 7ea7adb8afc7). Added phase2-m5-design.md, proposed v2 protocol
+  override and superseded the old page-surface decision in chromium-hooks.md.
+  Chose separate root-host popup captures composed in prtsd before NV12/QSV,
+  with preserved alpha/CPU equivalence and bounded caches/credits. Found native
+  cursor side effects and creation-order headless hit tests requiring small
+  opt-in hooks. Existing HeadlessScreenManager supplies window DSF; existing
+  headless file chooser already cancels. Docs-only checks; no Chromium edits,
+  probes, builds, commits or runtime pass claims. M4's later activation-fix
+  qualification in phase2-m4.md is the reuse baseline; the older M4 blocker
+  headline above predates it. Next: implement the ordered M5 gates, beginning
+  with v2 registry/codecs and root capture/virtual display acceptance.
 - 2026-10-20 (orchestrator run 2, 04:12-05:20): Verified 5h window reset (0% used) before starting. Ran Codex m1 (~32 min, incremental build 38.8 s final) and m2 (~25 min); both exit 0, acceptance passed, cr export -> patches 0001-0009, committed f91806c and 751bb9b. Desktop invisibility: target HWNDs hidden + DWMWA_CLOAKED=1, auxiliary HWNDs hidden, no taskbar entry; foreground preservation unverified (disconnected session). Stopped before M3: Codex usage after m2 = 5h window 79% (m1 ~40 points, m2 ~39), weekly ~20%+; M3+M4 would exceed the window, so per pacing rules next orchestrator starts after 09:13 reset. Decision: budget ~1 milestone per 40% of a 5h window.
 - 2026-10-20 (orchestrator run 1): Ran Codex jobs p0-protocol, p0-hooks, p0-isolation (parallel), p1-server + p1-prtsd (parallel), p1-e2e, p1-qsv. All exited 0. QSV job: native QSV 28 fps / 13.9 ms encode at 720p; software at 150 kbps cap 22 fps; latency/loss shaping verified in E2E. Codex usage after run: 5h window 86% (resets ~2026-10-20 04:06 local), weekly 13%. Next orchestrator should wait for the 5h reset before starting Phase 2.
 - 2026-10-19: Phase 1 part C passed real release prtsd + Node + headless Edge 155 browser acceptance. Added server/test/e2e.js and npm run e2e: live H264, decoded pointer/click/text pixels from real frontend input, target create/switch/resize/close, two instances/three viewers, receiver and encoder UI stats, bitrate cap reduction (latest run 571680 to 135652 bps at a 50 kbps target), clean instance/server/exact-daemon-PID teardown. Fixed other-operator instance discovery and spurious normal-close UI errors; added IPC supervisor shutdown for Windows. Release build, four Rust tests, seven Node tests and browser E2E pass. Saved phase1-e2e.png and updated root README/component notes. No Chromium build or git commit; optional latency/loss shaping remains unsupported.

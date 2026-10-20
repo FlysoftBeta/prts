@@ -1,10 +1,19 @@
-# PRTS wire protocol v1 (Phase 1 and later)
+# PRTS wire protocol: implemented v1 and proposed M5 v2
+
+**M5 CHANGE (2026-10-20, DESIGN ONLY):** the new product target is a whole
+browser WINDOW, including Chrome UI and owned popup layers, with one video
+track per window. See the [v2 contract below](#m5-proposed-v20-window-contract-design-not-implemented).
+Sections 1-6 retain the implemented v1 contract for migration/regression; their
+page-target, content-only input, opaque-only frames, singleton active stream and
+two-resource limits are **SUPERSEDED for v2**. v2 is not implemented yet.
 
 Status: implementation contract; no Chromium build is required to implement Phase 1.
 Normative words MUST, SHOULD and MAY describe requirements, defaults and options.
 The server baseline is Windows 10 22H2, x64; development on Windows 11 is supported.
 An instance is one isolated browser process tree or one synthetic source.
-A target is a tab or popup with its own viewport; no desktop window is created.
+A v1 target is a tab or popup with its own viewport; hidden/cloaked native HWNDs
+are created on Windows (the earlier statement that no desktop window is created
+was inaccurate).
 Each instance has one active target and one video stream, shared by its viewers.
 Activating a target switches that stream for every viewer. Independent views require
 separate instances in v1. Input is injected into content, never through OS input APIs.
@@ -674,3 +683,276 @@ Interval `stats.frames.backend` is `gpu-texture`, `cpu-section`, or `synthetic`;
 `stats.encoder.input_path` is `d3d11-zero-copy`, `staging` (GPU BGRA readback then
 software I420 conversion), `cpu-nv12` (QSV CPU input), or `cpu-i420` (software).
 Paths describe the last processed frame and persist over idle intervals.
+
+## M5 proposed v2.0 window contract (design, not implemented)
+
+This section is the v2 design contract; where it differs from sections 1-6 it
+takes precedence **only after v2 negotiation**. Implementation/qualification is
+tracked in [phase2-m5-design.md](phase2-m5-design.md). All limits are validated
+before allocation; stale frames still complete their resource release cycle.
+
+### Versioning and retained transport
+
+Keep the three inherited anonymous pipes, LE positional encoding, envelope,
+request correlation, process-handle authority, deadlines, handle validation,
+CPU sections and keyed-mutex protocol. HELLO/ACK use the 1.0 envelope for
+bootstrap; their existing min/max version fields can offer/select 2.0. After
+ACK every envelope uses the selected version. A v2 whole-window client MUST
+offer min=max 2.0; it MUST NOT silently display a v1 page stream as a window.
+No overlap returns the existing ERROR in the bootstrap envelope then closes.
+Legacy 1.0 support may remain for tests; v2 mode does not accept TARGET_*.
+
+In v2 HELLO_ACK features add bits 4=whole_window, 8=popup_layers,
+16=premultiplied_bgra, 32=composition_preedit (optional). Bits 4/8/16 and CPU
+sections are mandatory for M5. Bit 1 retains discovery of additional Browser
+windows; bit 2 custom cursor remains optional. Advertise limits in WINDOW_CAPS
+after ACK and before any window/source event. HELLO max_inflight still limits
+the **total published/unreleased descriptors across the instance** to 1..3,
+including retired generations. It does not limit registered idle resources.
+
+### Identities and coordinates
+
+IDs are nonzero u64, never reused within a connection; JSON uses decimal strings.
+Allocate Window, Tab and Source ids from one monotonic allocator to prevent
+accidental aliasing. A Window represents a Browser-backed user window; a Tab
+represents WebContents. A Source represents one captured host root (base or
+auxiliary). Auxiliary Widgets sharing a host do not create a duplicate Source.
+Window, active-tab selection and source/texture generation are separate state.
+
+`WindowSize = {width:u32,height:u32,dpr:f64}` uses **window root client DIPs**,
+not CSS viewport size or outer HWND size. Requested ranges/rounding/device size
+limits start with v1 Size's numeric constraints and WINDOW_CAPS may narrow them.
+Actual accepted size is authoritative: Chrome minimum sizes/insets can constrain
+it. Stream visible device size is ceil(width*dpr) x ceil(height*dpr). Codec
+padding must be cropped/signaled; it must not change input coordinates.
+Page viewport metadata is informational and excludes browser controls.
+
+`DipRect = {x:f64,y:f64,width:f64,height:f64}` uses finite root-relative signed
+DIPs, nonnegative extents. Rects may extend outside the window; output is clipped
+to the window extent. Separate popup placement is constrained to the owner's
+virtual display/work area so interactive UI remains accessible. Shadow pixels
+never extend the video resolution or interactive hit rect. Frame damage keeps
+the old unsigned **device-pixel** Rect representation local to its Source.
+
+`Window = {id:u64,kind:u8,opener_window:u64,size:WindowSize,
+generation:u64,active_tab:u64,input_active:bool,closing:bool,tabs:Tab[]}`.
+kind: 1=normal Browser, 2=popup Browser, 3=other Browser UI window (e.g. DevTools
+when represented by a Browser). opener/active_tab are 0 when absent. generation
+starts at 1, increases for root size/DSF/root-host replacement, never on ordinary
+tab activation or auxiliary show/hide. input_active is logical and independent
+of video subscription/OS foreground. At most one input window per instance.
+
+`Tab = {id:u64,window:u64,opener_tab:u64,url:str,title:str,load:u8,active:bool}`.
+load enum is unchanged. Tab moves/replacements preserve id under existing M1
+semantics; moves change window membership. At most one active tab per window.
+An allowed new Browser from window.open is a new Window, with tabs metadata;
+an app/context menu, permission bubble or select popup is an auxiliary Source.
+
+`Layer = {source:u64,parent_source:u64,generation:u64,role:u8,
+rect:DipRect,input_rect:DipRect,pixel_width:u32,pixel_height:u32,dpr:f64,
+z:i32,visible:bool,accepts_input:bool,format:u8,opacity:f64,
+corners:f64[4],shadow:u8}`.
+The four corner radii (top-left, top-right, bottom-right, bottom-left) are DIP;
+this fixed array has no count prefix. opacity is finite 0..1 and applies only
+to opacity not already present in captured pixels. shadow presets: 0=none or
+already painted, 1=native-menu replacement, 2=native-dialog replacement. v2.0
+reference decoration uses a black premultiplied shadow (menu: alpha .20, blur
+radius 8 DIP, offset 0,2 DIP; dialog: alpha .24, radius 12 DIP, offset 0,3 DIP),
+clipped to a 3-radius expansion and the window canvas. It is visual only.
+Role: 1=base, 2=menu, 3=dropdown, 4=bubble, 5=tooltip, 6=renderer-popup,
+7=dialog, 8=other-owned-UI. Role is diagnostic, never the ownership authority.
+Exactly one base Source has parent_source=0 and fills the root rectangle;
+others name their immediate owner source in an acyclic owner graph. Source
+generation increases on incompatible size/DSF/format/capture-epoch changes.
+Position/z/visibility-only updates may reuse same-generation cached pixels.
+Base format=1; auxiliary format=2, including opaque auxiliary contents.
+
+### New lifecycle, tabs and scene records
+
+All records below travel on command/event pipes. Mutations serialize on UI;
+snapshots/events queue before successful responses. Open/close acceptance does
+not promise asynchronous navigation, unload, painting or destruction is complete.
+
+| Type | Direction | Payload / response |
+| --- | --- | --- |
+| 0x0400 WINDOW_CREATE | D->B request | url:str,size:WindowSize,activate:bool -> WINDOW_RESULT |
+| 0x0401 WINDOW_CLOSE | D->B request | window:u64 -> OK (accepted; WINDOW_CLOSED follows actual close) |
+| 0x0402 WINDOW_LIST | D->B request | empty -> WINDOW_LIST_RESULT |
+| 0x0403 WINDOW_RESIZE | D->B request | window:u64,size:WindowSize -> WINDOW_RESULT |
+| 0x0404 WINDOW_ACTIVATE | D->B request | window:u64 -> WINDOW_RESULT (logical input window) |
+| 0x0410 WINDOW_FRAME_CONFIG | D->B request | window:u64,mode:u8,max_inflight:u32,max_fps:u32 -> WINDOW_RESULT |
+| 0x0411 WINDOW_FRAME_REFRESH | D->B request | window:u64 -> OK |
+| 0x0420 TAB_CREATE | D->B request | window:u64,url:str,activate:bool -> TAB_RESULT |
+| 0x0421 TAB_CLOSE | D->B request | tab:u64 -> OK (accepted) |
+| 0x0422 TAB_ACTIVATE | D->B request | tab:u64 -> TAB_RESULT |
+| 0x0423 TAB_NAVIGATE | D->B request | tab:u64,url:str -> OK |
+| 0x0480 WINDOW_RESULT | B->D response | window:Window |
+| 0x0481 WINDOW_LIST_RESULT | B->D response | windows:Window[] |
+| 0x0482 TAB_RESULT | B->D response | tab:Tab |
+| 0x0490 WINDOW_CREATED | B->D event | window:Window |
+| 0x0491 WINDOW_CHANGED | B->D event | window:Window (full tabs snapshot) |
+| 0x0492 WINDOW_CLOSED | B->D event | window:u64,reason:str |
+| 0x0493 WINDOW_SCENE | B->D event | window:u64,window_generation:u64,revision:u64,layers:Layer[] |
+| 0x0494 WINDOW_CAPS | B->D event | max_windows:u32,max_aux_per_window:u32,max_tabs:u32,max_resources:u32,max_export_bytes:u64,max_private_bytes:u64,min_width:u32,min_height:u32 |
+| 0x0495 WINDOW_CURSOR | B->D event | window:u64,window_generation:u64,cursor:Cursor |
+
+Reference initial limits: 2 windows, 8 auxiliary sources per window, 256 tabs,
+32 registered export resources, 512 MiB total export allocation and 512 MiB
+daemon private scene/encoder allocation; advertise lower actual supported values
+when necessary. These are ceilings, not reservations. Extents still obey HELLO
+max_width/height/pixels and pipe record length. Arrays cannot exceed advertised
+caps; checked arithmetic includes strides, retired allocations, caches and
+in-flight references. Refuse unsupported subscriptions/sizes with an explicit
+error; never drop a required popup silently. Lifecycle tracking still reports
+over-cap UI with a resource_exhausted diagnostic; that window cannot be claimed
+fully streamed until it is within limits. Browser-created extra windows must be
+reported/rejected explicitly, not assigned to another stream.
+
+WINDOW_CHANGED covers tab insertion/removal/URL/title/load/active changes, close
+requested/cancelled and size/DSF changes. Actual close removes sessions and
+eventually resources. Closing the last window leaves instance alive. beforeunload
+may keep closing=true until user decision; cancellation clears it. No command
+request is held open awaiting the user's dialog response. Initial list is empty
+after M1 startup-tab cleanup. A window's first tab becomes active even if the
+request's activate=false; activate otherwise controls logical input selection.
+Tab active state is per window and does not pause another window's video.
+
+WINDOW_SCENE is a complete replacement, not a delta. Revisions strictly increase
+per window across its lifetime. Hidden sources may be listed visible=false;
+omission removes them from the scene immediately. Base/root must be present in
+every nonclosed scene. Snapshot describes the latest compatible source
+generations; post-resize scenes use the new window generation. Scene is queued
+before new resource registrations; initial WINDOW_CREATED/CHANGED precedes its
+scene. Source removal stops new publication, drains already-published frames and
+unregisters normally. Event/frame pipe skew never permits a frame to resurrect
+a hidden/removed Source. Unknown/stale descriptors are released/dropped, not
+kept waiting with a credit held. Geometry-incompatible capture callbacks cannot
+be stamped as the new generation.
+
+### Frame resources, composition and refresh
+
+Keep 0x0300 BUFFER_REGISTER, 0x0301 BUFFER_UNREGISTER, 0x0310 FRAME_TEXTURE,
+0x0311 FRAME_CPU and 0x0320 FRAME_RELEASE with their existing payload layouts.
+**In v2 only**, their target field means **Source id** and generation means
+Source generation. Resource id/frame id remain connection-wide. Extend format:
+1=BGRA8 opaque, 2=BGRA8 premultiplied alpha; no HDR. A descriptor's format must
+match registration and Layer. GPU format remains DXGI BGRA8; the format field
+defines pixel interpretation, not a different allocation layout. CPU paths
+preserve auxiliary alpha, channel normalization and premultiplication. Final
+window video is opaque, no cursor baked in.
+
+WINDOW_FRAME_CONFIG applies mode/FPS/subscription to base **and every visible
+owned source**, including ones created later; max_inflight is a per-window
+ceiling within the unchanged global HELLO descriptor-credit limit. Mode 0 stops
+all its sources; modes 1/2 retain GPU-preferred/sticky CPU fallback semantics.
+Mode changes replace affected source generations and emit WINDOW_SCENE before
+response; ordinary FPS changes need not reallocate or change window generation.
+Old 0x0321 FRAME_CONFIG / 0x0322 FRAME_REFRESH are unsupported in v2 to avoid
+confusing source-level resources with window-level subscription. A window
+refresh requests complete base and visible layers (including static content),
+retains generations, and returns acceptance; an unsubscribed refresh is a no-op.
+Per-source fallback updates scene/source generation, not unrelated windows.
+
+Replace v1's two-resource global allocation ceiling with WINDOW_CAPS budgets:
+one slot per visible auxiliary and one/two per base, retired slots included.
+Published descriptor credits remain global; fair scheduling must allow a static
+base and newly shown menu to progress even with one credit. No browser credit
+is held waiting for another source, encoder or viewer. Copy to private cache,
+finish resource reads and release first. Key 0/1, stale/dropped texture handoff,
+Done(), source leases, fatal acquired-device uncertainty and unregister ordering
+are unchanged from M4. CPU import can upload for GPU composition if available;
+when unavailable compose CPU BGRA before software encode.
+
+Daemon composes from the latest complete compatible image of each visible
+source, applying scene rects/z/mask/shadow and ONE/INV_SRC_ALPHA blending.
+Always start from cached base, not the previous composite. A scene-only/popup
+update schedules a new frame even if base pixels are static. Hide/close removes
+cached popup contribution immediately. There is no cross-root atomic-frame
+promise: allow first-popup-frame wait up to 100 ms; after that keep base moving
+and emit a missing-layer diagnostic while refreshing. Persistent missing UI is
+a qualification failure. Record layer age/skew and missing-layer counts. No
+cross-window coalescing or stale-popup resurrection. Force IDR for new sessions
+and window size/DSF generations; tab switch uses ordinary window frames.
+
+### Input and focus overrides
+
+Reuse 0x0200..0x0207 payload shapes and validation. InputHeader's target is now
+Window id, generation is Window generation, coordinates/wheel deltas are window
+root DIPs. Source IDs are never supplied as input authority by viewers. Browser
+chooses capture/modal/topmost popup host and injects ui events into Aura. Ordinary
+tab changes and popup show/hide do not invalidate all window input. Window
+resize/DSF, close, blur, owner loss and input-window switch clear held state and
+pending asynchronous dispatch. Logical input_active replaces v1 active-target
+validation; FOCUS(true) may select the input window and FOCUS(false) releases it.
+Streams for other windows continue while input goes to one window.
+
+KEY_DOWN text remains informational. Named keys and accelerators enter Views;
+KEY_CHAR inserts committed text exactly once through the current focused
+TextInputClient, covering omnibox and renderer/OOPIF. No OS IME/message queue,
+foreground or synthetic desktop input. No text client means a nonfatal
+input-unavailable diagnostic (do not call RWHVA InsertText on TYPE_NONE).
+Preedit remains optional/unadvertised unless implemented and qualified; if bit
+32 is advertised add 0x0208 COMPOSITION = InputHeader,text:str,start:u32,end:u32
+(UTF-16 offsets; empty text cancels). It never replaces committed KEY_CHAR.
+Keep reliable ordering and M2 completion/weak-epoch safeguards; Views-consumed
+events do not wait for renderer ACKs. Cursor reports WINDOW_CURSOR, including
+Views/popup cursor and visibility; native cursor effects are suppressed.
+
+### Node JSON, sessions, tracks and viewer
+
+Introduce stdio `{v:2,...}` selected by hello versions containing 2; methods
+below require v2. Keep v1 handlers distinct during migration. Instance JSON
+replaces active_target_id with input_window_id and windows:WindowJSON[].
+WindowJSON/TabJSON/LayerJSON use snake_case explicit `window_id`, `tab_id`,
+`source_id`, `parent_source_id`, `opener_window_id`, `opener_tab_id`; nullable
+absent IDs replace binary zero. generation/revision are decimal strings, z and
+geometry numeric. WindowJSON uses active_tab_id and size; SceneJSON uses
+window_id,window_generation,revision,layers. Binary Cursor maps as in v1.
+
+| v2 method | Params | Result |
+| --- | --- | --- |
+| window.create | instance_id,url?,size?,activate? | window:WindowJSON |
+| window.list | instance_id | windows:WindowJSON[] |
+| window.close | instance_id,window_id | accepted:true |
+| window.resize | instance_id,window_id,size | window:WindowJSON |
+| window.activate | instance_id,window_id | window:WindowJSON |
+| tab.create | instance_id,window_id,url?,activate? | tab:TabJSON |
+| tab.close / tab.activate / tab.navigate | instance_id,tab_id; navigate also url | accepted:true / tab:TabJSON / accepted:true |
+| session.create | existing params plus required window_id | existing session result plus window_id |
+
+Defaults match existing initial_url/size settings except size is WindowSize;
+new-window default activate=true and tab.create default activate=true. instance
+creation creates its initial window, reports window.created then instance.ready
+with windows/input_window_id. Preserve response-before-ready ordering from v1.
+Events are window.created/changed/closed, window.scene and window.cursor;
+closed carries window_id/reason. No target.* product events in v2. All events
+retain instance_id, seq and time_ms. window.frame.refresh may be exposed as a
+debug command; normal session PLI requests WINDOW_FRAME_REFRESH internally.
+
+Bind each viewer session immutably to one window and one video track; two windows
+use two sessions/PeerConnections/tracks initially. This avoids changing the
+existing one-track signaling implementation into dynamic transceiver negotiation.
+All sessions for a window share its encoder publication. Window close ends only
+its sessions. Resize retains track identity and forces IDR; tab activation does
+not replace track. A session's signaling/control authority is still server-side;
+one input owner per instance. Divide instance bandwidth/CPU budgets across its
+window media workers and expose per-window stats, plus aggregate totals.
+
+DataChannels become `prts.control.v2` / `prts.feedback.v2`, protocol
+`prts-json-v2`, `{v:2,type:...}`; reliability/size limits stay unchanged.
+ready carries window_id and window:WindowJSON, later window snapshots replace
+v1 target snapshots. CommonInput uses window_id,generation,sequence,modifiers.
+Cursor messages use window_id/generation. Optional composition message mirrors
+binary COMPOSITION only when negotiated. Feedback stays session/window-scoped.
+Viewer draws window streams, not per-tab streams; it maps each video's displayed
+content rect to root DIPs without local DPR multiplication. Multiple streams may
+be visible while only one receives input. Local-browser reserved accelerators
+may require remote-shortcut UI buttons or supported Keyboard Lock; they cannot
+be guaranteed by preventDefault alone.
+
+Preserve actual backend/encoder diagnostics; add per-window composite backend
+(`d3d11`/`cpu`), visible layer count, missing-layer count, frame age/skew,
+registered/private bytes and composition duration. A mixed CPU/GPU scene must
+report that fact; do not label upload/readback composition as an entirely native
+GPU capture path. Synthetic v2 models a window with tab metadata and a base
+source; it does not claim to render real Chrome controls.
