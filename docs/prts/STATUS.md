@@ -48,11 +48,14 @@
   pass. Publishing twice is idempotent: skips all assets, preserves pre-release.
   Source is Chromium `c14260952f`, 34 patches; release fix main `56b6cc1`.
 - **Touch active (priority 1b):** matching `wip/touch` branches implement real
-  Aura touch events and bounded frontend multi-touch. Chromium `a898866032`
-  exported35 patches; final component5 and incremental Release builds pass.
-  App-menu/Newtab and core gestures pass; matrix1 GPU/CPU DSF1.25 and GPU DSF2
-  pass including channel-close cancellation and control recovery. Fixture
-  readiness corrections and explicit fling are in full1 running now.
+  Aura touch events and bounded frontend multi-touch. Chromium `5cc896e9d0`
+  exported36 patches; final component6 and incremental Release builds pass.
+  All6 timing cases (GPU/QSV + CPU/software at DSF1/1.25/2) PASS, including
+  trusted touch, two contacts, source timing, native fling/pinch, decoded app/
+  longpress menus and channel-close cancellation/control recovery. Quick2 PASS.
+  Full1 baseline40/46 PASS; two touchscale2 failures fixed and requalified,
+  unchanged M2 rerun PASS, known omnibox failures retained; strict CPU2 metadata
+  timeout rerun pending. No acceptance threshold was relaxed.
   No touch code merged to main.
   Resume: [touch-wip.md](touch-wip.md) and newest journal lines.
 - **E1 parked for touch:** publisher tools merged/pushed on main `ef8dc29`; matching
@@ -64,8 +67,8 @@
   recovery; forced oneVPL forbids fallback. Checkpoint `7c57d40` is pushed on
   `wip/e1-onevpl`; final build2 has no completion receipt. CPU/intra/recovery
   evidence is in journal; MF comparison and full regression remain.
-- **Next action:** finish `prts-touch-full1` final touch matrix and full regression,
-  then package matching Release output, clean-extract acceptance and publish
+- **Next action:** finish unchanged omnibox CPU2 rerun, package matching Release
+  output, run clean-extract full46 acceptance and publish
   `v0.1.1-preview`. Resume E1 afterwards; do not merge unqualified features.
   Isolation, v0.2.0, patch re-architecture, NVENC, then flyout latency follow
   the newest PLAN order. Release notes:

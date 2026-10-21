@@ -46,7 +46,7 @@ export class RemoteInput {
         }
         const id = this.touches.get(e.pointerId), point = this.point(e, true);
         if (id === undefined || !point) return;
-        this.send(`touch.${phase}`, { ...point, contact_id: id, pressure: e.pressure }, e);
+        this.send(`touch.${phase}`, { ...point, contact_id: id, pressure: e.pressure, timestamp_ms: e.timeStamp }, e);
         if (phase === 'end' || phase === 'cancel') {
           this.touches.delete(e.pointerId);
           if (video.hasPointerCapture(e.pointerId)) video.releasePointerCapture(e.pointerId);

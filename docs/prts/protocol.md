@@ -196,7 +196,7 @@ buttons mask: 1=left, 2=right, 4=middle, 8=back, 16=forward (DOM convention).
 | 0x0205 KEY_UP | Same fields as KEY_DOWN; text empty, repeat=false |
 | 0x0206 KEY_CHAR | InputHeader,text:str |
 | 0x0207 FOCUS | InputHeader,focused:bool |
-| 0x0208 TOUCH (v2 only) | InputHeader,phase:u8,contact_id:u32,x:f64,y:f64,pressure:f64 |
+| 0x0208 TOUCH (v2 only) | InputHeader,phase:u8,contact_id:u32,x:f64,y:f64,pressure:f64,timestamp_ms:f64 |
 
 TOUCH phases are 0=start, 1=move, 2=end, 3=cancel. Coordinates are window
 DIPs, pressure is finite 0..1, IDs are 0..31 with at most ten held contacts.
@@ -205,6 +205,10 @@ Each contact retains its original Aura root (including owned flyouts) until
 release/cancel. Focus loss, navigation, generation changes, control-owner loss
 and teardown cancel held contacts. Dispatch uses genuine Aura TouchEvent and
 Chromium's gesture recognition, without OS input or mouse-wire emulation.
+`timestamp_ms` preserves the client's DOM event timing (finite 0..1e12,
+nondecreasing per input epoch). The browser maps it to its monotonic clock,
+clamps future values to dispatch time, and preserves source intervals through
+queueing for native velocity/fling recognition. Reset clears the time origin.
 
 click_count is 1..3 on down/up and computed by the viewer; buttons is state
 after this event. Wheel positive x scrolls right, positive y scrolls down;
@@ -581,7 +585,7 @@ silently move discrete input onto the unreliable channel.
 | key.down / key.up V->D | CommonInput,vk?:number,code,key,text,location,repeat,is_system |
 | key.char V->D | CommonInput,text |
 | focus V->D | CommonInput,focused:bool |
-| touch.start / touch.move / touch.end / touch.cancel V->D (v2 Chromium) | CommonInput,contact_id,x,y,pressure |
+| touch.start / touch.move / touch.end / touch.cancel V->D (v2 Chromium) | CommonInput,contact_id,x,y,pressure,timestamp_ms |
 | stats V->D | sample_seq:number,interval_ms:number,decoded_fps:number,received_bps:number,rtt_ms:number|null,jitter_ms:number|null,packets_lost:number,decode_ms_avg:number|null,render_ms_avg:number|null |
 | cursor D->V | target_id,generation,cursor:CursorJSON |
 | error D->V | sequence?:number,error:Error |

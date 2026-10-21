@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Tue, 20 Oct 2026 04:38:10 +0800
-Subject: [PATCH 07/35] Bootstrap PRTS headless controller and wire browser
+Subject: [PATCH 07/36] Bootstrap PRTS headless controller and wire browser
  lifecycle
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

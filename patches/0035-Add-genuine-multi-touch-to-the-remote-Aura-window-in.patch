@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Wed, 21 Oct 2026 21:24:58 +0800
-Subject: [PATCH 35/35] Add genuine multi-touch to the remote Aura window input
+Subject: [PATCH 35/36] Add genuine multi-touch to the remote Aura window input
  path
 
 Preserve original contact hosts and native gesture recognition, bound contacts and cancel them at input epoch changes. Advertise v2 touch capability independently of composition features.

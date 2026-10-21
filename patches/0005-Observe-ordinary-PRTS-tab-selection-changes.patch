@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Tue, 20 Oct 2026 04:36:46 +0800
-Subject: [PATCH 05/35] Observe ordinary PRTS tab selection changes
+Subject: [PATCH 05/36] Observe ordinary PRTS tab selection changes
 
 Update logical activation when Chrome switches existing tabs in the active target's strip, while preserving popup insertion and close ordering and preventing activation recursion.
 

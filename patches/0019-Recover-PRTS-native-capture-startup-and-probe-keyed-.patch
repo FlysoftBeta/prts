@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Tue, 20 Oct 2026 11:05:59 +0800
-Subject: [PATCH 19/35] Recover PRTS native capture startup and probe keyed
+Subject: [PATCH 19/36] Recover PRTS native capture startup and probe keyed
  export support
 
 Fall back to CPU if native GMB capture never starts or delivers an unsupported handle; test NT keyed texture allocation before advertising GPU mode. Format the M4 capture/export code.

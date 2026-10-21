@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Wed, 21 Oct 2026 06:23:10 +0800
-Subject: [PATCH 27/35] WIP: reject stale root surfaces during window resize
+Subject: [PATCH 27/36] WIP: reject stale root surfaces during window resize
 
 Viz can fit an old activated surface into the new capture resolution. Require matching source dimensions and full content bounds before publishing a root frame under the new scene generation. Unchanged fractional/odd-size M5 capture and input gates pass on GPU and CPU.
 

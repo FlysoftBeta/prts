@@ -928,6 +928,10 @@ impl Daemon {
             let x = number(v, "x", -32768., 32767.)?;
             let y = number(v, "y", -32768., 32767.)?;
             number(v, "pressure", 0., 1.)?;
+            let timestamp = number(v, "timestamp_ms", 0., 1e12)?;
+            if timestamp < input.touch_time_ms {
+                return Err(invalid("touch timestamp decreased"));
+            }
             if kind == "touch.start" {
                 if input.touches.contains_key(&id) || input.touches.len() >= 10 {
                     return Err(invalid("touch contact already held or capacity exceeded"));
@@ -948,6 +952,7 @@ impl Daemon {
                     input.touches.remove(&id);
                 }
             }
+            input.touch_time_ms = timestamp;
         } else if kind.starts_with("mouse.") {
             let x = number(v, "x", -32768.0, 32767.0)?;
             let y = number(v, "y", -32768.0, 32767.0)?;
@@ -1015,6 +1020,7 @@ impl Daemon {
                 input.buttons = 0;
                 input.keys.clear();
                 input.touches.clear();
+                input.touch_time_ms = 0.;
             }
         } else {
             let text = string(v, "text")?;
@@ -1096,6 +1102,7 @@ impl Daemon {
                     x,
                     y,
                     pressure: v["pressure"].as_f64().unwrap(),
+                    timestamp_ms: v["timestamp_ms"].as_f64().unwrap(),
                 },
                 "mouse.move" => B::MouseMove { x, y, buttons },
                 "mouse.down" => B::MouseDown {

@@ -58,6 +58,7 @@ pub enum Input {
         x: f64,
         y: f64,
         pressure: f64,
+        timestamp_ms: f64,
     },
     MouseMove {
         x: f64,
@@ -111,6 +112,7 @@ impl Input {
                 x,
                 y,
                 pressure,
+                timestamp_ms,
             } => {
                 ensure!(
                     *phase <= 3
@@ -123,11 +125,16 @@ impl Input {
                         && (0. ..=1.).contains(pressure),
                     "Invalid touch values"
                 );
+                ensure!(
+                    timestamp_ms.is_finite() && (0. ..=1e12).contains(timestamp_ms),
+                    "Invalid touch timestamp"
+                );
                 p.push(*phase);
                 p.extend(id.to_le_bytes());
                 p.extend(x.to_le_bytes());
                 p.extend(y.to_le_bytes());
                 p.extend(pressure.to_le_bytes());
+                p.extend(timestamp_ms.to_le_bytes());
                 0x208
             }
             Self::MouseMove { x, y, buttons }
@@ -599,7 +606,22 @@ mod tests {
                     id,
                     x,
                     y: 0.,
-                    pressure
+                    pressure,
+                    timestamp_ms: 1.
+                }
+                .record(&header)
+                .is_err()
+            );
+        }
+        for timestamp_ms in [f64::NAN, -1., 1e12 + 1.] {
+            assert!(
+                Input::Touch {
+                    phase: 0,
+                    id: 0,
+                    x: 1.,
+                    y: 1.,
+                    pressure: 0.5,
+                    timestamp_ms
                 }
                 .record(&header)
                 .is_err()

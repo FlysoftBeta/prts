@@ -253,6 +253,7 @@ pub struct Input {
     pub pointer: bool,
     pub keys: BTreeMap<String, bool>,
     pub touches: BTreeMap<u32, bool>,
+    pub touch_time_ms: f64,
     pub wheel: f64,
 }
 impl Input {
@@ -260,6 +261,7 @@ impl Input {
         self.buttons = 0;
         self.keys.clear();
         self.touches.clear();
+        self.touch_time_ms = 0.;
         self.focused = false;
     }
 }

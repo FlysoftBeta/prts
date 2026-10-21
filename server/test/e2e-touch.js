@@ -29,7 +29,7 @@ test('real frontend multi-touch reaches Aura, page events and native gestures', 
       const s={events:[],clicks:0,contexts:0,maxTouches:0,scroll:0,scale:1};
       button.onclick=()=>s.clicks++;
       for(const type of ['pointerdown','pointermove','pointerup','pointercancel','touchstart','touchmove','touchend','touchcancel'])
-        document.addEventListener(type,e=>{s.events.push({type,pointerType:e.pointerType,id:e.pointerId,trusted:e.isTrusted,touches:e.touches?.length,scroll:scrollY});s.events=s.events.slice(-200);s.maxTouches=Math.max(s.maxTouches,e.touches?.length||0);},{passive:true});
+        document.addEventListener(type,e=>{s.events.push({type,pointerType:e.pointerType,id:e.pointerId,trusted:e.isTrusted,touches:e.touches?.length,scroll:scrollY,time:e.timeStamp});s.events=s.events.slice(-200);s.maxTouches=Math.max(s.maxTouches,e.touches?.length||0);},{passive:true});
       document.addEventListener('contextmenu',()=>s.contexts++);
       setInterval(()=>{s.scroll=scrollY;s.scale=visualViewport.scale;fetch('/report',{method:'POST',body:JSON.stringify(s)}).catch(()=>{});},50);
       </script>`);
@@ -87,7 +87,7 @@ test('real frontend multi-touch reaches Aura, page events and native gestures', 
   const rect = await page.$eval('video', v => { const r=v.getBoundingClientRect();return {x:r.left,y:r.top,s:r.width/960}; });
   const cdp = await page.createCDPSession();
   const point = (id,x,y) => ({id,x:rect.x+x*rect.s,y:rect.y+y*rect.s,radiusX:2,radiusY:2,force:.5});
-  const send = (type,points) => cdp.send('Input.dispatchTouchEvent',{type,touchPoints:points});
+  const send = (type,points,timestamp) => cdp.send('Input.dispatchTouchEvent',{type,touchPoints:points,...(timestamp===undefined?{}:{timestamp})});
   const tap = async (x,y) => { await send('touchStart',[point(1,x,y)]); await sleep(70); await send('touchEnd',[]); };
   await tap(938,60);
   await until(()=>page.$eval('video',(v,dpr)=>{const c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;const ctx=c.getContext('2d');ctx.drawImage(v,0,0);return [...ctx.getImageData(800*dpr,200*dpr,1,1).data].slice(0,3).every(n=>n>200);},dpr),'decoded touch app-menu flyout');
@@ -123,14 +123,19 @@ test('real frontend multi-touch reaches Aura, page events and native gestures', 
   await until(()=>state.events.filter(e=>e.type==='touchcancel').length>cancelledBefore,'channel-close cancellation of held contact');
   await send('touchCancel',[]);
   await page.click('#connect');
-  await until(()=>page.evaluate(()=>window.touchChannel?.readyState==='open' &&
-    document.querySelector('#empty').hidden && document.querySelector('video').srcObject),'reconnected touch viewer');
-  await send('touchStart',[point(20,700,top+410)]);
-  for(let i=1;i<=12;i++){await send('touchMove',[point(20,700,top+410-i*20)]);await sleep(20);}
-  await send('touchEnd',[]);
+  await until(()=>page.evaluate(dpr=>{const video=document.querySelector('video');return window.touchChannel?.readyState==='open' &&
+    document.querySelector('#empty').hidden && video.srcObject && video.readyState>=2 && video.videoWidth===960*dpr;},dpr),'reconnected touch viewer');
+  // A reproducible 60Hz finger flick. Command/encode delays must not change
+  // the originating finger velocity delivered through the control channel.
+  const flickTime=Date.now()/1000;
+  await send('touchStart',[point(20,700,top+410)],flickTime);
+  for(let i=1;i<=12;i++){await send('touchMove',[point(20,700,top+410-i*20)],flickTime+i/60);await sleep(20);}
+  await send('touchEnd',[],flickTime+13/60);
   await until(()=>state.scroll>100,'native one-finger scroll');
   await until(()=>state.events.at(-1)?.type==='touchend','scroll contact release');
   const releasedScroll = state.events.at(-1).scroll;
+  const flickDuration=state.events.at(-1).time-state.events.filter(e=>e.type==='touchstart').at(-1).time;
+  assert.ok(Math.abs(flickDuration-13000/60)<20,`source touch duration changed: ${flickDuration}ms`);
   await until(()=>state.scroll>releasedScroll+10,'native fling continues scrolling after release');
   await sleep(800);
   const beforeScale=state.scale;
@@ -141,6 +146,13 @@ test('real frontend multi-touch reaches Aura, page events and native gestures', 
   await send('touchStart',[point(40,700,top+360)]); await sleep(1000);
   await send('touchEnd',[]);
   await until(()=>state.contexts>0,'native long-press context menu');
+  await until(()=>page.$eval('video',(v,[top,dpr])=>{
+    const c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;
+    const ctx=c.getContext('2d');ctx.drawImage(v,0,0);
+    const {data}=ctx.getImageData(600*dpr,(top+80)*dpr,340*dpr,(540-top)*dpr);
+    let bright=0;for(let i=0;i<data.length;i+=4)if(data[i]>180&&data[i+1]>180&&data[i+2]>180)bright++;
+    return bright>5000*dpr*dpr;
+  },[top,dpr]),'decoded long-press context-menu pixels');
   await tap(800,top+400);
   assert.equal(await page.$eval('#error',e=>e.textContent),'');
   assert.equal(await page.evaluate(()=>visualViewport.scale),1,'video gestures must not zoom the local viewer');

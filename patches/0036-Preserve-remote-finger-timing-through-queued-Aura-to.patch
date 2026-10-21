@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Wed, 21 Oct 2026 21:50:12 +0800
+Subject: [PATCH 36/36] Preserve remote finger timing through queued Aura touch
+ dispatch
+
+Map validated monotonic client timestamps into the browser clock, bounded by dispatch time. This preserves gesture velocity across control and renderer queues; qualify native post-release fling at all tested display scales.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_window_input.cc b/chrome/browser/prts/prts_window_input.cc
+index 48f61afc89..a6cf98ad07 100644
+--- a/chrome/browser/prts/prts_window_input.cc
++++ b/chrome/browser/prts/prts_window_input.cc
+@@ -200,6 +200,8 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+     // Clear first: dispatch may synchronously destroy a host or this input epoch.
+     auto touches = std::move(touches_);
+     touches_.clear();
++    touch_clock_set_ = false;
++    last_touch_time_ms_ = 0;
+     auto alive = weak_.GetWeakPtr();
+     for (const auto& [id, contact] : touches) {
+       if (contact.root) {
+@@ -263,13 +265,15 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+       double x = std::bit_cast<double>(d.Int(8));
+       double y = std::bit_cast<double>(d.Int(8));
+       double pressure = std::bit_cast<double>(d.Int(8));
++      double timestamp_ms = std::bit_cast<double>(d.Int(8));
+       if (!d.Done() || phase > 3 || id >= 32 || !std::isfinite(x) ||
+           !std::isfinite(y) || std::abs(x) > 32768 || std::abs(y) > 32768 ||
+-          !std::isfinite(pressure) || pressure < 0 || pressure > 1) {
++          !std::isfinite(pressure) || pressure < 0 || pressure > 1 ||
++          !std::isfinite(timestamp_ms) || timestamp_ms < 0 || timestamp_ms > 1e12) {
+         return 1;
+       }
+       Enqueue(base::BindOnce(&Impl::Touch, base::Unretained(this), phase, id,
+-                            gfx::PointF(x, y), pressure, modifiers));
++                            gfx::PointF(x, y), pressure, timestamp_ms, modifiers));
+       return 0;
+     }
+     if (type <= 0x203) {
+@@ -354,9 +358,10 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+     return 0;
+   }
+   void Touch(uint8_t phase, uint32_t id, gfx::PointF point,
+-             double pressure, uint32_t modifiers) {
++             double pressure, double timestamp_ms, uint32_t modifiers) {
+     auto it = touches_.find(id);
+-    if ((phase == 0 && (it != touches_.end() || touches_.size() >= 10)) ||
++    if (timestamp_ms < last_touch_time_ms_ ||
++        (phase == 0 && (it != touches_.end() || touches_.size() >= 10)) ||
+         (phase != 0 && it == touches_.end())) {
+       fault_.Run(1);
+       Done();
+@@ -395,6 +400,19 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+     const auto origin = target->GetBoundsInScreen().origin();
+     point.Offset(owner.x() - origin.x(), owner.y() - origin.y());
+     target->GetHost()->ConvertDIPToPixels(&point);
++    // Preserve finger timing across network/renderer queueing. Dispatch-time
++    // stamps distort velocity (especially at high DSF), suppressing flings.
++    const auto now = base::TimeTicks::Now();
++    if (!touch_clock_set_) {
++      touch_clock_set_ = true;
++      touch_origin_ = now;
++      touch_origin_ms_ = timestamp_ms;
++    }
++    last_touch_time_ms_ = timestamp_ms;
++    const auto source_stamp = touch_origin_ +
++        base::Microseconds(static_cast<int64_t>((timestamp_ms - touch_origin_ms_) * 1000));
++    last_stamp_ = std::max(std::min(source_stamp, now),
++                           last_stamp_ + base::Microseconds(1));
+     if (phase < 2) {
+       touches_.insert_or_assign(id, Contact{target->GetWeakPtrAsWindow(), point});
+     } else {
+@@ -405,7 +423,7 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+         : phase == 1 ? ui::EventType::kTouchMoved
+         : phase == 2 ? ui::EventType::kTouchReleased
+                      : ui::EventType::kTouchCancelled,
+-        point, point, Stamp(),
++        point, point, last_stamp_,
+         ui::PointerDetails(ui::EventPointerType::kTouch, id, 1, 1, pressure),
+         Flags(modifiers, 0));
+     Send(std::move(event), base::BindOnce(&Impl::Done, weak_.GetWeakPtr()), target);
+@@ -570,6 +588,9 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+     gfx::PointF point;
+   };
+   std::map<uint32_t, Contact> touches_;
++  bool touch_clock_set_ = false;
++  double touch_origin_ms_ = 0, last_touch_time_ms_ = 0;
++  base::TimeTicks touch_origin_;
+   gfx::PointF point_;
+   uint32_t buttons_ = 0;
+   double wheel_x_ = 0, wheel_y_ = 0;
