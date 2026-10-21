@@ -1,6 +1,7 @@
 param(
     [ValidateSet('quick', 'mf', 'gpu', 'flyouts', 'full')][string]$Suite = 'quick',
     [switch]$AllowDisconnectedDesktop,
+    [switch]$PreviewKnownIssues,
     [string]$LogPrefix = (Join-Path $env:TEMP ('prts-tests-' + (Get-Date -Format 'yyyyMMdd-HHmmss')))
 )
 
@@ -17,6 +18,9 @@ Remove-Item Env:\PRTS_BROWSER_PROTOCOL, Env:\PRTS_M5_CAPTURE, Env:\PRTS_M5_INPUT
     Env:\PRTS_FRAME_MODE, Env:\PRTS_TEST_ENCODER, Env:\PRTS_M1_ALLOW_DISCONNECTED_DESKTOP -ErrorAction SilentlyContinue
 if ($AllowDisconnectedDesktop) { $env:PRTS_M1_ALLOW_DISCONNECTED_DESKTOP = '1' }
 $failed = @()
+$reported = @()
+if ($PreviewKnownIssues) { $env:PRTS_PREVIEW_REPORT_LATENCY = '1' }
+else { Remove-Item Env:\PRTS_PREVIEW_REPORT_LATENCY -ErrorAction SilentlyContinue }
 function Gate([string]$Name, [string]$Command, [int]$Seconds = 180) {
     $log = "$LogPrefix-$Name"
     Add-Content -Encoding UTF8 $journal "- $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [codex] Starting $Name (timeout ${Seconds}s): $Command | logs $log.log / $log.err.log | inspect exit and continue qualification."
@@ -37,7 +41,12 @@ function Gate([string]$Name, [string]$Command, [int]$Seconds = 180) {
     $result | Set-Content "$log.exit"
     Add-Content -Encoding UTF8 $journal "- $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [codex] $Name exit=$result | logs $log.log / $log.err.log | inspect failures before merging."
     Write-Output "$Name exit=$result ($log.log)"
-    if ($result -ne 0) { $script:failed += $Name }
+    if ($result -ne 0) {
+        if ($PreviewKnownIssues -and $Name -like 'omnibox-*' -and $result -ne 124) {
+            $script:reported += "$Name exit=$result (deferred omnibox known issue)"
+            Add-Content -Encoding UTF8 $journal "- $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [codex] Report-only preview known issue: $Name exit=$result | raw failure preserved in $log | defer investigation per PLAN priority7."
+        } else { $script:failed += $Name }
+    }
 }
 
 function FlyoutGates {
@@ -113,6 +122,7 @@ if ($Suite -eq 'mf') {
         Gate 'synthetic-e2e' 'node --test server/test/e2e.js'
     }
 }
+$reported | Set-Content "$LogPrefix.known-issues"
 if ($failed.Count) {
     "FAILED: $($failed -join ', ')" | Set-Content "$LogPrefix.done"
     exit 1

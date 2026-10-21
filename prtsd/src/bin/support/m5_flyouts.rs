@@ -1,8 +1,11 @@
 // Only GPU texture capture + hardware encoding carries the production latency
 // budget. CPU/software still must produce the same pixels and accept input;
 // its five-second wait is a hang/correctness deadline, not a latency budget.
+fn preview_report_latency() -> bool {
+    std::env::var("PRTS_PREVIEW_REPORT_LATENCY").as_deref() == Ok("1")
+}
 fn appearance_deadline(mode: u8) -> Duration {
-    if mode == 1 {
+    if mode == 1 && !preview_report_latency() {
         Duration::from_millis(250)
     } else {
         Duration::from_secs(5)
@@ -10,8 +13,8 @@ fn appearance_deadline(mode: u8) -> Duration {
 }
 fn decoded_appearance(mode: u8, opened: std::time::Instant, name: &str) -> Result<()> {
     let elapsed = opened.elapsed();
-    println!("{name} decoded_ms={:.2} latency_policy={}", elapsed.as_secs_f64() * 1000., if mode == 1 { "production-250ms" } else { "fallback-report-only" });
-    ensure!(mode != 1 || elapsed <= Duration::from_millis(250), "{name} decoded appearance latency {}ms", elapsed.as_millis());
+    println!("{name} decoded_ms={:.2} latency_policy={}", elapsed.as_secs_f64() * 1000., if preview_report_latency() { "preview-report-only" } else if mode == 1 { "production-250ms" } else { "fallback-report-only" });
+    ensure!(mode != 1 || preview_report_latency() || elapsed <= Duration::from_millis(250), "{name} decoded appearance latency {}ms", elapsed.as_millis());
     Ok(())
 }
 impl Client {

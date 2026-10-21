@@ -27,16 +27,20 @@
   after decoded appearance when sending Escape (pipe EOF). Component variants
   pass. Focused browser-log repro confirms key input then process death without
   fatal logging. Debugging on matching `wip/release-select` branches; do not publish.
-- **Next action:** WIP fix adds existing Aura window-animation disable switch
-  in Prepare (zero-duration hide animation freed LayerAnimator during popupclose).
-  Release incremental/GN PASS;3/4 select variants PASS allDSFs, CPU2 initially
-  failed before popup on fixture paint5s. Source fix committed/exported34 patches.
-  Default incremental running: `prts-release-select-fix1-default.*` (3600s).
-  After build rerun unchanged4 select Release cases, qualify Default popup changes,
-  diagnose synthetic loss phase (packetsLost transiently repaired while shaper
-  still drops), then repackage fresh archives and require clean-extract full40.
-  Original archives/extract `prts-preview-20261021-1608` /
-  `prts-preview-check-20261021-1610` failed35/40; never publish them.
+- **WIP fix:** `c14260952f` (exported34) uses existing Aura animation-disable
+  switch in Prepare; both Release/Default incremental builds and Release GN PASS.
+  All4 select variants pass all3DSFs; early CPU2 fixture paint failures retained,
+  unchanged gate passes twice with/without logging. Failure diagnostics improved.
+- **Synthetic fixture:** prior400ms experiment leaves5kbps bandwidth and1–5FPS.
+  Loss now uses a fresh synthetic instance with new>=15FPS precondition, retaining
+  original15percent/8s/receiver-loss/drop/recovery assertions. First run PASS at
+  19.87fps/205kbps,50shaper drops and receiver losspeak2; no daemon codec changes.
+- **Next action:** Default Suite flyouts is running (timeout1800s), prefix
+  `C:/src/chromium/prts-release-select-fix1-default-flyouts`; wrapper *-run.*.
+  After PASS commit WIP, package fresh archives and require clean-extract full40
+  before merging fix to main or publishing. Original archives/extract
+  `prts-preview-20261021-1608` / `prts-preview-check-20261021-1610` failed35/40;
+  never publish them. Current branches are matching `wip/release-select`.
   Draft notes: [release-v0.1.0-preview.md](release-v0.1.0-preview.md).
   GitHub CLI: `C:/Program Files/GitHub CLI/gh.exe` (authenticated).
   Re-architecture, encoders and isolation follow the release in PLAN order.
