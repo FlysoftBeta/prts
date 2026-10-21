@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Tue, 20 Oct 2026 04:23:00 +0800
-Subject: [PATCH 03/27] Use public browser creation API for PRTS targets
+Subject: [PATCH 03/29] Use public browser creation API for PRTS targets
 
 Follow CreateBrowserWindow's BrowserWindowCreateParams interface because Browser::Create is private at the pinned revision. Use explicit FunctionRef argument types and raw_span for Chromium safety checks.
 

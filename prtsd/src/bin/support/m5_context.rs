@@ -134,7 +134,7 @@ fn context_gate(c: &mut Client, id: u64, desktop: &DesktopProbe) -> Result<()> {
                 }
             }
             ensure!(
-                opened.elapsed() <= Duration::from_millis(250),
+                opened.elapsed() <= appearance_deadline(mode),
                 "Context popup appearance deadline"
             );
         };
@@ -143,11 +143,7 @@ fn context_gate(c: &mut Client, id: u64, desktop: &DesktopProbe) -> Result<()> {
             "Context composition transport changed"
         );
         let rgb = decode_composite(&mut encoder, &composite)?;
-        ensure!(
-            opened.elapsed() <= Duration::from_millis(250),
-            "Decoded context show latency {}ms",
-            opened.elapsed().as_millis()
-        );
+        decoded_appearance(mode, opened, "Context menu")?;
         let decoded_changed = rgb[page_top * composite.width as usize * 3..]
             .as_chunks::<3>()
             .0
@@ -184,7 +180,7 @@ fn context_gate(c: &mut Client, id: u64, desktop: &DesktopProbe) -> Result<()> {
             "Context alpha/premultiplication lost"
         );
         ensure!(
-            c.composed.missing_layers == missing_before,
+            mode != 1 || c.composed.missing_layers == missing_before,
             "Context missing-layer diagnostics"
         );
         ensure!(

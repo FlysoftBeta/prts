@@ -38,7 +38,10 @@ mod acceptance {
     }
     impl Client {
         fn start() -> Result<Self> {
-            let path = std::env::args().nth(1).unwrap_or(DEFAULT_CHROME.into());
+            let path = std::env::args()
+                .nth(1)
+                .or_else(|| std::env::var("PRTS_CHROME_PATH").ok())
+                .unwrap_or(DEFAULT_CHROME.into());
             let switches = vec!["--prts-test-hooks"];
             let raw = RawBrowser::launch_with_switches(Path::new(&path), &switches)?;
             raw.wait_startup()?;
@@ -302,10 +305,12 @@ mod acceptance {
     }
     include!("support/m5_capture.rs");
     include!("support/m5_input.rs");
+    include!("support/m5_popup_fixture.rs");
     include!("support/m5_hosts.rs");
     include!("support/m5_flyouts.rs");
     include!("support/m5_context.rs");
     include!("support/m5_select.rs");
+    include!("support/m5_omnibox.rs");
     pub fn run() -> Result<()> {
         let desktop = DesktopProbe::start()?;
         let mut c = Client::start()?;
@@ -422,6 +427,9 @@ mod acceptance {
         }
         if std::env::var_os("PRTS_M5_SELECT").is_some() {
             select_gate(&mut c, recreated.id, &desktop)?;
+        }
+        if std::env::var_os("PRTS_M5_OMNIBOX").is_some() {
+            omnibox_gate(&mut c, recreated.id, &desktop)?;
         }
         for window in c.list()? {
             let mut p = window.id.to_le_bytes().to_vec();

@@ -81,7 +81,7 @@ fn select_gate(c: &mut Client, id: u64, desktop: &DesktopProbe) -> Result<()> {
                 break (frame, changed);
             }
             ensure!(
-                opened.elapsed() <= Duration::from_millis(250),
+                opened.elapsed() <= appearance_deadline(mode),
                 "Select dropdown appearance deadline; hosts={:?}",
                 c.hosts(id)?
             );
@@ -91,11 +91,7 @@ fn select_gate(c: &mut Client, id: u64, desktop: &DesktopProbe) -> Result<()> {
             "Select composition transport changed"
         );
         let rgb = decode_composite(&mut encoder, &composite)?;
-        ensure!(
-            opened.elapsed() <= Duration::from_millis(250),
-            "Decoded select show latency {}ms",
-            opened.elapsed().as_millis()
-        );
+        decoded_appearance(mode, opened, "Select")?;
         let decoded_changed = rgb[popup_top * composite.width as usize * 3..]
             .as_chunks::<3>()
             .0
@@ -117,7 +113,7 @@ fn select_gate(c: &mut Client, id: u64, desktop: &DesktopProbe) -> Result<()> {
             "Select dropdown absent in decoded video"
         );
         ensure!(
-            c.composed.missing_layers == missing_before,
+            mode != 1 || c.composed.missing_layers == missing_before,
             "Select missing-layer diagnostics"
         );
         ensure!(

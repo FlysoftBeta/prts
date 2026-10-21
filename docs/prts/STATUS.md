@@ -1,6 +1,25 @@
 # PRTS status
 
 ## Current state
+- **Revised-plan MVP wrap-up active (2026-10-21, supersedes older next actions below):**
+  both repos remain on `wip/mvp-flyouts`; preserve the four already working
+  app/context/select/omnibox paths. Standard PRTS branding and shared Windows
+  Chrome UA/Client Hints hook are applied but await incremental build/runtime
+  qualification (`C:/src/chromium/prts-mvp-wrap41.*`). Missing direct GN Views
+  deps were fixed. CPU/software flyout latency is report-only, with all pixel,
+  input, restoration and resource assertions retained; GPU/QSV keeps250ms.
+  Added production-launch HTTP/JS identity gate covering page, dedicated/shared
+  workers and service workers. Lessons: [lessons-flyouts.md](lessons-flyouts.md).
+  Touch, other flyouts and independent tracks for extra windows remain known gaps.
+- **Next action:** inspect wrap41 build, GN and quick-suite exits; qualify identity
+  and full regression, export patches, commit/merge qualified wrap-up to main and
+  push. Then finish the existing non-component Release build (PID10124, started
+  07:38; do not start another), rebuild it incrementally with final patches,
+  package/clean-extract verify and publish the GitHub preview. Re-architecture,
+  encoders and isolation follow the release in PLAN order. Exact commands/logs
+  are in [mvp-flyouts-wip.md](mvp-flyouts-wip.md) and journal-mvp.md.
+
+### Earlier WIP detail (historical next actions superseded above)
 - **Active WIP: `wip/mvp-flyouts` in both repos**, not merged into main. Chromium `0f563c2575`
   (build30, exported27 patches) adds owned-layer scenes, fair two-resource alpha capture and correct
   Aura mouse-release flags for Views buttons. Daemon CPU/GPU composition and512MiB bounded caches
@@ -19,7 +38,13 @@
   an old root surface into new dimensions. Build30 rejects stale source sizes/content bounds;
   unchanged M5 GPU/CPU capture/input now PASS. All4 app-menu variants, production Intel auto GPU
   (decoded WebGL/video, QSV zero-copy) and v2 CPU WebRTC reruns PASS build30. Ineffective all-stages
-  launcher comparison removed. Omnibox and remaining flyout gates are next. Exact resume point:
+  launcher comparison removed. Active uncommitted omnibox gates now PASS4 transport/credit variants
+  at3DSFs: decoded appearance (CPU max244.32ms), exact close restoration, complete selected-row
+  containment and real pointer navigation. Build40 has read-only native/WebUI geometry probes and
+  first Aura poll as posted task (all routing/ACK/state checks retained). Software encoding uses
+  existing packed-BGRA SIMD for even sizes and up to4 workers; odd/MF padding unchanged. Rust checks
+  PASS; full38-gate regression40 and GN include check running before WIP checkpoint. Other flyouts
+  remain next. Exact resume point:
   [mvp-flyouts-wip.md](mvp-flyouts-wip.md), latest journal-mvp.md. Source `work` remains5a7769bea8;
   current chrome binary is WIP. No full flyout signoff.
 - **Next action: continue MVP (PLAN priority 2), M5b steps 4-5**: host-family tracking and GPU/CPU

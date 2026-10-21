@@ -1,11 +1,68 @@
-﻿# M5b flyouts WIP: resume here
+# M5b flyouts WIP: resume here
 
 Both repositories use `wip/mvp-flyouts`. Nothing from this unfinished feature
 has merged to main. Qualified Chromium `work` stays `5a7769bea8` (23 baseline
-patches). `out/Default/chrome.exe` is currently **WIP build30**, not main.
+patches). `out/Default/chrome.exe` is currently **WIP build40**, not main.
 
 ## Current checkpoint (2026-10-21)
 
+### Revised-plan wrap-up (supersedes the older backlog below)
+
+PLAN.md revised07:30 accepts the four working flyout types; do not extend to
+other flyouts before the preview release. Current edits apply standard PRTS
+BRANDING/branded strings, a small shared Windows UA/Client Hints hook, four
+missing direct GN Views dependencies, and CPU/software report-only latency.
+GPU/QSV still enforces250ms. Lessons are in lessons-flyouts.md. Touch and
+independent extra-window tracks remain known gaps.
+
+Bounded Default build: `C:/src/chromium/prts-mvp-wrap41.*` (1800s).
+Quick suite: `prts-mvp-wrap41-quick-*` (1200s parent).
+GN check: `prts-mvp-wrap41-gn.*` (300s).
+New `server/test/e2e-identity.js` uses the production daemon/pipe launcher and
+HTTP reports from page/dedicated/shared/service workers; full suite includes it.
+Existing Release build is still running (siso PID10124, about38k/70k steps);
+never start another Release ninja concurrently. Final incremental Release build
+and clean-extract verification must precede publishing.
+
+Next: inspect these exits; run fixed-binary identity and full acceptance matrix;
+fix genuine failures; commit/export WIP then merge only qualified work to main,
+update STATUS and push. Release follows. Historical notes below retain evidence.
+
+### Active omnibox follow-on after select checkpoint1e9b856
+
+Current incremental binary is build40. Chromium HEAD remains0f563c2575 with
+uncommitted changes in `prts_window_registry.cc` (test-only native/WebUI row
+geometry) and `content/browser/renderer_host/aura_input_barrier.cc` (first poll
+posted without a timer; all pending-router/ACK/visual-state checks retained).
+Infra adds `m5_omnibox.rs`, `m5_popup_fixture.rs`, software packed-BGRA SIMD
+conversion for even sizes and up to4 available CPU encoder workers. Odd edge
+replication and MF padded conversion stay unchanged. Rust37 checks PASS,
+including a BT.601/chroma/SIMD-tail regression.
+
+**Omnibox-all2 PASS4/4** CPU/software+GPU/QSV xHELLO1/2, each3DSFs, with decoded
+appearance (CPU max244.32ms against unchanged250ms), exact close restoration,
+full selected-row stream containment and real pointer navigation to decoded
+blue page. The runner now includes all app/context/select/omnibox combinations
+(23 dedicated-suite gates including ordinary/host/GPU-reference checks).
+
+Exact next step: inspect bounded full38-gate regression currently running at
+`C:/src/chromium/prts-flyouts-regression40-*` and GN include check
+`C:/src/chromium/prts-flyouts-includes40-*`; fix failures without relaxing gates.
+Then commit/export Chromium WIP, commit/push infra WIP, and continue dialogs,
+permission/bubble/profile/extension popups, tooltip and nested-edge menus.
+
+Probe invariants:0x42c native selected-row marker0x7fff0001;0x42b WebUI shadow-DOM
+read-only geometry. Use non-creating `WebView::web_contents()`; GetWebContents()
+creates/attaches empty content and corrupts hidden popup state. DOM geometry
+retains fractional DIP while native bounds round; readiness permits <1DIP
+rounding but returns the complete DOM row for exact driver containment. No
+probe injects input or invokes navigation. Static loopback fixture avoids OOPIF
+first-paint false positives. Use unique per-DSF second-query fragments because
+history may autocomplete a prior URL, and retyping identical text does not
+reopen suggestions. Latency visibility witnesses use a tighter120DIP region
+below the omnibox and borrowed CPU pixels, retaining >1000 changed pixels and
+the250ms deadline. Temporary logs/Ganesh comparison were removed; failed test
+pixel dumps remain diagnostic-only outside the repo.
 Owned-host scenes, fair two-resource capture, premultiplied CPU/GPU composition,
 and actual app-menu pointer selection work. The dedicated one-command suite
 passes all11 gates:

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Tue, 20 Oct 2026 10:27:52 +0800
-Subject: [PATCH 14/27] PRTS: resume blocked static capture when frame credits
+Subject: [PATCH 14/29] PRTS: resume blocked static capture when frame credits
  return
 
 Remember updates dropped during section registration or credit exhaustion and request refresh when credits or resources become available. Refresh only blocked sources and avoid duplicate registration refreshes. Keep optional resource and frame diagnostics behind VLOG.

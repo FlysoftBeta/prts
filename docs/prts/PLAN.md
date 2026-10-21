@@ -98,7 +98,56 @@ PRTS (custom headless Chromium)  --anonymous pipes-->  prtsd (Rust, windows-rs)
 3. Integrate: zero-copy texture -> QSV encode; isolation (Job Object + AppContainer) with GPU verified.
 4. Polish: network simulation, quality stats, multi-instance, docs (README with run steps).
 
-**Priority order (user, revised 2026-10-21; supersedes 2026-10-20):**
+**Priority order (user, revised 2026-10-21 07:30 — SUPERSEDES the list below):**
+1. MVP WRAP-UP (now): stop chasing the flyout latency gate. Keep the flyout code that already works
+   (app menu, context menu, select, omnibox popup appear and take input) and merge it to main with gates
+   that pass (latency report-only); write the lessons learned to `docs/prts/lessons-flyouts.md`
+   (what worked, what failed, measured numbers, root causes found). Finish cleanup (README, one-command
+   tests). Touch input only if it's quick; otherwise list it as known gap.
+   **MVP-required: Google Chrome identity** (reduce extra bot checks): the UA string must look exactly like
+   stable Google Chrome on Windows (no "HeadlessChrome", no "Chromium"; reduced-UA format
+   `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/<major>.0.0.0 Safari/537.36`),
+   and User-Agent Client Hints must be consistent with it everywhere: `Sec-CH-UA` / `Sec-CH-UA-Full-Version-List`
+   brands = "Google Chrome" + "Chromium" + GREASE brand (same order/format as real Chrome), `Sec-CH-UA-Platform`,
+   `-Mobile`, `-Platform-Version`, `-Arch`, `-Bitness`, and JS `navigator.userAgent`,
+   `navigator.userAgentData.brands` / `getHighEntropyValues()` in pages, workers and service workers. Also
+   check other headless tells reachable from pages (e.g. `navigator.webdriver` false, `window.chrome` present,
+   plugins/mimeTypes, screen/window outer sizes non-zero and consistent with the window). Do it at the
+   embedder level (one small hook, e.g. brand/product in embedder_support user-agent utils + headless
+   product override) rather than many patches. Gate: a test page dumping headers + JS values compares
+   against expected Chrome values for our PIN's major version.
+   **MVP-required: product branding = "PRTS"** — the browser's own branding (chrome://settings/help "About",
+   chrome://version, window/app titles, resource/version info) shows PRTS. Use Chromium's standard branding
+   mechanism (`chrome/app/theme/chromium/BRANDING` and the chromium-branded resources/strings) rather than
+   ad-hoc string patches. Web-facing identity stays Google Chrome (UA + client hints above), so the UA/brand
+   hook must not derive from the product name. Do the branding change EARLY (it triggers a wider rebuild;
+   out\Release is building now and will pick it up incrementally).
+   **All Chromium changes must be as small and elegant as possible**: prefer one well-placed hook over many,
+   use existing extension points (embedder/content-client overrides, BRANDING, features/switches), no
+   copy-pasted code, each patch focused and documented in its commit message.
+2. RELEASE: publish a GitHub release on FlysoftBeta/prts (e.g. `v0.1.0-preview`, marked pre-release):
+   zipped PRTS Chromium binaries from the NON-component release build `out\Release` (component off, dcheck
+   off, symbol_level=0; full build started 2026-10-21 07:38 via scripts/build-release.ps1, log
+   C:\src\chromium\prts-release-build.log, ~6-8 h). Before packaging, rebuild it incrementally with the
+   final patches (`autoninja -C out\Release chrome`); never start another full build; don't run two
+   ninja builds on out\Release at once. prtsd release binaries, the Node server + frontend (without node_modules; with install steps),
+   a quickstart in the release notes, and SHA256 sums. Verify the zip runs from a clean extract dir.
+   Use `gh release create`. Keep assets < 2 GB each (split if needed).
+3. Then: unify flyout and window code paths (one window/surface model); minimize Chromium patch surface
+   (fewer, smaller hooks; move logic out of Chromium into prtsd where possible).
+   **Patch re-architecture (after the MVP release):** don't review patch by patch. Squash the whole
+   series into ONE combined diff against PIN, treat it as a behavioural spec (what capabilities it adds:
+   pipe/control, window capture, flyouts, input, cursor, branding/UA, ...), and independently search the
+   Chromium tree for the best hook points to provide those capabilities with the smallest diff
+   (existing extension points, embedder/content-client overrides, observers, features/switches, public
+   APIs, or moving logic into prtsd). Record findings in `docs/prts/patch-rearch.md`. Re-implement on a fresh
+   branch as a small, clean, logically ordered series, with every gate passing before it replaces `main`'s
+   series. Goal: minimal diff to upstream, easy rebase onto new Chromium versions.
+4. Then: encoder backends (oneVPL QSV, NVENC; MF fallback) and isolation (AppContainer + LPAC, per-tenant
+   window station; resume from `wip/i1-isolation`).
+5. Then: re-integrate everything, full regression, new release.
+
+**Older order (superseded):**
 1. Isolation PAUSED (I1 WIP parked; default profile = none).
 2. MINIMUM USABLE STATE ("MVP"), then commit + push:
    - Chromium hardware GPU acceleration verified working (not SwiftShader/WARP) in the shipped config.
