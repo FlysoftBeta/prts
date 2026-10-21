@@ -36,9 +36,18 @@
   `C:/src/chromium/prts-preview-final-check-20261021-1651/verify-*`.
   GPU24 appearance samples72.55–239.49ms; CPU24 samples50.38–278.02ms.
   Original `prts-preview-20261021-1608` archives failed; never publish them.
-- **Next action:** merge qualified release fix, export34patches, push main,
-  publish `v0.1.0-preview` with the qualified archives/SHA256 and known issues;
-  then start oneVPL on matching `wip/e1-onevpl` branches. Isolation and v0.2.0
+- **Publication running:** qualified fix merged/pushed as main `56b6cc1`;
+  Chromium work `c14260952f`, 34 patches exported. GitHub CLI PID14472
+  (started17:01:04; execsession85193) is uploading the browser archive to a
+  temporary draft; server and SHA256 assets uploaded, remote hashes verified.
+  Upload advances around80KB/s; bounded deadline18:01. HTTP1 probe gave no
+  improvement and its temporary asset was deleted. Do not start a duplicate.
+- **Next action:** finish original upload, verify all3 remote SHA256 digests,
+  nondraft/prerelease status and published URL. Resumable publication helper is
+  on matching `wip/release-publisher` branches (no Chromium edits); parser and
+  mismatched-receipt checks pass, positive idempotence awaits publication.
+  Merge helper only after that check. Then start oneVPL on matching
+  `wip/e1-onevpl` branches. Isolation and v0.2.0
   follow oneVPL in PLAN order. Release notes:
   [release-v0.1.0-preview.md](release-v0.1.0-preview.md).
 - **Qualification limits:** desktop probes verify hidden/cloaked HWNDs, unchanged

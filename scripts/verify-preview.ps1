@@ -20,6 +20,7 @@ if ($archives.Count -ne 2) { throw 'Expected Chromium and server archives' }
 $null = New-Item -ItemType Directory -Path $ExtractDir
 foreach ($archive in $archives) { Expand-Archive -LiteralPath $archive -DestinationPath $ExtractDir }
 $ExtractDir = (Resolve-Path -LiteralPath $ExtractDir).Path
+Copy-Item -LiteralPath (Join-Path $Assets 'SHA256SUMS.txt') -Destination (Join-Path $ExtractDir 'verify-SHA256SUMS.txt')
 $env:PRTS_CHROME_PATH = Join-Path $ExtractDir 'prts-chromium-win-x64\chrome.exe'
 $env:PRTSD_PATH = Join-Path $ExtractDir 'prts-server-win-x64\prtsd\prtsd.exe'
 $env:PRTS_TEST_SERVER_DIR = Join-Path $ExtractDir 'prts-server-win-x64\server'

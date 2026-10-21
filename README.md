@@ -110,6 +110,10 @@ foreground/cursor qualification still requires a connected desktop.
 
 The flyout suite covers app/context menus, select popups and omnibox suggestions.
 CPU/software latency is report-only; GPU/QSV retains the production budget.
+For `v0.1.0-preview` qualification, `-PreviewKnownIssues` also reports GPU
+flyout latency and specific intermittent omnibox appearance/geometry failures,
+as required by the release plan. Raw failures remain in the gate logs;
+timeouts and other correctness/resource failures still block the release.
 See [flyout lessons](docs/prts/lessons-flyouts.md) for measurements and limitations.
 The headless launcher rasterizes Views UI tiles
 on CPU to avoid cold UI shader stalls. Page GPU rasterization, hardware
@@ -139,3 +143,17 @@ remains unchanged. See [M5 design and qualification](docs/prts/phase2-m5-design.
 [server](docs/prts/server-notes.md) / [daemon](docs/prts/prtsd-notes.md) notes.
 
 Branch `main` in src always equals `PIN`; `work` = `main` + patches. `sync` refuses to run with uncommitted changes.
+
+To package a finished non-component `out/Release` build and publish a preview:
+
+```powershell
+./scripts/package-preview.ps1 -Destination C:/prts/assets
+./scripts/verify-preview.ps1 -Assets C:/prts/assets -ExtractDir C:/prts/check -PreviewKnownIssues
+./scripts/publish-preview.ps1 -Assets C:/prts/assets -VerificationDir C:/prts/check
+```
+
+Use fresh packaging/extraction directories. Add `-AllowDisconnectedDesktop`
+to verification only in a disconnected session. Publishing requires the
+clean-extract receipt and matching SHA256 hashes, resumes completed uploads,
+and verifies remote hashes before making the pre-release public. Each upload
+has a one-hour deadline. Other versions can override `-Version` and `-Notes`.

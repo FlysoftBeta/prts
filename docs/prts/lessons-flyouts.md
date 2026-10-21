@@ -75,7 +75,11 @@ teardown. Source c14260952f adds five lines. Updated Release select cases pass
 across CPU/GPU, one/two credits and all three scales. Early CPU/two-credit
 fixture-paint failures were retained; the unchanged gate subsequently passes
 with and without logging. Failure-only diagnostics now print title/pixel/size.
-Final artifact qualification remains mandatory before release.
+Final artifact qualification completed at 16:59 on 2026-10-21: all four select
+variants passed against the clean extraction, alongside all other required
+gates. The full 40 gates yielded 38 passes and two explicitly deferred GPU omnibox
+selected-row geometry failures. Archive qualification caught a real crash
+that component qualification missed; retain both build configurations.
 
 ## Independent network-test fixtures
 
