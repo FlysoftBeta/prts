@@ -98,7 +98,20 @@ PRTS (custom headless Chromium)  --anonymous pipes-->  prtsd (Rust, windows-rs)
 3. Integrate: zero-copy texture -> QSV encode; isolation (Job Object + AppContainer) with GPU verified.
 4. Polish: network simulation, quality stats, multi-instance, docs (README with run steps).
 
-**Priority order (user, revised 2026-10-21 07:30 — SUPERSEDES the list below):**
+**Priority order (user, revised 2026-10-21 16:15 — SUPERSEDES all lists below):**
+1. Finish publishing `v0.1.0-preview` (in progress).
+2. oneVPL: direct Intel QSV encoder backend (D3D11 zero-copy input, low-latency settings, VBV fix for low
+   bitrates), MF kept as fallback; benchmark MF vs oneVPL into `docs/prts/encoder-bench.md`.
+3. I1 isolation: resume from `wip/i1-isolation` (journal-i1.md "Resume later"): Job Object + AppContainer
+   AND LPAC working with the hardware GPU, per-tenant window station/desktop, cross-tenant tests.
+4. Release `v0.2.0` (same packaging/verification procedure as v0.1.0-preview, non-component out\Release).
+5. Patch re-architecture: squash the whole series into one diff and find better hook points (see item 3 of
+   the older list below for the method).
+6. NVENC backend.
+7. Last: investigate why flyouts are slow to appear (latency >250 ms seen even on GPU/QSV; see
+   lessons-flyouts.md and journal-mvp.md for the measurements so far).
+
+**Older order (revised 2026-10-21 07:30, superseded):**
 1. MVP WRAP-UP (now): stop chasing the flyout latency gate. Keep the flyout code that already works
    (app menu, context menu, select, omnibox popup appear and take input) and merge it to main with gates
    that pass (latency report-only); write the lessons learned to `docs/prts/lessons-flyouts.md`

@@ -21,7 +21,7 @@ agent is supervising you; you must plan, implement, verify, commit and record pr
    it strictly), `docs/prts/STATUS.md` (current state / next action), then the newest
    `docs/prts/journal-*.md` relevant to the current milestone. Read other docs in `docs/prts/` only as needed
    (protocol.md, chromium-hooks.md, phase2-m5-design.md, isolation.md).
-2. FOLLOW PLAN.md "Priority order (revised 2026-10-21 07:30)" — it supersedes everything below in this
+2. FOLLOW the NEWEST "Priority order" block at the top of PLAN.md (currently revised 2026-10-21 16:15) — it supersedes everything below in this
    item: MVP wrap-up (keep working flyouts, lessons doc, latency report-only) -> GitHub pre-release with
    binaries + server -> unify flyout/window code + minimize Chromium patches -> encoders + isolation ->
    re-integrate. (Older text kept for context:) Current target: the **MVP** — PLAN.md priority 2:
