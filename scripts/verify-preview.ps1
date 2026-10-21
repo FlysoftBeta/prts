@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory=$true)][string]$Assets,
     [string]$ExtractDir = ('C:\src\chromium\prts-preview-check-' + (Get-Date -Format 'yyyyMMdd-HHmmss')),
-    [switch]$AllowDisconnectedDesktop
+    [switch]$AllowDisconnectedDesktop,
+    [switch]$PreviewKnownIssues
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
@@ -38,6 +39,7 @@ Bounded 'npm.cmd --prefix $env:PRTS_TEST_SERVER_DIR ci --omit=dev' 300 (Join-Pat
 $env:PRTS_PREVIEW_LOG_PREFIX = Join-Path $ExtractDir 'verify-gate'
 $command = '& ./scripts/test.ps1 -Suite full -LogPrefix $env:PRTS_PREVIEW_LOG_PREFIX'
 if ($AllowDisconnectedDesktop) { $command += ' -AllowDisconnectedDesktop' }
+if ($PreviewKnownIssues) { $command += ' -PreviewKnownIssues' }
 Bounded $command 3600 (Join-Path $ExtractDir 'verify-full')
 Add-Content -Encoding UTF8 $journal "- $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [codex] Clean-extract preview full acceptance PASS | assets $Assets extract $ExtractDir | commit recorded qualification and publish prerelease with SHA256 sums."
 Write-Output "PASS clean-extract preview: $ExtractDir"

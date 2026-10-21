@@ -63,7 +63,9 @@ Known gaps: touch gestures, additional flyout families, independent streams for
 extra windows within one instance, AppContainer/LPAC, Windows 10 qualification,
 connected-desktop foreground/cursor qualification. Intel MF is the current
 hardware encoder; direct oneVPL and NVENC follow later. Software latency is
-report-only. Browser application branding is PRTS; web UA/CH uses Chrome identity.
+report-only. GPU flyout appearance can exceed250ms; omnibox popup checks are
+intermittent. Both are report-only preview known issues deferred for investigation.
+Browser application branding is PRTS; web UA/CH uses Chrome identity.
 '@ | Set-Content -Encoding UTF8 (Join-Path $bundle 'QUICKSTART.txt')
 Copy-Item -LiteralPath (Join-Path $bundle 'QUICKSTART.txt') -Destination $browser
 Copy-Item -LiteralPath 'C:\src\chromium\src\LICENSE' -Destination (Join-Path $browser 'LICENSE.chromium')

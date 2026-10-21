@@ -48,7 +48,10 @@ fn select_gate(c: &mut Client, id: u64, desktop: &DesktopProbe) -> Result<()> {
             }
             ensure!(
                 std::time::Instant::now() < deadline,
-                "Select fixture load/paint deadline"
+                "Select fixture load/paint deadline: title={:?} pixel={:?} size={}x{} expected={}x{}@{}",
+                context_title(c, id)?,
+                &pixels[at..at + 4],
+                frame.width, frame.height, width, height, dpr
             );
         };
         let preference = if mode == 1 { "qsv" } else { "software" };

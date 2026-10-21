@@ -20,13 +20,27 @@
 - **Release build PASS:** final non-component incremental rebuild completed
   exit0 at16:08; logs `C:/src/chromium/prts-release-build.log*`. Qualified source
   is `3337c44996`, component output and Release output both include final patches.
-- **Next action:** package into `C:/src/chromium/prts-preview-20261021-1608`
-  with scripts/package-preview.ps1, then verify SHA256 and full40 acceptance
-  from a fresh extraction using scripts/verify-preview.ps1. Require all gates,
-  including the synthetic loss observation, before publishing `v0.1.0-preview`.
-  Draft notes: [release-v0.1.0-preview.md](release-v0.1.0-preview.md).
-  GitHub CLI: `C:/Program Files/GitHub CLI/gh.exe` (authenticated).
-  Re-architecture, encoders and isolation follow the release in PLAN order.
+- **Preview qualified (2026-10-21 16:59):** clean-extract full40:
+  38PASS, two deferred GPU omnibox selected-row geometry failures atDSF1.25.
+  All nondeferred gates pass, including Intel hardware/no SwiftShader,
+  QSV zero-copy, lifecycle/resource/recovery, CPU/GPU WebRTC, UA/branding and
+  synthetic loss (receiver peak2, shaper49drops). Component popup suite21/23
+  also has only deferred omnibox failures. No further popup debugging.
+- **Release source:** Chromium `c14260952f`, 34patches; both incremental builds
+  and all four select variants pass. Existing Aura animation-disable switch
+  fixes the non-component select-close crash. Standard latency gates stay strict;
+  explicit `-PreviewKnownIssues` reports latency and exact known omnibox errors.
+- **Release archives:** `C:/src/chromium/prts-preview-final-20261021-1650`,
+  browser211714171/server3682227bytes; BUILD metadata infra`35a0793`,
+  Chromium`c14260952f`. Clean extract and all raw exit/log evidence:
+  `C:/src/chromium/prts-preview-final-check-20261021-1651/verify-*`.
+  GPU24 appearance samples72.55–239.49ms; CPU24 samples50.38–278.02ms.
+  Original `prts-preview-20261021-1608` archives failed; never publish them.
+- **Next action:** merge qualified release fix, export34patches, push main,
+  publish `v0.1.0-preview` with the qualified archives/SHA256 and known issues;
+  then start oneVPL on matching `wip/e1-onevpl` branches. Isolation and v0.2.0
+  follow oneVPL in PLAN order. Release notes:
+  [release-v0.1.0-preview.md](release-v0.1.0-preview.md).
 - **Qualification limits:** desktop probes verify hidden/cloaked HWNDs, unchanged
   taskbar and cursor counters in a disconnected session; physical foreground/
   cursor behavior and Windows10 22H2 remain unqualified.

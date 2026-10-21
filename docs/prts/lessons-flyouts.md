@@ -62,6 +62,36 @@ were removed; the production identity fixture then closed in227ms with all11
 recorded browser descendants exited, within the original control deadline.
 Full native and worker-close gates remain mandatory before release.
 
+## Non-component select-popup regression
+
+Component qualification did not expose a Release-only crash when Escape closed
+an HTML select popup. cdb with the non-component PDB identifies
+DesktopWindowTreeHostWin::Close+0x44: Window::Hide destroys the layer animator,
+then Close reads freed memory while checking that animator. PRTS sets browser
+UI animation duration to zero, but Aura still takes its hide-animation path.
+Using Chromium's existing wm-window-animations-disabled switch in the embedder
+makes the immediate-paint policy consistent without patching upstream window
+teardown. Source c14260952f adds five lines. Updated Release select cases pass
+across CPU/GPU, one/two credits and all three scales. Early CPU/two-credit
+fixture-paint failures were retained; the unchanged gate subsequently passes
+with and without logging. Failure-only diagnostics now print title/pixel/size.
+Final artifact qualification remains mandatory before release.
+
+## Independent network-test fixtures
+
+The synthetic test's 400 ms delay experiment leaves congestion bandwidth at
+5 kbps even after restoring network settings. A subsequent loss experiment
+then encodes only1–5fps, and its few missing packets may be repaired before
+100 ms receiver-stat sampling. One nominal pass observed losspeak1, final0;
+a trace measured4.97fps before loss and0.99fps afterward. Shaper drops still
+increased, so this was a contaminated measurement fixture.
+
+Use a fresh synthetic instance for the loss experiment and explicitly require
+at least15 encodedFPS before starting. Retain15% loss,80x100ms observations,
+receiver loss and shaper-drop assertions, restored video and process cleanup.
+The first independent run measured19.87fps/205kbps,50 drops and receiver losspeak2
+(final0 after repair). No production encoder or congestion logic was changed.
+Logs: prts-synthetic-shaping-diagnostic1.* and prts-synthetic-independent-loss1.*.
 ## Measurements and latency policy
 
 Build47 full-suite popup matrix passes all16 gates. Across24 GPU/QSV samples,

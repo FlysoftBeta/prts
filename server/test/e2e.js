@@ -261,23 +261,43 @@ test('real prtsd → Node → browser video, input, multiple viewers, bitrate an
   console.log(`400 ms outgoing latency: receiver peak jitter ${beforeJitter.toFixed(2)} -> ${delayedJitter.toFixed(2)} ms (ICE RTT bypasses media shaping)`);
   await network(shaped);
   await sleep(2000);
-  const lossBefore = await receiver(shaped);
-  const droppedBefore = (await stats(shaped)).sessions.reduce((sum, s) => sum + s.shaper_dropped_packets, 0);
-  await network(shaped, { loss: 15 });
+  // The delay experiment can leave GCC at its 5 kbps floor after restoring
+  // settings. At 1-5 FPS a short loss experiment mostly measures retransmission
+  // recovery of a few packets. Use a fresh encoder/receiver for loss, and require
+  // real traffic before starting its unchanged 15%, eight-second observation.
+  const loss = await page();
+  await field(loss, '#create [name=source]', 'synthetic');
+  await field(loss, '#create [name=encoder]', encoder);
+  await loss.click('#create button');
+  await playing(loss);
+  await quality(loss);
+  await until(async () => (await stats(loss))?.encoder.fps >= 15, 'fresh loss fixture encodes >=15 FPS');
+  const lossId = (await stats(loss)).instance_id;
+  assert.notEqual(lossId, firstId); assert.notEqual(lossId, secondId);
+  const lossBefore = await receiver(loss);
+  if (process.env.PRTS_TEST_SHAPING_TRACE) console.log('LOSS baseline '+JSON.stringify(await stats(loss)));
+  const droppedBefore = (await stats(loss)).sessions.reduce((sum, s) => sum + s.shaper_dropped_packets, 0);
+  await network(loss, { loss: 15 });
   let lossPeak = lossBefore.packetsLost;
   for (let i = 0; i < 80; i++) {
-    lossPeak = Math.max(lossPeak, (await receiver(shaped)).packetsLost);
+    lossPeak = Math.max(lossPeak, (await receiver(loss)).packetsLost);
     await sleep(100);
   }
-  const lossAfter = await receiver(shaped);
-  const droppedAfter = (await stats(shaped)).sessions.reduce((sum, s) => sum + s.shaper_dropped_packets, 0);
+  const lossAfter = await receiver(loss);
+  if (process.env.PRTS_TEST_SHAPING_TRACE) console.log('LOSS after '+JSON.stringify(await stats(loss)));
+  const droppedAfter = (await stats(loss)).sessions.reduce((sum, s) => sum + s.shaper_dropped_packets, 0);
   assert.ok(lossPeak > lossBefore.packetsLost,
     `15% outgoing loss must increase receiver packetsLost: ${JSON.stringify({ lossBefore, lossAfter, lossPeak, droppedBefore, droppedAfter })}`);
   assert.ok(droppedAfter > droppedBefore, `Daemon shaper must count dropped packets: ${droppedBefore} -> ${droppedAfter}`);
   console.log(`15% outgoing loss: packetsLost ${lossBefore.packetsLost} -> peak ${lossPeak} (final ${lossAfter.packetsLost}); daemon drops ${droppedBefore} -> ${droppedAfter}`);
-  await network(shaped);
-  const restoredFrames = (await receiver(shaped)).framesDecoded;
-  await until(async () => (await receiver(shaped)).framesDecoded > restoredFrames + 10, 'video resumes after restoring network');
+  await network(loss);
+  const restoredFrames = (await receiver(loss)).framesDecoded;
+  await until(async () => (await receiver(loss)).framesDecoded > restoredFrames + 10, 'video resumes after restoring network');
+  assert.equal(await loss.$eval('#error', e => e.textContent), '');
+  await loss.click('#refresh');
+  await loss.$$eval('#instances .instance', (rows, id) => rows.find(row => row.firstElementChild.textContent.startsWith(id + ' ')).lastElementChild.click(), lossId);
+  await loss.waitForFunction(id => ![...document.querySelectorAll('#instances .instance > button:first-child')].some(b => b.textContent.startsWith(id + ' ')), {}, lossId);
+  await loss.close();
   await b.evaluate(() => window.scrollTo(0, 0));
   await b.screenshot({ path: fileURLToPath(new URL('../../docs/prts/phase1-e2e.png', import.meta.url)), fullPage: true });
   assert.deepEqual(errors, []);

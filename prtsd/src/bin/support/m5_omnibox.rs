@@ -176,7 +176,7 @@ fn omnibox_gate(c: &mut Client, id: u64, desktop: &DesktopProbe) -> Result<()> {
             );
         }
         c.shortcut(&w, 'L')?;
-        let selected_url = format!("{blue}#selected-{width}-{height}-{dpr}");
+        let selected_url = format!("{blue}&selected={width}-{height}-{dpr}");
         c.send(&w, v1::Input::Char(selected_url.clone()), 0)?;
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         let selected = loop {
@@ -200,6 +200,12 @@ fn omnibox_gate(c: &mut Client, id: u64, desktop: &DesktopProbe) -> Result<()> {
                 break bounds;
             }
             if std::time::Instant::now() >= deadline {
+                c.geometry(id)?;
+                let failure_hosts = c.hosts(id)?;
+                eprintln!(
+                    "Omnibox selection failure expected={selected_url:?} faults={:?} hosts={:?}",
+                    c.faults, failure_hosts
+                );
                 let frame = c.frame(id)?;
                 let _ = std::fs::write(
                     "C:/src/chromium/prts-omnibox-open.bgra",
