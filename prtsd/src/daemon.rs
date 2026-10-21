@@ -876,6 +876,10 @@ impl Daemon {
                 | "key.up"
                 | "key.char"
                 | "focus"
+                | "touch.start"
+                | "touch.move"
+                | "touch.end"
+                | "touch.cancel"
         ) {
             return Err(Error::new(
                 "unsupported",
@@ -909,7 +913,42 @@ impl Daemon {
             ));
         }
         let input = &mut target.input;
-        if kind.starts_with("mouse.") {
+        if kind.starts_with("touch.") {
+            if i.options.source != "chromium" {
+                return Err(invalid("touch requires a Chromium window stream"));
+            }
+            #[cfg(windows)]
+            if i.browser
+                .as_ref()
+                .is_none_or(|b| b.hello.features & crate::window_wire::TOUCH_INPUT == 0)
+            {
+                return Err(invalid("browser did not advertise touch support"));
+            }
+            let id = integer(v, "contact_id", 0, 31)? as u32;
+            let x = number(v, "x", -32768., 32767.)?;
+            let y = number(v, "y", -32768., 32767.)?;
+            number(v, "pressure", 0., 1.)?;
+            if kind == "touch.start" {
+                if input.touches.contains_key(&id) || input.touches.len() >= 10 {
+                    return Err(invalid("touch contact already held or capacity exceeded"));
+                }
+                if x < 0.
+                    || y < 0.
+                    || x >= target.size.width as f64
+                    || y >= target.size.height as f64
+                {
+                    return Err(invalid("touch start outside window"));
+                }
+                input.touches.insert(id, true);
+            } else {
+                if !input.touches.contains_key(&id) {
+                    return Err(invalid("touch contact not held"));
+                }
+                if kind != "touch.move" {
+                    input.touches.remove(&id);
+                }
+            }
+        } else if kind.starts_with("mouse.") {
             let x = number(v, "x", -32768.0, 32767.0)?;
             let y = number(v, "y", -32768.0, 32767.0)?;
             let buttons = integer(v, "buttons", 0, 31)? as u32;
@@ -975,6 +1014,7 @@ impl Daemon {
             if !focused {
                 input.buttons = 0;
                 input.keys.clear();
+                input.touches.clear();
             }
         } else {
             let text = string(v, "text")?;
@@ -1045,6 +1085,18 @@ impl Daemon {
             let button = v["button"].as_u64().unwrap_or(0) as u8;
             let click_count = v["click_count"].as_u64().unwrap_or(1) as u8;
             let command = match kind {
+                "touch.start" | "touch.move" | "touch.end" | "touch.cancel" => B::Touch {
+                    phase: match kind {
+                        "touch.start" => 0,
+                        "touch.move" => 1,
+                        "touch.end" => 2,
+                        _ => 3,
+                    },
+                    id: v["contact_id"].as_u64().unwrap() as u32,
+                    x,
+                    y,
+                    pressure: v["pressure"].as_f64().unwrap(),
+                },
                 "mouse.move" => B::MouseMove { x, y, buttons },
                 "mouse.down" => B::MouseDown {
                     x,

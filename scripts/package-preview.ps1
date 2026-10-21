@@ -59,7 +59,10 @@ Open http://127.0.0.1:8080 and create a Chromium instance. Use auto for hardware
 encoding with software fallback. The stream includes the browser toolbar and
 app/context/select/omnibox popups. A second viewer can create another instance.
 
-Known gaps: touch gestures, additional flyout families, independent streams for
+Touch devices send genuine multi-touch input: tap, long press, one-finger
+scroll and pinch; the video prevents local browser gestures.
+
+Known gaps: additional flyout families, independent streams for
 extra windows within one instance, AppContainer/LPAC, Windows 10 qualification,
 connected-desktop foreground/cursor qualification. Intel MF is the current
 hardware encoder; direct oneVPL and NVENC follow later. Software latency is

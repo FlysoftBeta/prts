@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('quick', 'mf', 'gpu', 'flyouts', 'full')][string]$Suite = 'quick',
+    [ValidateSet('quick', 'mf', 'gpu', 'flyouts', 'touch', 'full')][string]$Suite = 'quick',
     [switch]$AllowDisconnectedDesktop,
     [switch]$PreviewKnownIssues,
     [string]$LogPrefix = (Join-Path $env:TEMP ('prts-tests-' + (Get-Date -Format 'yyyyMMdd-HHmmss')))
@@ -88,6 +88,18 @@ if ($Suite -eq 'mf') {
     Gate 'clippy' 'cargo clippy --manifest-path prtsd/Cargo.toml --all-targets -- -D warnings' 600
     Gate 'fmt' 'cargo fmt --manifest-path prtsd/Cargo.toml --check'
     Gate 'node-unit' 'npm.cmd --prefix server test'
+    if ($Suite -in @('touch', 'full')) {
+        foreach ($dpr in @('1', '1.25', '2')) {
+            $env:PRTS_TOUCH_DPR = $dpr
+            $env:PRTS_FRAME_MODE = 'gpu'
+            Gate "touch-gpu-$dpr" 'node --test server/test/e2e-touch.js' 420
+            $env:PRTS_FRAME_MODE = 'cpu'
+            $env:PRTS_TEST_ENCODER = 'software'
+            Gate "touch-cpu-$dpr" 'node --test server/test/e2e-touch.js' 420
+            Remove-Item Env:\PRTS_TEST_ENCODER
+        }
+        Remove-Item Env:\PRTS_FRAME_MODE, Env:\PRTS_TOUCH_DPR
+    }
     if ($Suite -eq 'flyouts') { FlyoutGates }
     if ($Suite -eq 'full') {
         $env:PRTS_BROWSER_PROTOCOL = '2'

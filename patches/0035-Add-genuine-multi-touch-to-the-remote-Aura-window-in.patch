@@ -1,0 +1,161 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Wed, 21 Oct 2026 21:24:58 +0800
+Subject: [PATCH 35/35] Add genuine multi-touch to the remote Aura window input
+ path
+
+Preserve original contact hosts and native gesture recognition, bound contacts and cancel them at input epoch changes. Advertise v2 touch capability independently of composition features.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_controller.cc b/chrome/browser/prts/prts_controller.cc
+index bc07f69590..b7c259e498 100644
+--- a/chrome/browser/prts/prts_controller.cc
++++ b/chrome/browser/prts/prts_controller.cc
+@@ -149,11 +149,11 @@ void PrtsController::Receive(Record record) {
+     }
+     return;
+   }
+-  if (ready_ && record.type >= 0x200 && record.type <= 0x207 &&
++  if (ready_ && record.type >= 0x200 && record.type <= 0x208 &&
+       record.id == 0) {
+     if (major_ == 2) {
+       windows_->Input(record.type, record.payload);
+-    } else {
++    } else if (record.type <= 0x207) {
+       targets_->Input(record.type, record.payload);
+     }
+     return;
+@@ -238,7 +238,7 @@ void PrtsController::Receive(Record record) {
+     ack.Int(8192, 4);
+     ack.Int(8192, 4);
+     ack.Int(64000000, 4);
+-    ack.Int(major_ == 2 ? 29 : 1, 4);
++    ack.Int(major_ == 2 ? 93 : 1, 4);  // Includes v2 genuine touch input (bit64).
+     // Enqueue ACK before enabling any target notifications on the same writer.
+     if (!pipe_.Send(2, record.id, std::move(ack.data))) {
+       Failed();
+diff --git a/chrome/browser/prts/prts_window_input.cc b/chrome/browser/prts/prts_window_input.cc
+index e2f5aba8e4..48f61afc89 100644
+--- a/chrome/browser/prts/prts_window_input.cc
++++ b/chrome/browser/prts/prts_window_input.cc
+@@ -196,6 +196,22 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+     deadline_.Stop();
+     queue_.clear();
+     busy_ = false;
++    // Cancel on the original host, even when a contact crossed a flyout edge.
++    // Clear first: dispatch may synchronously destroy a host or this input epoch.
++    auto touches = std::move(touches_);
++    touches_.clear();
++    auto alive = weak_.GetWeakPtr();
++    for (const auto& [id, contact] : touches) {
++      if (contact.root) {
++        ui::TouchEvent cancel(ui::EventType::kTouchCancelled, contact.point,
++                              contact.point, Stamp(),
++                              ui::PointerDetails(ui::EventPointerType::kTouch, id));
++        contact.root->GetHost()->SendEventToSink(&cancel);
++        if (!alive) {
++          return;
++        }
++      }
++    }
+     if (!root_) {
+       return;
+     }
+@@ -242,6 +258,20 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+     if (queue_.size() >= 1024) {
+       return 5;
+     }
++    if (type == 0x208) {
++      auto phase = d.Int(1), id = d.Int(4);
++      double x = std::bit_cast<double>(d.Int(8));
++      double y = std::bit_cast<double>(d.Int(8));
++      double pressure = std::bit_cast<double>(d.Int(8));
++      if (!d.Done() || phase > 3 || id >= 32 || !std::isfinite(x) ||
++          !std::isfinite(y) || std::abs(x) > 32768 || std::abs(y) > 32768 ||
++          !std::isfinite(pressure) || pressure < 0 || pressure > 1) {
++        return 1;
++      }
++      Enqueue(base::BindOnce(&Impl::Touch, base::Unretained(this), phase, id,
++                            gfx::PointF(x, y), pressure, modifiers));
++      return 0;
++    }
+     if (type <= 0x203) {
+       double x = std::bit_cast<double>(d.Int(8)),
+              y = std::bit_cast<double>(d.Int(8));
+@@ -323,6 +353,63 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+     Enqueue(base::BindOnce(&Impl::Key, base::Unretained(this), event));
+     return 0;
+   }
++  void Touch(uint8_t phase, uint32_t id, gfx::PointF point,
++             double pressure, uint32_t modifiers) {
++    auto it = touches_.find(id);
++    if ((phase == 0 && (it != touches_.end() || touches_.size() >= 10)) ||
++        (phase != 0 && it == touches_.end())) {
++      fault_.Run(1);
++      Done();
++      return;
++    }
++    aura::Window* target = root_;
++    if (phase == 0) {
++      auto* captured = views::DesktopCaptureClient::GetCaptureWindowGlobal();
++      if (captured && !Owns(captured->GetRootWindow())) {
++        fault_.Run(4);
++        Done();
++        return;
++      }
++      gfx::Point screen = root_->GetBoundsInScreen().origin() +
++                          gfx::ToRoundedPoint(point).OffsetFromOrigin();
++      if (captured) {
++        target = captured->GetRootWindow();
++      } else {
++        auto hosts = hosts_.Run();
++        for (auto host = hosts.rbegin(); host != hosts.rend(); ++host) {
++          if (host->accepts_input && host->screen_bounds.Contains(screen)) {
++            target = host->root;
++            break;
++          }
++        }
++      }
++    } else {
++      target = it->second.root.get();
++    }
++    if (!target) {
++      touches_.erase(id);
++      Done();
++      return;
++    }
++    const auto owner = root_->GetBoundsInScreen().origin();
++    const auto origin = target->GetBoundsInScreen().origin();
++    point.Offset(owner.x() - origin.x(), owner.y() - origin.y());
++    target->GetHost()->ConvertDIPToPixels(&point);
++    if (phase < 2) {
++      touches_.insert_or_assign(id, Contact{target->GetWeakPtrAsWindow(), point});
++    } else {
++      touches_.erase(id);
++    }
++    auto event = std::make_unique<ui::TouchEvent>(
++        phase == 0 ? ui::EventType::kTouchPressed
++        : phase == 1 ? ui::EventType::kTouchMoved
++        : phase == 2 ? ui::EventType::kTouchReleased
++                     : ui::EventType::kTouchCancelled,
++        point, point, Stamp(),
++        ui::PointerDetails(ui::EventPointerType::kTouch, id, 1, 1, pressure),
++        Flags(modifiers, 0));
++    Send(std::move(event), base::BindOnce(&Impl::Done, weak_.GetWeakPtr()), target);
++  }
+   void Pointer(uint16_t type,
+                gfx::PointF point,
+                double dx,
+@@ -478,6 +565,11 @@ class PrtsWindowInput::Impl : public aura::WindowObserver {
+   base::RepeatingCallback<std::vector<OwnedHost>()> hosts_;
+   base::circular_deque<base::OnceClosure> queue_;
+   std::map<ui::KeyboardCode, ui::KeyEvent> keys_;
++  struct Contact {
++    base::WeakPtr<aura::Window> root;
++    gfx::PointF point;
++  };
++  std::map<uint32_t, Contact> touches_;
+   gfx::PointF point_;
+   uint32_t buttons_ = 0;
+   double wheel_x_ = 0, wheel_y_ = 0;

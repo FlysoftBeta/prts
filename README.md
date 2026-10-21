@@ -96,6 +96,7 @@ Run checks from repo root with one command:
 powershell -File scripts/test.ps1              # build, Rust tests, Clippy/fmt, Node unit tests
 powershell -File scripts/test.ps1 -Suite full  # plus real Chromium, GPU/QSV, CPU/software and WebRTC gates
 powershell -File scripts/test.ps1 -Suite flyouts # app/context/select/omnibox, scale/credits and GPU composition
+powershell -File scripts/test.ps1 -Suite touch # real frontend touch/gestures, GPU+CPU at scales 1/1.25/2
 ```
 
 The full suite requires the patched Chromium build, Intel hardware encoding and
@@ -110,11 +111,15 @@ foreground/cursor qualification still requires a connected desktop.
 
 The flyout suite covers app/context menus, select popups and omnibox suggestions.
 CPU/software latency is report-only; GPU/QSV retains the production budget.
-For `v0.1.0-preview` qualification, `-PreviewKnownIssues` also reports GPU
+For preview qualification, `-PreviewKnownIssues` also reports GPU
 flyout latency and specific intermittent omnibox appearance/geometry failures,
 as required by the release plan. Raw failures remain in the gate logs;
 timeouts and other correctness/resource failures still block the release.
 See [flyout lessons](docs/prts/lessons-flyouts.md) for measurements and limitations.
+Touch devices send genuine Aura touch input through the window stream. The
+viewer supports multiple contacts, tap, long press, scroll/fling and pinch,
+prevents local video gestures and cancels held contacts on control loss.
+Touch requires a browser advertising the v2 touch capability.
 The headless launcher rasterizes Views UI tiles
 on CPU to avoid cold UI shader stalls. Page GPU rasterization, hardware
 compositing, WebGL and shared-texture capture remain enabled.

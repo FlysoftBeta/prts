@@ -26,6 +26,7 @@ pub const WINDOW_CURSOR: u16 = 0x495;
 pub const WHOLE_WINDOW: u32 = 4;
 pub const POPUP_LAYERS: u32 = 8;
 pub const PREMULTIPLIED_BGRA: u32 = 16;
+pub const TOUCH_INPUT: u32 = 64;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tab {

@@ -196,6 +196,15 @@ buttons mask: 1=left, 2=right, 4=middle, 8=back, 16=forward (DOM convention).
 | 0x0205 KEY_UP | Same fields as KEY_DOWN; text empty, repeat=false |
 | 0x0206 KEY_CHAR | InputHeader,text:str |
 | 0x0207 FOCUS | InputHeader,focused:bool |
+| 0x0208 TOUCH (v2 only) | InputHeader,phase:u8,contact_id:u32,x:f64,y:f64,pressure:f64 |
+
+TOUCH phases are 0=start, 1=move, 2=end, 3=cancel. Coordinates are window
+DIPs, pressure is finite 0..1, IDs are 0..31 with at most ten held contacts.
+Start requires an unused ID inside the window; other phases require a held ID.
+Each contact retains its original Aura root (including owned flyouts) until
+release/cancel. Focus loss, navigation, generation changes, control-owner loss
+and teardown cancel held contacts. Dispatch uses genuine Aura TouchEvent and
+Chromium's gesture recognition, without OS input or mouse-wire emulation.
 
 click_count is 1..3 on down/up and computed by the viewer; buttons is state
 after this event. Wheel positive x scrolls right, positive y scrolls down;
@@ -572,6 +581,7 @@ silently move discrete input onto the unreliable channel.
 | key.down / key.up V->D | CommonInput,vk?:number,code,key,text,location,repeat,is_system |
 | key.char V->D | CommonInput,text |
 | focus V->D | CommonInput,focused:bool |
+| touch.start / touch.move / touch.end / touch.cancel V->D (v2 Chromium) | CommonInput,contact_id,x,y,pressure |
 | stats V->D | sample_seq:number,interval_ms:number,decoded_fps:number,received_bps:number,rtt_ms:number|null,jitter_ms:number|null,packets_lost:number,decode_ms_avg:number|null,render_ms_avg:number|null |
 | cursor D->V | target_id,generation,cursor:CursorJSON |
 | error D->V | sequence?:number,error:Error |
@@ -703,7 +713,8 @@ No overlap returns the existing ERROR in the bootstrap envelope then closes.
 Legacy 1.0 support may remain for tests; v2 mode does not accept TARGET_*.
 
 In v2 HELLO_ACK features add bits 4=whole_window, 8=popup_layers,
-16=premultiplied_bgra, 32=composition_preedit (optional). Bits 4/8/16 and CPU
+16=premultiplied_bgra, 32=composition_preedit (optional), 64=touch_input.
+Send TOUCH only when bit64 is advertised. Bits 4/8/16 and CPU
 sections are mandatory for M5. Bit 1 retains discovery of additional Browser
 windows; bit 2 custom cursor remains optional. Advertise limits in WINDOW_CAPS
 after ACK and before any window/source event. HELLO max_inflight still limits

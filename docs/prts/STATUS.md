@@ -47,9 +47,26 @@
   rejection, mismatched qualification rejection and remote hash verification
   pass. Publishing twice is idempotent: skips all assets, preserves pre-release.
   Source is Chromium `c14260952f`, 34 patches; release fix main `56b6cc1`.
-- **Next action:** merge and push qualified publisher tools, then begin direct
-  oneVPL QSV on matching `wip/e1-onevpl` branches. Keep MF fallback, verify
-  D3D11 zero-copy and low-bitrate VBV behavior, benchmark into encoder-bench.md.
+- **Touch active (priority 1b):** matching `wip/touch` branches implement real
+  Aura touch events and bounded frontend multi-touch. Chromium `a898866032`
+  exported35 patches; final component5 and incremental Release builds pass.
+  App-menu/Newtab and core gestures pass; matrix1 GPU/CPU DSF1.25 and GPU DSF2
+  pass including channel-close cancellation and control recovery. Fixture
+  readiness corrections and explicit fling are in full1 running now.
+  No touch code merged to main.
+  Resume: [touch-wip.md](touch-wip.md) and newest journal lines.
+- **E1 parked for touch:** publisher tools merged/pushed on main `ef8dc29`; matching
+  `wip/e1-onevpl` branches contain unfinished encoder work, not on main.
+  Official libvpl 2.17 dispatcher is statically linked; Intel runtime API1.35
+  accepts shared D3D11. Native CPU/GPU900 immediate frames each, bitrate/IDR
+  gates,20 stable239-handle cycles,18 odd/edge variants and forced oneVPL GPU
+  window-WebRTC pass. New auto/QSV selector prefers oneVPL with MF/software
+  recovery; forced oneVPL forbids fallback. Checkpoint `7c57d40` is pushed on
+  `wip/e1-onevpl`; final build2 has no completion receipt. CPU/intra/recovery
+  evidence is in journal; MF comparison and full regression remain.
+- **Next action:** finish `prts-touch-full1` final touch matrix and full regression,
+  then package matching Release output, clean-extract acceptance and publish
+  `v0.1.1-preview`. Resume E1 afterwards; do not merge unqualified features.
   Isolation, v0.2.0, patch re-architecture, NVENC, then flyout latency follow
   the newest PLAN order. Release notes:
   [release-v0.1.0-preview.md](release-v0.1.0-preview.md).

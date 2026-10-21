@@ -926,7 +926,7 @@ impl Browser {
                 && hello.max_width > 0
                 && hello.max_height > 0
                 && hello.max_pixels > 0
-                && hello.features & !63 == 0
+                && hello.features & !127 == 0
                 && (major == 1 || hello.features & ww::WHOLE_WINDOW != 0),
             "Invalid HELLO_ACK capabilities"
         );
@@ -1092,6 +1092,11 @@ impl Browser {
             .lock()
             .map_err(|_| anyhow!("Session poisoned"))?;
         ensure!(s.failed.is_none() && !s.shutdown, "Browser unavailable");
+        ensure!(
+            !matches!(input, wire::Input::Touch { .. })
+                || (s.major == 2 && s.features & ww::TOUCH_INPUT != 0),
+            "Touch requires window protocol v2 touch capability"
+        );
         let bytes = input.record(header)?.encode_version(s.major)?;
         s.enqueue(bytes)
     }

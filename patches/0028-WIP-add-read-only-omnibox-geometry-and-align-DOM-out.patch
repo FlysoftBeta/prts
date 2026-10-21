@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Wed, 21 Oct 2026 11:05:11 +0800
-Subject: [PATCH 28/34] WIP: add read-only omnibox geometry and align DOM outer
+Subject: [PATCH 28/35] WIP: add read-only omnibox geometry and align DOM outer
  canvas bounds
 
 Declare direct Views header dependencies used by the acceptance probes. Reuse the logical root-size property for DOM outer dimensions, excluding invisible native resize borders. Post the initial Aura barrier poll while preserving routing/ACK checks. Runtime requalification pending.

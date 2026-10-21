@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Wed, 21 Oct 2026 11:54:52 +0800
-Subject: [PATCH 32/34] Brand the standard Settings string part as PRTS
+Subject: [PATCH 32/35] Brand the standard Settings string part as PRTS
 
 The top-level branded GRD includes Settings strings from a separate GRDP. Rebrand that standard part too so the About heading and Settings product references match PRTS.
 

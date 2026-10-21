@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Tue, 20 Oct 2026 09:41:18 +0800
-Subject: [PATCH 10/34] Add bounded Viz CPU readback fallback adapter for PRTS
+Subject: [PATCH 10/35] Add bounded Viz CPU readback fallback adapter for PRTS
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 

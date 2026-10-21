@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Tue, 20 Oct 2026 04:26:41 +0800
-Subject: [PATCH 04/34] Preserve PRTS target identity when Chrome replaces tab
+Subject: [PATCH 04/35] Preserve PRTS target identity when Chrome replaces tab
  contents
 
 Retarget observers and internal viewport emulation during tab discard/replacement, retaining logical target ID and advancing the generation before publishing its snapshot.

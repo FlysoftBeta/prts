@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Wed, 21 Oct 2026 16:27:16 +0800
-Subject: [PATCH 34/34] WIP: disable Aura window animations for immediate PRTS
+Subject: [PATCH 34/35] WIP: disable Aura window animations for immediate PRTS
  UI
 
 The non-component release select-popup gate crashes when zero-duration hide animation destroys its layer before DesktopWindowTreeHostWin::Close queries the animator. PRTS already disables browser UI animation durations; also use the existing wm-window-animations-disabled switch to skip the Aura hide-animation path. No upstream window-lifecycle patch is needed. Release GPU2/CPU1/GPU1 gates pass; CPU2 fixture startup and full requalification are pending.

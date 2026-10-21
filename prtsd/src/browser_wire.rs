@@ -52,6 +52,13 @@ pub struct Key {
 }
 #[derive(Clone, Debug)]
 pub enum Input {
+    Touch {
+        phase: u8,
+        id: u32,
+        x: f64,
+        y: f64,
+        pressure: f64,
+    },
     MouseMove {
         x: f64,
         y: f64,
@@ -98,6 +105,31 @@ impl Input {
         p.extend(header.sequence.to_le_bytes());
         p.extend(header.modifiers.to_le_bytes());
         let kind = match self {
+            Self::Touch {
+                phase,
+                id,
+                x,
+                y,
+                pressure,
+            } => {
+                ensure!(
+                    *phase <= 3
+                        && *id < 32
+                        && x.is_finite()
+                        && y.is_finite()
+                        && x.abs() <= 32768.
+                        && y.abs() <= 32768.
+                        && pressure.is_finite()
+                        && (0. ..=1.).contains(pressure),
+                    "Invalid touch values"
+                );
+                p.push(*phase);
+                p.extend(id.to_le_bytes());
+                p.extend(x.to_le_bytes());
+                p.extend(y.to_le_bytes());
+                p.extend(pressure.to_le_bytes());
+                0x208
+            }
             Self::MouseMove { x, y, buttons }
             | Self::MouseDown { x, y, buttons, .. }
             | Self::MouseUp { x, y, buttons, .. }
@@ -554,6 +586,25 @@ mod tests {
             sequence: 3,
             modifiers: 0,
         };
+        for (phase, id, x, pressure) in [
+            (4, 0, 0., 0.5),
+            (0, 32, 0., 0.5),
+            (0, 0, f64::NAN, 0.5),
+            (0, 0, 0., f64::INFINITY),
+            (0, 0, 0., 1.1),
+        ] {
+            assert!(
+                Input::Touch {
+                    phase,
+                    id,
+                    x,
+                    y: 0.,
+                    pressure
+                }
+                .record(&header)
+                .is_err()
+            );
+        }
         assert!(
             Input::MouseMove {
                 x: f64::NAN,

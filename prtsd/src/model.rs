@@ -252,12 +252,14 @@ pub struct Input {
     pub click: Option<Instant>,
     pub pointer: bool,
     pub keys: BTreeMap<String, bool>,
+    pub touches: BTreeMap<u32, bool>,
     pub wheel: f64,
 }
 impl Input {
     pub fn release(&mut self) {
         self.buttons = 0;
         self.keys.clear();
+        self.touches.clear();
         self.focused = false;
     }
 }

@@ -25,10 +25,34 @@ export class RemoteInput {
   keys = new Set();
   counts = new Map();
   clicks = new Map();
+  touches = new Map();
+  focused = false;
   composing = false;
   constructor(video, keyboard, cursor, report) {
     Object.assign(this, { video, keyboard, cursor, report });
     video.addEventListener('contextmenu', e => e.preventDefault());
+    for (const [event, phase] of [['pointerdown', 'start'], ['pointermove', 'move'], ['pointerup', 'end'], ['pointercancel', 'cancel']]) {
+      video.addEventListener(event, e => {
+        if (e.pointerType !== 'touch' || !this.control) return;
+        e.preventDefault();
+        if (phase === 'start') {
+          if (!this.point(e) || this.touches.size >= 10 || this.touches.has(e.pointerId)) return;
+          // Local browser IDs are arbitrary; remote contacts use a bounded pool.
+          let id = 0;
+          while ([...this.touches.values()].includes(id)) ++id;
+          this.touches.set(e.pointerId, id);
+          if (!this.focused) this.send('focus', { focused: true }, e);
+          video.setPointerCapture(e.pointerId);
+        }
+        const id = this.touches.get(e.pointerId), point = this.point(e, true);
+        if (id === undefined || !point) return;
+        this.send(`touch.${phase}`, { ...point, contact_id: id, pressure: e.pressure }, e);
+        if (phase === 'end' || phase === 'cancel') {
+          this.touches.delete(e.pointerId);
+          if (video.hasPointerCapture(e.pointerId)) video.releasePointerCapture(e.pointerId);
+        }
+      }, { passive: false });
+    }
     video.addEventListener('pointerdown', e => {
       if (e.pointerType !== 'mouse' || !this.control || !this.point(e)) return;
       e.preventDefault();
@@ -60,8 +84,8 @@ export class RemoteInput {
       this.send('mouse.up', { ...this.point(e, true), button: e.button + 1, buttons: e.buttons, click_count: this.counts.get(e.button) || 1 }, e);
       if (!e.buttons) { this.pointer = null; video.releasePointerCapture(e.pointerId); }
     });
-    video.addEventListener('pointercancel', () => this.release());
-    video.addEventListener('lostpointercapture', () => { if (this.buttons) this.release(); });
+    video.addEventListener('pointercancel', e => { if (e.pointerType === 'mouse') this.release(); });
+    video.addEventListener('lostpointercapture', e => { if (this.buttons || this.touches.has(e.pointerId)) this.release(); });
     video.addEventListener('wheel', e => {
       const point = this.point(e);
       if (!point || !this.control) return;
@@ -130,16 +154,29 @@ export class RemoteInput {
     }
     this.channel.send(JSON.stringify({ v: 1, type, target_id: this.target.target_id, generation: this.target.generation,
       sequence: ++this.sequence, modifiers: modifiers(event), ...fields }));
+    if (type === 'focus') this.focused = fields.focused;
   }
   release() {
     this.send('focus', { focused: false });
+    this.focused = false;
     this.buttons = 0;
     this.keys.clear();
+    const contacts = [...this.touches.keys()];
+    this.touches.clear();
+    for (const id of contacts) if (this.video.hasPointerCapture(id)) this.video.releasePointerCapture(id);
     if (this.pointer !== null && this.video.hasPointerCapture(this.pointer)) this.video.releasePointerCapture(this.pointer);
     this.pointer = null;
     this.keyboard.value = '';
   }
   setTarget(target) {
+    // Metadata refreshes (title, loading, stats) do not change the input epoch.
+    // Releasing on every refresh cancels active multi-touch gestures.
+    if (target && this.target && target.target_id === this.target.target_id &&
+        target.generation === this.target.generation &&
+        ['width', 'height', 'dpr'].every(k => target.size[k] === this.target.size[k])) {
+      this.target = target;
+      return;
+    }
     this.release();
     this.target = target;
     this.setCursor({ shape: 'default' });
