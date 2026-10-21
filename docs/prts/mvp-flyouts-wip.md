@@ -2,7 +2,9 @@
 
 Both repositories use `wip/mvp-flyouts`. Nothing from this unfinished feature
 has merged to main. Qualified Chromium `work` stays `5a7769bea8` (23 baseline
-patches). `out/Default/chrome.exe` is currently **WIP build40**, not main.
+patches). `out/Default` is being rebuilt as **WIP wrap45**; do not launch its
+partially replaced component files until the build exits successfully. The
+baseline identity report was collected from build40 before rebuilding.
 
 ## Current checkpoint (2026-10-21)
 
@@ -15,9 +17,20 @@ missing direct GN Views dependencies, and CPU/software report-only latency.
 GPU/QSV still enforces250ms. Lessons are in lessons-flyouts.md. Touch and
 independent extra-window tracks remain known gaps.
 
-Bounded Default build: `C:/src/chromium/prts-mvp-wrap41.*` (1800s).
-Quick suite: `prts-mvp-wrap41-quick-*` (1200s parent).
-GN check: `prts-mvp-wrap41-gn.*` (300s).
+Bounded Default build: `C:/src/chromium/prts-mvp-wrap45.*` (7200s).
+Wrap44 parsed the full graph in~10min and completed113 actions; UA constant-false
+Windows branch failed unreachable-code warnings. It now uses a build guard.
+About7k branding-dependent actions remain; preserve outputs and rebuild incrementally.
+Earlier41/42/43 were stopped during slow preparation, preserving all state.
+Profiling shows main waiting on full Ninja manifest parsing, with thousands of
+Windows EvalSymlinks/FindFirstFile tasks; queued-task count is decreasing. The
+fs-close log was the temporary manifest-checker, not a main HashFS-close stall.
+Temporary profiling `.sisorc` has been removed; no profiling flags remain for
+future builds. Stack evidence: `C:/src/chromium/prts-siso-debug/`.
+Quick suite: `prts-mvp-wrap41-quick-*` PASS5/5.
+GN check: `prts-mvp-wrap41-gn.*` PASS.
+Baseline identity gate40 FAILS old UA/CH as expected, all4 report contexts work.
+Chromium WIP `92256ff842` exported31 patches; infra checkpoint `dda95d3` pushed.
 New `server/test/e2e-identity.js` uses the production daemon/pipe launcher and
 HTTP reports from page/dedicated/shared/service workers; full suite includes it.
 Existing Release build is still running (siso PID10124, about38k/70k steps);

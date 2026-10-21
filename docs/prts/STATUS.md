@@ -5,13 +5,21 @@
   both repos remain on `wip/mvp-flyouts`; preserve the four already working
   app/context/select/omnibox paths. Standard PRTS branding and shared Windows
   Chrome UA/Client Hints hook are applied but await incremental build/runtime
-  qualification (`C:/src/chromium/prts-mvp-wrap41.*`). Missing direct GN Views
-  deps were fixed. CPU/software flyout latency is report-only, with all pixel,
+  qualification. Chromium WIP `92256ff842` is exported as31 patches; infra WIP
+  `dda95d3` is pushed. Missing direct GN Views deps were fixed and GN check PASS;
+  Rust release/tests/Clippy/fmt and Node unit checks PASS. Baseline identity gate
+  correctly rejects build40's HeadlessChrome/two-brand values. CPU/software
+  flyout latency is report-only, with all pixel,
   input, restoration and resource assertions retained; GPU/QSV keeps250ms.
   Added production-launch HTTP/JS identity gate covering page, dedicated/shared
   workers and service workers. Lessons: [lessons-flyouts.md](lessons-flyouts.md).
   Touch, other flyouts and independent tracks for extra windows remain known gaps.
-- **Next action:** inspect wrap41 build, GN and quick-suite exits; qualify identity
+- **Next action:** inspect bounded incremental build `prts-mvp-wrap45.*` (7200s).
+  Wrap44 parsed the manifest in~10min and completed113 actions, then failed only
+  the UA constant-false branch under `-Wunreachable-code`; it now uses a normal
+  build guard. About7k branding-dependent actions remain. Profiling `.sisorc`
+  was removed. Previous wrap41/42/43 were stopped during preparation, without
+  deleting state or outputs. Then qualify identity
   and full regression, export patches, commit/merge qualified wrap-up to main and
   push. Then finish the existing non-component Release build (PID10124, started
   07:38; do not start another), rebuild it incrementally with final patches,

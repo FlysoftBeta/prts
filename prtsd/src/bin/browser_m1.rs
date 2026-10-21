@@ -373,6 +373,7 @@ mod acceptance {
         if std::env::args().nth(1).as_deref() == Some("--extended-only") {
             let path = std::env::args()
                 .nth(2)
+                .or_else(|| std::env::var("PRTS_CHROME_PATH").ok())
                 .unwrap_or_else(|| DEFAULT_CHROME.into());
             malformed_cases(Path::new(&path))?;
             println!("PASS extended bootstrap/framing/version/request-ID/backpressure acceptance");
@@ -381,6 +382,7 @@ mod acceptance {
         if std::env::args().nth(1).as_deref() == Some("--raw-startup-probe") {
             let path = std::env::args()
                 .nth(2)
+                .or_else(|| std::env::var("PRTS_CHROME_PATH").ok())
                 .unwrap_or_else(|| DEFAULT_CHROME.into());
             let mut raw = RawBrowser::launch(Path::new(&path))?;
             println!("RAW_STARTUP launched pid={}", raw.pid);
@@ -463,6 +465,7 @@ mod acceptance {
         }
         let path = std::env::args()
             .nth(1)
+            .or_else(|| std::env::var("PRTS_CHROME_PATH").ok())
             .unwrap_or_else(|| DEFAULT_CHROME.into());
         let desktop = DesktopProbe::start()?;
         let browser = Browser::launch(&path)?;

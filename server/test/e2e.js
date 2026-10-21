@@ -4,6 +4,7 @@ import { fork } from 'node:child_process';
 import { once } from 'node:events';
 import { access } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import puppeteer from 'puppeteer-core';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -42,9 +43,9 @@ async function browserPath() {
 
 test('real prtsd → Node → browser video, input, multiple viewers, bitrate and packet shaping', { timeout: 240000 }, async t => {
   const executablePath = await browserPath();
-  const daemonPath = fileURLToPath(new URL('../../prtsd/target/release/prtsd.exe', import.meta.url));
+  const daemonPath = process.env.PRTSD_PATH || fileURLToPath(new URL('../../prtsd/target/release/prtsd.exe', import.meta.url));
   await access(daemonPath); // Build explicitly before running; never substitute the mock.
-  const server = fork(fileURLToPath(new URL('../index.js', import.meta.url)), [], {
+  const server = fork(process.env.PRTS_TEST_SERVER_DIR ? join(process.env.PRTS_TEST_SERVER_DIR,'index.js') : fileURLToPath(new URL('../index.js', import.meta.url)), [], {
     cwd: root, windowsHide: true, silent: true,
     env: { ...process.env, PORT: '0', PRTSD_PATH: daemonPath, PRTSD_ARGS: '[]' },
   });

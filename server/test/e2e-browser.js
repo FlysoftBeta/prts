@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { access } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import puppeteer from 'puppeteer-core';
 import WebSocket from 'ws';
 
@@ -40,8 +41,8 @@ test('PRTS browser frames: real Chromium page pixels, input, targets and two ins
   });
   fixture.listen(0, '127.0.0.1'); await once(fixture, 'listening');
   const url = `http://127.0.0.1:${fixture.address().port}/`;
-  const daemonPath = fileURLToPath(new URL('../../prtsd/target/release/prtsd.exe', import.meta.url));
-  const server = fork(fileURLToPath(new URL('../index.js', import.meta.url)), [], {
+  const daemonPath = process.env.PRTSD_PATH || fileURLToPath(new URL('../../prtsd/target/release/prtsd.exe', import.meta.url));
+  const server = fork(process.env.PRTS_TEST_SERVER_DIR ? join(process.env.PRTS_TEST_SERVER_DIR,'index.js') : fileURLToPath(new URL('../index.js', import.meta.url)), [], {
     cwd: fileURLToPath(new URL('../../', import.meta.url)), windowsHide: true, silent: true,
     env: { ...process.env, PORT: '0', PRTSD_PATH: daemonPath, PRTSD_ARGS: '[]' },
   });
@@ -189,9 +190,9 @@ $daemonCpu=(Get-Process -Id $rootPid).TotalProcessorTime.TotalSeconds
 });
 
 test('browser launch failure is asynchronous, retains failed ID, and closes cleanly', {timeout:30000}, async t => {
-  const server=fork(fileURLToPath(new URL('../index.js',import.meta.url)),[],{
+  const server=fork(process.env.PRTS_TEST_SERVER_DIR ? join(process.env.PRTS_TEST_SERVER_DIR,'index.js') : fileURLToPath(new URL('../index.js',import.meta.url)),[],{
     cwd:fileURLToPath(new URL('../../',import.meta.url)),windowsHide:true,silent:true,
-    env:{...process.env,PORT:'0',PRTSD_PATH:fileURLToPath(new URL('../../prtsd/target/release/prtsd.exe',import.meta.url)),PRTSD_ARGS:'[]',PRTS_CHROME_PATH:'C:/__prts_missing_test_browser__/chrome.exe'},
+    env:{...process.env,PORT:'0',PRTSD_PATH:process.env.PRTSD_PATH || fileURLToPath(new URL('../../prtsd/target/release/prtsd.exe',import.meta.url)),PRTSD_ARGS:'[]',PRTS_CHROME_PATH:'C:/__prts_missing_test_browser__/chrome.exe'},
   });
   const exit=once(server,'exit'); let ws,daemonPid,logs='';
   server.stdout.on('data',d=>{logs+=d;});server.stderr.on('data',d=>{logs+=d;});

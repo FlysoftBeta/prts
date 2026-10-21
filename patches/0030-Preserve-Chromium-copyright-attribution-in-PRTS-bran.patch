@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Wed, 21 Oct 2026 11:16:19 +0800
+Subject: [PATCH 30/31] Preserve Chromium copyright attribution in PRTS branded
+ resources
+
+Rebrand application-facing text while retaining the original author and copyright notices.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/app/chromium_strings.grd b/chrome/app/chromium_strings.grd
+index 48c69522db..b05e3b57fc 100644
+--- a/chrome/app/chromium_strings.grd
++++ b/chrome/app/chromium_strings.grd
+@@ -515,10 +515,10 @@ New bookmarks can’t be saved in your account until you delete some. If you sig
+         </then>
+         <else>
+           <message name="IDS_ABOUT_VERSION_COMPANY_NAME" desc="Company name on the about pages">
+-            The PRTS Authors
++            The Chromium Authors
+           </message>
+           <message name="IDS_ABOUT_VERSION_COPYRIGHT" desc="Copyright information on the about pages">
+-            Copyright <ph name="YEAR">{0,date,y}<ex>2016</ex></ph> The PRTS Authors. All rights reserved.
++            Copyright <ph name="YEAR">{0,date,y}<ex>2016</ex></ph> The Chromium Authors. All rights reserved.
+           </message>
+         </else>
+       </if>

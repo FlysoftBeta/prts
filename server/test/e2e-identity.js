@@ -49,7 +49,7 @@ test('production pipe launch: Chrome identity in HTTP, pages, dedicated/shared/s
     </script>`);
   });
   fixture.listen(0,'127.0.0.1'); await once(fixture,'listening');
-  const daemon = new Daemon(fileURLToPath(new URL('../../prtsd/target/release/prtsd.exe',import.meta.url)),[],fileURLToPath(new URL('../../',import.meta.url)));
+  const daemon = new Daemon(process.env.PRTSD_PATH || fileURLToPath(new URL('../../prtsd/target/release/prtsd.exe',import.meta.url)),[],fileURLToPath(new URL('../../',import.meta.url)));
   const exit = once(daemon.child,'exit');
   t.after(async()=>{
     daemon.stop();

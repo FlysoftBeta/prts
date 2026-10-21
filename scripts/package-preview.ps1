@@ -6,11 +6,17 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $ChromeDir = (Resolve-Path -LiteralPath $ChromeDir).Path
+if (Get-CimInstance Win32_Process | Where-Object {
+    $_.Name -in @('siso.exe','ninja.exe') -and $_.CommandLine -and
+    ($_.CommandLine.Contains($ChromeDir) -or $_.CommandLine -match 'out[\\/]Release')
+}) { throw 'Wait for the active Release build before packaging.' }
 # This script only packages a completed, non-component build; never build here.
 $gnArgs = Get-Content (Join-Path $ChromeDir 'args.gn') -Raw
 foreach ($required in @('is_component_build = false','dcheck_always_on = false','symbol_level = 0')) {
     if (!$gnArgs.Contains($required)) { throw "Release args must contain: $required" }
 }
+$product = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $ChromeDir 'chrome.exe'))
+if ($product.ProductName -ne 'PRTS') { throw "Expected final PRTS branding; got $($product.ProductName)" }
 if (Test-Path -LiteralPath $Destination) { throw "Choose a fresh packaging directory: $Destination" }
 $null = New-Item -ItemType Directory -Path $Destination
 $browser = Join-Path $Destination 'prts-chromium-win-x64'

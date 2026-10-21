@@ -4,6 +4,7 @@ import {fork} from 'node:child_process';
 import {createServer} from 'node:http';
 import {once} from 'node:events';
 import {fileURLToPath} from 'node:url';
+import {join} from 'node:path';
 import puppeteer from 'puppeteer-core';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -18,9 +19,9 @@ const gl=document.querySelector('#gl').getContext('webgl');if(gl){gl.clearColor(
 const source=document.createElement('canvas');source.width=128;source.height=128;const ctx=source.getContext('2d');let n=0;function paint(){ctx.fillStyle=++n%2?'rgb(20,60,210)':'rgb(230,200,20)';ctx.fillRect(0,0,128,128);}paint();document.querySelector('#clip').srcObject=source.captureStream(10);setInterval(paint,100);
 </script>`);});
   fixture.listen(0,'127.0.0.1'); await once(fixture,'listening');
-  const server=fork(fileURLToPath(new URL('../index.js',import.meta.url)),[],{
+  const server=fork(process.env.PRTS_TEST_SERVER_DIR ? join(process.env.PRTS_TEST_SERVER_DIR,'index.js') : fileURLToPath(new URL('../index.js',import.meta.url)),[],{
     cwd:fileURLToPath(new URL('../../',import.meta.url)),windowsHide:true,silent:true,
-    env:{...process.env,PORT:'0',PRTSD_PATH:fileURLToPath(new URL('../../prtsd/target/release/prtsd.exe',import.meta.url)),PRTSD_ARGS:'[]',PRTS_BROWSER_PROTOCOL:'2'},
+    env:{...process.env,PORT:'0',PRTSD_PATH:process.env.PRTSD_PATH || fileURLToPath(new URL('../../prtsd/target/release/prtsd.exe',import.meta.url)),PRTSD_ARGS:'[]',PRTS_BROWSER_PROTOCOL:'2'},
   });
   let logs='',browser; const exit=once(server,'exit');
   server.stdout.on('data',d=>logs+=d);server.stderr.on('data',d=>logs+=d);
