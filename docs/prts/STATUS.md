@@ -3,7 +3,7 @@
 ## Current state
 - **Revised-plan MVP wrap-up qualified (2026-10-21):** working
   app/context/select/omnibox popups, PRTS product branding, shared Chrome UA/CH
-  identity, sample-server default v2 and cleanup are ready to merge to main.
+  identity, sample-server default v2 and cleanup are merged and pushed to main (`e670430`).
   Touch, other flyouts and independent videos for extra windows are known gaps.
   Lessons: [lessons-flyouts.md](lessons-flyouts.md). Identity: [mvp-identity.md](mvp-identity.md).
 - **Acceptance:** `prts-mvp-wrap47-resume-full-*` passed39/40; only synthetic
@@ -17,12 +17,14 @@
   Build47 retains pipe cancellation/join through BLOCK_SHUTDOWN; the original
   native5s/RPC shutdown deadlines pass. Removed both temporary daemon workarounds.
   Active-worker fixture closes in227ms with all11 recorded descendants exited.
-- **Next action:** commit this qualification on WIP, merge into main preserving
-  the latest main PLAN/HANDOFF and bounded Release build script, then push.
-  Start exactly one incremental `out/Release` build with final patches; the
-  initial non-component build finished exit0 at13:13:30. Package Chromium/daemon/
-  server, verify SHA256 and full40 gates from a clean extraction (including the
-  synthetic gate), then publish `v0.1.0-preview` on FlysoftBeta/prts.
+- **Release build PASS:** final non-component incremental rebuild completed
+  exit0 at16:08; logs `C:/src/chromium/prts-release-build.log*`. Qualified source
+  is `3337c44996`, component output and Release output both include final patches.
+- **Next action:** package into `C:/src/chromium/prts-preview-20261021-1608`
+  with scripts/package-preview.ps1, then verify SHA256 and full40 acceptance
+  from a fresh extraction using scripts/verify-preview.ps1. Require all gates,
+  including the synthetic loss observation, before publishing `v0.1.0-preview`.
+  Draft notes: [release-v0.1.0-preview.md](release-v0.1.0-preview.md).
   GitHub CLI: `C:/Program Files/GitHub CLI/gh.exe` (authenticated).
   Re-architecture, encoders and isolation follow the release in PLAN order.
 - **Qualification limits:** desktop probes verify hidden/cloaked HWNDs, unchanged
