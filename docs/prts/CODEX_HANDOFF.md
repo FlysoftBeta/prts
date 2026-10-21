@@ -53,4 +53,5 @@ agent is supervising you; you must plan, implement, verify, commit and record pr
 7b. Do not stop after a checkpoint: keep working through the priority list until it is complete or you
    are blocked by usage limits. If the current milestone is on a `wip/*` branch, resume it from its resume
    notes (e.g. `docs/prts/mvp-flyouts-wip.md`).
+7c. GitHub CLI: `gh` is installed at `C:Program FilesGitHub CLIgh.exe` and logged in as FlysoftBeta, but may be missing from the inherited PATH — call it by full path or prepend that dir to PATH.
 8. Long-running commands (builds, soak tests) must be run with timeouts and polled; don't hang forever.
