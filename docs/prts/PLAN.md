@@ -135,12 +135,14 @@ PRTS (custom headless Chromium)  --anonymous pipes-->  prtsd (Rust, windows-rs)
    Use `gh release create`. Keep assets < 2 GB each (split if needed).
 3. Then: unify flyout and window code paths (one window/surface model); minimize Chromium patch surface
    (fewer, smaller hooks; move logic out of Chromium into prtsd where possible).
-   **Patch re-architecture (after the MVP release):** re-audit EVERY existing patch in `patches/` — for each,
-   write in `docs/prts/patch-audit.md` what it does, why, and whether a more suitable path exists
-   (existing extension point, embedder override, observer, feature/switch, public API, or doing it in
-   prtsd instead). Then rebuild the series from scratch on a fresh branch as a small, clean, logically
-   ordered set (one concern per patch), replacing hacks with the better paths, with every gate passing
-   before it replaces `main`'s series. Goal: minimal diff to upstream, easy rebase onto new Chromium versions.
+   **Patch re-architecture (after the MVP release):** don't review patch by patch. Squash the whole
+   series into ONE combined diff against PIN, treat it as a behavioural spec (what capabilities it adds:
+   pipe/control, window capture, flyouts, input, cursor, branding/UA, ...), and independently search the
+   Chromium tree for the best hook points to provide those capabilities with the smallest diff
+   (existing extension points, embedder/content-client overrides, observers, features/switches, public
+   APIs, or moving logic into prtsd). Record findings in `docs/prts/patch-rearch.md`. Re-implement on a fresh
+   branch as a small, clean, logically ordered series, with every gate passing before it replaces `main`'s
+   series. Goal: minimal diff to upstream, easy rebase onto new Chromium versions.
 4. Then: encoder backends (oneVPL QSV, NVENC; MF fallback) and isolation (AppContainer + LPAC, per-tenant
    window station; resume from `wip/i1-isolation`).
 5. Then: re-integrate everything, full regression, new release.
