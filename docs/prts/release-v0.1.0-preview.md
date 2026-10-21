@@ -40,10 +40,25 @@ This preview does not provide AppContainer/LPAC tenant isolation. Windows 10
 unqualified. Current desktop checks run in a disconnected session and verify
 hidden/cloaked windows, no browser taskbar entry and native cursor counters.
 
+## Known issues
+
+Flyout appearance can exceed 250 ms even with GPU capture and Intel hardware
+encoding. Omnibox popup checks are intermittent: a second suggestion popup or
+its selected-row geometry can be missing after typing a URL. These failures
+are recorded as report-only for this preview and deferred for investigation.
+Other decoded-pixel, input, lifecycle, hardware and resource gates remain required.
+
+Clean-extract popup results: all app/context/select variants passed; both CPU
+omnibox variants passed, while both GPU omnibox variants failed the second
+selected-row geometry probe at DSF1.25. Their faults and popup-host lists were
+empty. Across24 GPU/QSV appearance samples, decoded latency was72.55–239.49ms;
+across24 CPU/software samples it was50.38–278.02ms (one over250ms).
+
 ## Validation
 
-Before publication, require the complete acceptance suite against both the
-component build and a clean extraction of these archives, including Chrome
+Qualification runs the acceptance suite against the component build and a clean
+extraction of these archives, with the known issues above reported separately.
+Required checks include Chrome
 identity in pages/workers, PRTS executable/About branding, CPU/GPU popup matrices,
 input, lifecycle, resource limits, Intel hardware adapter/encoder and WebRTC.
 Final evidence and any limitations are recorded in `docs/prts/STATUS.md`.

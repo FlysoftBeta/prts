@@ -42,7 +42,10 @@ function Gate([string]$Name, [string]$Command, [int]$Seconds = 180) {
     Add-Content -Encoding UTF8 $journal "- $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [codex] $Name exit=$result | logs $log.log / $log.err.log | inspect failures before merging."
     Write-Output "$Name exit=$result ($log.log)"
     if ($result -ne 0) {
-        if ($PreviewKnownIssues -and $Name -like 'omnibox-*' -and $result -ne 124) {
+        $details = (Get-Content -LiteralPath "$log.err.log" -Raw) + (Get-Content -LiteralPath "$log.log" -Raw)
+        $knownOmnibox = $Name -like 'omnibox-*' -and $result -eq 1 -and
+            $details -match 'Error: (Selected omnibox row geometry missing|Omnibox dropdown appearance deadline|Omnibox decoded appearance latency)'
+        if ($PreviewKnownIssues -and $knownOmnibox) {
             $script:reported += "$Name exit=$result (deferred omnibox known issue)"
             Add-Content -Encoding UTF8 $journal "- $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [codex] Report-only preview known issue: $Name exit=$result | raw failure preserved in $log | defer investigation per PLAN priority7."
         } else { $script:failed += $Name }

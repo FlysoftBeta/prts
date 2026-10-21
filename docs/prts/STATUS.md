@@ -20,30 +20,27 @@
 - **Release build PASS:** final non-component incremental rebuild completed
   exit0 at16:08; logs `C:/src/chromium/prts-release-build.log*`. Qualified source
   is `3337c44996`, component output and Release output both include final patches.
-- **Release archives built:** `C:/src/chromium/prts-preview-20261021-1608`:
-  browser211713973bytes, server3682225bytes and SHA256SUMS.txt. BUILD metadata
-  records infra `6cd74a4` and Chromium `3337c44996`.
-- **Release blocked:** all4 select popup variants fail in the non-component build
-  after decoded appearance when sending Escape (pipe EOF). Component variants
-  pass. Focused browser-log repro confirms key input then process death without
-  fatal logging. Debugging on matching `wip/release-select` branches; do not publish.
-- **WIP fix:** `c14260952f` (exported34) uses existing Aura animation-disable
-  switch in Prepare; both Release/Default incremental builds and Release GN PASS.
-  All4 select variants pass all3DSFs; early CPU2 fixture paint failures retained,
-  unchanged gate passes twice with/without logging. Failure diagnostics improved.
-- **Synthetic fixture:** prior400ms experiment leaves5kbps bandwidth and1–5FPS.
-  Loss now uses a fresh synthetic instance with new>=15FPS precondition, retaining
-  original15percent/8s/receiver-loss/drop/recovery assertions. First run PASS at
-  19.87fps/205kbps,50shaper drops and receiver losspeak2; no daemon codec changes.
-- **Next action:** Default Suite flyouts is running (timeout1800s), prefix
-  `C:/src/chromium/prts-release-select-fix1-default-flyouts`; wrapper *-run.*.
-  After PASS commit WIP, package fresh archives and require clean-extract full40
-  before merging fix to main or publishing. Original archives/extract
-  `prts-preview-20261021-1608` / `prts-preview-check-20261021-1610` failed35/40;
-  never publish them. Current branches are matching `wip/release-select`.
-  Draft notes: [release-v0.1.0-preview.md](release-v0.1.0-preview.md).
-  GitHub CLI: `C:/Program Files/GitHub CLI/gh.exe` (authenticated).
-  Re-architecture, encoders and isolation follow the release in PLAN order.
+- **Preview qualified (2026-10-21 16:59):** clean-extract full40:
+  38PASS, two deferred GPU omnibox selected-row geometry failures atDSF1.25.
+  All nondeferred gates pass, including Intel hardware/no SwiftShader,
+  QSV zero-copy, lifecycle/resource/recovery, CPU/GPU WebRTC, UA/branding and
+  synthetic loss (receiver peak2, shaper49drops). Component popup suite21/23
+  also has only deferred omnibox failures. No further popup debugging.
+- **Release source:** Chromium `c14260952f`, 34patches; both incremental builds
+  and all four select variants pass. Existing Aura animation-disable switch
+  fixes the non-component select-close crash. Standard latency gates stay strict;
+  explicit `-PreviewKnownIssues` reports latency and exact known omnibox errors.
+- **Release archives:** `C:/src/chromium/prts-preview-final-20261021-1650`,
+  browser211714171/server3682227bytes; BUILD metadata infra`35a0793`,
+  Chromium`c14260952f`. Clean extract and all raw exit/log evidence:
+  `C:/src/chromium/prts-preview-final-check-20261021-1651/verify-*`.
+  GPU24 appearance samples72.55–239.49ms; CPU24 samples50.38–278.02ms.
+  Original `prts-preview-20261021-1608` archives failed; never publish them.
+- **Next action:** merge qualified release fix, export34patches, push main,
+  publish `v0.1.0-preview` with the qualified archives/SHA256 and known issues;
+  then start oneVPL on matching `wip/e1-onevpl` branches. Isolation and v0.2.0
+  follow oneVPL in PLAN order. Release notes:
+  [release-v0.1.0-preview.md](release-v0.1.0-preview.md).
 - **Qualification limits:** desktop probes verify hidden/cloaked HWNDs, unchanged
   taskbar and cursor counters in a disconnected session; physical foreground/
   cursor behavior and Windows10 22H2 remain unqualified.
