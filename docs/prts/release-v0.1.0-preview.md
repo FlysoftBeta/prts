@@ -7,8 +7,17 @@ receive consistent Chrome user-agent and Client Hints values.
 
 ## Downloads and quickstart
 
-Download both Windows x64 archives and `SHA256SUMS.txt`. Extract both archives
-into the same directory and install Node.js 22 or newer. Then run in PowerShell:
+Download the seven browser archive parts (`.zip.001` through `.zip.007`),
+the server ZIP, `SHA256SUMS.txt`, `SHA256PARTS.txt` and `JOIN.ps1` into one
+directory. In PowerShell, reconstruct the browser ZIP:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\JOIN.ps1
+```
+
+The script verifies every part and the final ZIP against their SHA256 manifests.
+Extract the resulting browser ZIP and the server ZIP into the same directory
+and install Node.js 22 or newer. Then run in PowerShell:
 
 ```powershell
 cd prts-server-win-x64
@@ -24,6 +33,8 @@ another independently controlled browser stream.
 Check each downloaded archive against `SHA256SUMS.txt` with
 `Get-FileHash -Algorithm SHA256 <archive.zip>`. `BUILD.txt` records the source
 revisions and Chromium PIN; `BUILD-ARGS.gn` records the non-component build flags.
+The browser ZIP is split to avoid interrupted large uploads; rejoining produces
+the exact clean-extract-qualified archive, without changing any browser files.
 
 ## Preview scope
 

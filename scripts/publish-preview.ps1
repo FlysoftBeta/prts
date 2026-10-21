@@ -4,6 +4,7 @@ param(
     [string]$Version = 'v0.1.0-preview',
     [string]$Repository = 'FlysoftBeta/prts',
     [string]$Notes = (Join-Path $PSScriptRoot '../docs/prts/release-v0.1.0-preview.md'),
+    [switch]$SplitBrowser,
     [int]$UploadTimeoutSeconds = 3600
 )
 $ErrorActionPreference = 'Stop'
@@ -62,6 +63,29 @@ foreach ($bundle in @('prts-chromium-win-x64','prts-server-win-x64')) {
     $qualified = Join-Path $VerificationDir "$bundle/BUILD.txt"
     $packaged = Join-Path $Assets "$bundle/BUILD.txt"
     if ((Get-FileHash $qualified).Hash -ne (Get-FileHash $packaged).Hash) { throw "Qualified BUILD metadata mismatch: $bundle" }
+}
+if ($SplitBrowser) {
+    if ((Get-FileHash (Join-Path $Assets 'SHA256PARTS.txt')).Hash -ne
+        (Get-FileHash (Join-Path $VerificationDir 'verify-SHA256PARTS.txt')).Hash) {
+        throw 'Archive parts differ from the reconstruction qualification receipt.'
+    }
+    $browserNames = @($expected.Keys | Where-Object { $_ -like 'prts-chromium-*.zip' })
+    if ($browserNames.Count -ne 1) { throw 'Expected one qualified browser archive.' }
+    $browserName = $browserNames[0]
+    $expected.Remove($browserName)
+    $partCount = 0
+    foreach ($line in Get-Content (Join-Path $Assets 'SHA256PARTS.txt')) {
+        if ($line -notmatch '^([0-9a-fA-F]{64})  ([^\\/]+\.zip\.[0-9]{3})$') { throw "Invalid part checksum: $line" }
+        $partHash,$partName = $Matches[1].ToLowerInvariant(),$Matches[2]
+        $partCount++
+        if ($partName -ne ('{0}.{1:d3}' -f $browserName,$partCount)) { throw 'Nonconsecutive archive parts.' }
+        if ((Get-FileHash (Join-Path $Assets $partName) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $partHash) { throw "Part checksum mismatch: $partName" }
+        $expected[$partName] = $partHash
+    }
+    if (!$partCount) { throw 'No browser archive parts.' }
+    foreach ($name in @('SHA256PARTS.txt','JOIN.ps1')) {
+        $expected[$name] = (Get-FileHash (Join-Path $Assets $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
 }
 $release = & $gh release view $Version --repo $Repository --json databaseId,isDraft,url,assets 2>$null
 if ($LASTEXITCODE) {

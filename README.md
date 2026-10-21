@@ -149,11 +149,15 @@ To package a finished non-component `out/Release` build and publish a preview:
 ```powershell
 ./scripts/package-preview.ps1 -Destination C:/prts/assets
 ./scripts/verify-preview.ps1 -Assets C:/prts/assets -ExtractDir C:/prts/check -PreviewKnownIssues
-./scripts/publish-preview.ps1 -Assets C:/prts/assets -VerificationDir C:/prts/check
+./scripts/split-preview.ps1 -Assets C:/prts/assets -VerificationDir C:/prts/check
+./scripts/publish-preview.ps1 -Assets C:/prts/assets -VerificationDir C:/prts/check -SplitBrowser
 ```
 
 Use fresh packaging/extraction directories. Add `-AllowDisconnectedDesktop`
 to verification only in a disconnected session. Publishing requires the
 clean-extract receipt and matching SHA256 hashes, resumes completed uploads,
-and verifies remote hashes before making the pre-release public. Each upload
-has a one-hour deadline. Other versions can override `-Version` and `-Notes`.
+and verifies remote hashes before making the pre-release public. Splitting
+proves that reconstruction matches the qualified ZIP and supplies `JOIN.ps1`
+for downloaders. Omit splitting and `-SplitBrowser` when large uploads work.
+Each upload has a one-hour deadline. Other versions can override `-Version`
+and `-Notes`.

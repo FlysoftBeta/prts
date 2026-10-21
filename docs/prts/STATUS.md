@@ -36,19 +36,22 @@
   `C:/src/chromium/prts-preview-final-check-20261021-1651/verify-*`.
   GPU24 appearance samples72.55–239.49ms; CPU24 samples50.38–278.02ms.
   Original `prts-preview-20261021-1608` archives failed; never publish them.
-- **Publication running:** qualified fix merged/pushed as main `56b6cc1`;
-  Chromium work `c14260952f`, 34 patches exported. GitHub CLI PID14472
-  (started17:01:04; execsession85193) is uploading the browser archive to a
-  temporary draft; server and SHA256 assets uploaded, remote hashes verified.
-  Upload advances around80KB/s; bounded deadline18:01. HTTP1 probe gave no
-  improvement and its temporary asset was deleted. Do not start a duplicate.
-- **Next action:** finish original upload, verify all3 remote SHA256 digests,
-  nondraft/prerelease status and published URL. Resumable publication helper is
-  on matching `wip/release-publisher` branches (no Chromium edits); parser and
-  mismatched-receipt checks pass, positive idempotence awaits publication.
-  Merge helper only after that check. Then start oneVPL on matching
-  `wip/e1-onevpl` branches. Isolation and v0.2.0
-  follow oneVPL in PLAN order. Release notes:
+- **Published 2026-10-21 18:19:** [v0.1.0-preview](https://github.com/FlysoftBeta/prts/releases/tag/v0.1.0-preview),
+  non-draft pre-release with all 11 remote asset SHA256 digests verified.
+  The browser ZIP is distributed as seven 32 MiB parts plus `JOIN.ps1` and
+  part checksums; reconstruction exactly matches the qualified ZIP SHA256
+  `3511e571aa8fa42dfe59d5626fd35400f2b7815ef60b77cebabb507207cc2b33`.
+  Server ZIP SHA256 `8dfee1eafdee3f7c482696d98753879d65f9afd0202d6fee46d1ccf40e72b9a0`.
+  Monolithic upload silently retried; bounded part uploads all passed.
+- **Release tools qualified:** split/rejoin/qualification receipts, corrupt-part
+  rejection, mismatched qualification rejection and remote hash verification
+  pass. Publishing twice is idempotent: skips all assets, preserves pre-release.
+  Source is Chromium `c14260952f`, 34 patches; release fix main `56b6cc1`.
+- **Next action:** merge and push qualified publisher tools, then begin direct
+  oneVPL QSV on matching `wip/e1-onevpl` branches. Keep MF fallback, verify
+  D3D11 zero-copy and low-bitrate VBV behavior, benchmark into encoder-bench.md.
+  Isolation, v0.2.0, patch re-architecture, NVENC, then flyout latency follow
+  the newest PLAN order. Release notes:
   [release-v0.1.0-preview.md](release-v0.1.0-preview.md).
 - **Qualification limits:** desktop probes verify hidden/cloaked HWNDs, unchanged
   taskbar and cursor counters in a disconnected session; physical foreground/
