@@ -99,7 +99,9 @@ PRTS (custom headless Chromium)  --anonymous pipes-->  prtsd (Rust, windows-rs)
 4. Polish: network simulation, quality stats, multi-instance, docs (README with run steps).
 
 **Priority order (user, revised 2026-10-21 16:15 — SUPERSEDES all lists below):**
-1. Finish publishing `v0.1.0-preview` (in progress).
+1. Finish publishing `v0.1.0-preview` NOW. Flyout latency (>250 ms) and flaky omnibox-popup checks are
+   KNOWN ISSUES deferred to item 7: for release gating they are report-only (record results in the release
+   notes "Known issues"); do NOT debug them now. All other gates must pass. Then move on to item 2.
 2. oneVPL: direct Intel QSV encoder backend (D3D11 zero-copy input, low-latency settings, VBV fix for low
    bitrates), MF kept as fallback; benchmark MF vs oneVPL into `docs/prts/encoder-bench.md`.
 3. I1 isolation: resume from `wip/i1-isolation` (journal-i1.md "Resume later"): Job Object + AppContainer
