@@ -102,6 +102,11 @@ PRTS (custom headless Chromium)  --anonymous pipes-->  prtsd (Rust, windows-rs)
 1. Finish publishing `v0.1.0-preview` NOW. Flyout latency (>250 ms) and flaky omnibox-popup checks are
    KNOWN ISSUES deferred to item 7: for release gating they are report-only (record results in the release
    notes "Known issues"); do NOT debug them now. All other gates must pass. Then move on to item 2.
+1b. TOUCH (user, high priority, before oneVPL): real touch input end to end — frontend sends Pointer/Touch
+   events on touch devices (multi-touch ids, no mouse emulation, prevent browser default gestures on the
+   video), prtsd forwards them, Chromium receives genuine touch events through the window-level input path
+   (tap, long-press context menu, one-finger scroll/fling, pinch zoom, flyouts touchable). Gate with a page
+   that records TouchEvent/PointerEvent(pointerType=touch) and gesture results. Ship as v0.1.1-preview.
 2. oneVPL: direct Intel QSV encoder backend (D3D11 zero-copy input, low-latency settings, VBV fix for low
    bitrates), MF kept as fallback; benchmark MF vs oneVPL into `docs/prts/encoder-bench.md`.
 3. I1 isolation: resume from `wip/i1-isolation` (journal-i1.md "Resume later"): Job Object + AppContainer
