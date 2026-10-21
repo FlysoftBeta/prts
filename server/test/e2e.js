@@ -262,6 +262,7 @@ test('real prtsd → Node → browser video, input, multiple viewers, bitrate an
   await network(shaped);
   await sleep(2000);
   const lossBefore = await receiver(shaped);
+  if (process.env.PRTS_TEST_SHAPING_TRACE) console.log('LOSS baseline '+JSON.stringify(await stats(shaped)));
   const droppedBefore = (await stats(shaped)).sessions.reduce((sum, s) => sum + s.shaper_dropped_packets, 0);
   await network(shaped, { loss: 15 });
   let lossPeak = lossBefore.packetsLost;
@@ -270,6 +271,7 @@ test('real prtsd → Node → browser video, input, multiple viewers, bitrate an
     await sleep(100);
   }
   const lossAfter = await receiver(shaped);
+  if (process.env.PRTS_TEST_SHAPING_TRACE) console.log('LOSS after '+JSON.stringify(await stats(shaped)));
   const droppedAfter = (await stats(shaped)).sessions.reduce((sum, s) => sum + s.shaper_dropped_packets, 0);
   assert.ok(lossPeak > lossBefore.packetsLost,
     `15% outgoing loss must increase receiver packetsLost: ${JSON.stringify({ lossBefore, lossAfter, lossPeak, droppedBefore, droppedAfter })}`);
