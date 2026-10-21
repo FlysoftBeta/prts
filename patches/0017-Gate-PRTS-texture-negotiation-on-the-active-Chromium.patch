@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Tue, 20 Oct 2026 10:47:05 +0800
-Subject: [PATCH 17/23] Gate PRTS texture negotiation on the active Chromium
+Subject: [PATCH 17/33] Gate PRTS texture negotiation on the active Chromium
  hardware adapter
 
 Require the actual GPU-process adapter LUID to match the daemon and reject SwiftShader before enabling D3D texture capture.

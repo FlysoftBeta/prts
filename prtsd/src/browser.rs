@@ -162,7 +162,14 @@ impl RawBrowser {
         let mut text = format!(
             "\"{}\" {} --no-first-run --no-default-browser-check --prts-pipe=cmd:0x{:X},evt:0x{:X},frame:0x{:X}",
             executable_text,
-            if headless { "--headless=new" } else { "" },
+            // CPU-rasterize Views tiles to avoid cold browser-UI shader
+            // compilation blocking popup capture on Intel. Page rasterization,
+            // hardware compositing, WebGL and DXGI capture remain enabled.
+            if headless {
+                "--headless=new --disable-features=UiGpuRasterization"
+            } else {
+                ""
+            },
             children[0].0 as usize,
             children[1].0 as usize,
             children[2].0 as usize
@@ -332,6 +339,7 @@ struct Session {
     selected_window: u64,
     windows: std::collections::BTreeMap<u64, ww::Window>,
     scenes: std::collections::BTreeMap<u64, ww::Scene>,
+    scene_frames: crate::scene_frames::Scenes,
     job: OwnedHandle,
     process: OwnedHandle,
     frames: crate::browser_frames::Resources,
@@ -439,6 +447,7 @@ impl Session {
             selected_window: 0,
             windows: Default::default(),
             scenes: Default::default(),
+            scene_frames: Default::default(),
             job: raw.job.try_clone()?,
             process,
             frames: Default::default(),
@@ -551,10 +560,6 @@ impl Session {
                         window.generation == scene.generation,
                         "Scene/window generation mismatch"
                     );
-                    ensure!(
-                        scene.layers.len() == 1,
-                        "Single-window adapter does not compose auxiliary layers"
-                    );
                     for layer in &scene.layers {
                         ensure!(
                             layer.source != window.id
@@ -569,19 +574,21 @@ impl Session {
                                 .any(|s| s.layers.iter().any(|l| l.source == layer.source)),
                             "Source crossed window owners"
                         );
-                        ensure!(
-                            layer.role == 1
-                                && layer.parent == 0
-                                && layer.visible
-                                && layer.format == 1
-                                && layer.rect.x == 0.
-                                && layer.rect.y == 0.
-                                && layer.rect.width == f64::from(window.size.width)
-                                && layer.rect.height == f64::from(window.size.height)
-                                && layer.dpr == window.size.dpr,
-                            "Incompatible base scene geometry"
-                        );
+                        if layer.role == 1 {
+                            ensure!(
+                                layer.parent == 0
+                                    && layer.visible
+                                    && layer.format == 1
+                                    && layer.rect.x == 0.
+                                    && layer.rect.y == 0.
+                                    && layer.rect.width == f64::from(window.size.width)
+                                    && layer.rect.height == f64::from(window.size.height)
+                                    && layer.dpr == window.size.dpr,
+                                "Incompatible base scene geometry"
+                            );
+                        }
                     }
+                    self.scene_frames.update(scene.clone())?;
                     self.scenes.insert(scene.window, scene);
                     return Ok(());
                 }
@@ -607,6 +614,7 @@ impl Session {
                     d.finish()?;
                     self.windows.remove(&id);
                     self.scenes.remove(&id);
+                    self.scene_frames.remove(id);
                     if self.selected_window == id {
                         let next = self.windows.keys().next().copied().unwrap_or(0);
                         self.select_window(next)?;
@@ -659,7 +667,13 @@ impl Session {
                 }
                 Err(e) => return self.fail(format!("Frame resource error: {e:#}")),
             };
-            return self.enqueue(reply.encode_version(self.major)?);
+            self.enqueue(reply.encode_version(self.major)?)?;
+            if self.major == 2 {
+                while let Some(frame) = self.frames.take_frame() {
+                    self.scene_frames.push(frame)?;
+                }
+            }
+            return Ok(());
         }
         let size = record.payload.len() + 24;
         let event = match record.event() {
@@ -928,6 +942,9 @@ impl Browser {
                 0
             });
         session.features = hello.features;
+        session
+            .frames
+            .set_layer_alpha(major == 2 && hello.features & ww::PREMULTIPLIED_BGRA != 0);
         session.major = major;
         let session = Arc::new(Mutex::new(session));
         let weak = Arc::downgrade(&session);
@@ -1016,23 +1033,10 @@ impl Browser {
                 Err(mpsc::TryRecvError::Disconnected) => return s.fail("Browser readers stopped"),
             }
         }
-        while let Some(mut frame) = s.frames.take_frame() {
-            if s.major == 2 {
-                let owner = s.scenes.values().find(|scene| {
-                    scene
-                        .layers
-                        .iter()
-                        .any(|l| l.source == frame.target && l.generation == frame.generation)
-                });
-                let Some(scene) = owner else {
-                    continue;
-                };
-                frame.target = scene.window;
-                frame.generation = scene.generation;
-            }
-            return Ok(Some(frame));
+        if s.major == 2 {
+            return s.scene_frames.take_frame();
         }
-        Ok(None)
+        Ok(s.frames.take_frame())
     }
     pub fn take_frame(&self) -> Option<crate::browser_frames::CpuFrame> {
         self.poll_frame().ok().flatten()

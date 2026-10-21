@@ -18,6 +18,7 @@ pub struct CpuFrame {
     pub generation: u64,
     pub width: u32,
     pub height: u32,
+    pub format: u8,
     pub pixels: Vec<u8>,
     pub received: Instant,
     pub timestamp_us: u64,
@@ -30,6 +31,7 @@ struct Section {
     generation: u64,
     width: u32,
     height: u32,
+    format: u8,
     stride: usize,
     length: usize,
     last_frame: u64,
@@ -51,6 +53,7 @@ impl Drop for Section {
 #[derive(Default)]
 pub struct Resources {
     gpu_luid: u64,
+    layer_alpha: bool,
     sections: BTreeMap<u64, Section>,
     // Coalesce within a target, never across independent subscriptions. At
     // most two registered resources can contribute a pending CPU/GPU copy.
@@ -59,6 +62,9 @@ pub struct Resources {
     pub coalesced: u64,
 }
 impl Resources {
+    pub fn set_layer_alpha(&mut self, enabled: bool) {
+        self.layer_alpha = enabled;
+    }
     pub fn set_gpu_adapter(&mut self, luid: u64) {
         self.gpu_luid = luid;
     }
@@ -96,7 +102,7 @@ impl Resources {
                         && source <= usize::MAX as u64
                         && source != usize::MAX as u64
                         && (kind == 1 || kind == 2)
-                        && format == 1
+                        && (format == 1 || (self.layer_alpha && format == 2))
                         && ((kind == 2 && luid == 0) || (kind == 1 && luid != 0)),
                     "Invalid frame resource identity/format"
                 );
@@ -135,6 +141,7 @@ impl Resources {
                     generation,
                     width,
                     height,
+                    format,
                     stride,
                     length: length as usize,
                     last_frame: 0,
@@ -230,7 +237,7 @@ impl Resources {
                     .ok_or_else(|| anyhow::anyhow!("Unregistered frame"))?;
                 ensure!(
                     (target, generation, width, height, format)
-                        == (s.target, s.generation, s.width, s.height, 1)
+                        == (s.target, s.generation, s.width, s.height, s.format)
                         && frame > s.last_frame
                         && (r.kind == 0x310) == s.texture.is_some(),
                     "Frame metadata mismatch/reuse"
@@ -272,6 +279,7 @@ impl Resources {
                     generation,
                     width,
                     height,
+                    format,
                     pixels,
                     received: capture,
                     timestamp_us,

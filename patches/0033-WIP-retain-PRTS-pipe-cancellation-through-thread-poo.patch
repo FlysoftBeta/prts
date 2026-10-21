@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Wed, 21 Oct 2026 12:43:31 +0800
+Subject: [PATCH 33/33] WIP: retain PRTS pipe cancellation through thread-pool
+ shutdown
+
+Stop currently posts cancellation and worker joins as CONTINUE_ON_SHUTDOWN, so process exit may discard the task while synchronous pipe reads remain pending. Use BLOCK_SHUTDOWN for this cleanup. Native strict shutdown qualification is pending build47; no exit gate is changed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_pipe_client_win.cc b/chrome/browser/prts/prts_pipe_client_win.cc
+index 415fc30540..ce7490347a 100644
+--- a/chrome/browser/prts/prts_pipe_client_win.cc
++++ b/chrome/browser/prts/prts_pipe_client_win.cc
+@@ -309,7 +309,9 @@ void PrtsPipeClient::Stop() {
+   base::ThreadPool::PostTask(
+       FROM_HERE,
+       {base::MayBlock(), base::WithBaseSyncPrimitives(),
+-       base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN},
++         // Finish cancelling inherited synchronous pipe I/O before process
++         // shutdown can discard this task and leave the reader in ReadFile.
++         base::TaskShutdownBehavior::BLOCK_SHUTDOWN},
+       base::BindOnce(
+           [](std::shared_ptr<State> state) {
+             for (base::Thread* thread : {&state->reader, &state->writer}) {

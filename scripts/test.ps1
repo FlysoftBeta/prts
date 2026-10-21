@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('quick', 'mf', 'gpu', 'full')][string]$Suite = 'quick',
+    [ValidateSet('quick', 'mf', 'gpu', 'flyouts', 'full')][string]$Suite = 'quick',
     [switch]$AllowDisconnectedDesktop,
     [string]$LogPrefix = (Join-Path $env:TEMP ('prts-tests-' + (Get-Date -Format 'yyyyMMdd-HHmmss')))
 )
@@ -12,6 +12,8 @@ $env:PATH = "$env:USERPROFILE\.cargo\bin;C:\Program Files\nodejs;" + $env:PATH
 $journal = Join-Path (Get-Location) 'docs/prts/journal-mvp.md'
 $shell = (Get-Process -Id $PID).Path
 Remove-Item Env:\PRTS_BROWSER_PROTOCOL, Env:\PRTS_M5_CAPTURE, Env:\PRTS_M5_INPUT,
+    Env:\PRTS_M5_HOSTS, Env:\PRTS_M5_FLYOUTS, Env:\PRTS_M5_CONTEXT, Env:\PRTS_M5_SELECT, Env:\PRTS_M5_OMNIBOX,
+    Env:\PRTS_M5_ONE_CREDIT, Env:\PRTS_M5_TRACE,
     Env:\PRTS_FRAME_MODE, Env:\PRTS_TEST_ENCODER, Env:\PRTS_M1_ALLOW_DISCONNECTED_DESKTOP -ErrorAction SilentlyContinue
 if ($AllowDisconnectedDesktop) { $env:PRTS_M1_ALLOW_DISCONNECTED_DESKTOP = '1' }
 $failed = @()
@@ -38,6 +40,30 @@ function Gate([string]$Name, [string]$Command, [int]$Seconds = 180) {
     if ($result -ne 0) { $script:failed += $Name }
 }
 
+function FlyoutGates {
+    $env:PRTS_M5_HOSTS = '1'
+    Gate 'flyout-hosts' '.\prtsd\target\release\browser_m5.exe'
+    Remove-Item Env:\PRTS_M5_HOSTS
+    Gate 'composition-hardware' 'cargo test --manifest-path prtsd/Cargo.toml --lib d3d_composition -- --ignored --nocapture --test-threads=1' 300
+    foreach ($case in @(
+        @{ Flag = 'PRTS_M5_FLYOUTS'; Name = 'flyouts' },
+        @{ Flag = 'PRTS_M5_CONTEXT'; Name = 'context' },
+        @{ Flag = 'PRTS_M5_SELECT'; Name = 'select' },
+        @{ Flag = 'PRTS_M5_OMNIBOX'; Name = 'omnibox' }
+    )) {
+        $flagPath = 'Env:\' + $case.Flag
+        Set-Item -LiteralPath $flagPath -Value '1'
+        foreach ($credits in @(2, 1)) {
+            if ($credits -eq 1) { $env:PRTS_M5_ONE_CREDIT = '1' }
+            foreach ($mode in @('cpu', 'gpu')) {
+                $env:PRTS_FRAME_MODE = $mode
+                Gate "$($case.Name)-$mode-$credits" '.\prtsd\target\release\browser_m5.exe'
+            }
+        }
+        Remove-Item -LiteralPath $flagPath
+        Remove-Item Env:\PRTS_M5_ONE_CREDIT
+    }
+}
 if ($Suite -eq 'mf') {
     Gate 'mf-hardware' 'cargo test --manifest-path prtsd/Cargo.toml --release --test mf_encoder -- --ignored --nocapture --test-threads=1' 300
 } elseif ($Suite -eq 'gpu') {
@@ -50,7 +76,12 @@ if ($Suite -eq 'mf') {
     Gate 'clippy' 'cargo clippy --manifest-path prtsd/Cargo.toml --all-targets -- -D warnings' 600
     Gate 'fmt' 'cargo fmt --manifest-path prtsd/Cargo.toml --check'
     Gate 'node-unit' 'npm.cmd --prefix server test'
+    if ($Suite -eq 'flyouts') { FlyoutGates }
     if ($Suite -eq 'full') {
+        $env:PRTS_BROWSER_PROTOCOL = '2'
+        Gate 'chrome-identity' 'node --test server/test/e2e-identity.js' 420
+        Gate 'product-branding' 'node --test server/test/e2e-branding.js' 120
+        Remove-Item Env:\PRTS_BROWSER_PROTOCOL
         $env:PRTS_M5_CAPTURE = '1'
         $env:PRTS_M5_INPUT = '1'
         $env:PRTS_FRAME_MODE = 'gpu'
@@ -58,6 +89,7 @@ if ($Suite -eq 'mf') {
         $env:PRTS_FRAME_MODE = 'cpu'
         Gate 'm5-cpu' '.\prtsd\target\release\browser_m5.exe'
         Remove-Item Env:\PRTS_M5_CAPTURE, Env:\PRTS_M5_INPUT
+        FlyoutGates
         $env:PRTS_FRAME_MODE = 'gpu'
         Gate 'm1' '.\prtsd\target\release\browser_m1.exe' 360
         Gate 'm2' '.\prtsd\target\release\browser_m2.exe'

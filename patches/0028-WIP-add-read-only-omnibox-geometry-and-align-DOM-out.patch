@@ -1,0 +1,230 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Wed, 21 Oct 2026 11:05:11 +0800
+Subject: [PATCH 28/33] WIP: add read-only omnibox geometry and align DOM outer
+ canvas bounds
+
+Declare direct Views header dependencies used by the acceptance probes. Reuse the logical root-size property for DOM outer dimensions, excluding invisible native resize borders. Post the initial Aura barrier poll while preserving routing/ACK checks. Runtime requalification pending.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/BUILD.gn b/chrome/browser/BUILD.gn
+index 71ded0c0d3..1b2ab78751 100644
+--- a/chrome/browser/BUILD.gn
++++ b/chrome/browser/BUILD.gn
+@@ -1469,6 +1469,10 @@ source_set("core") {
+       deps += [
+         "//chrome/browser/prts:controller_interface",
+         "//chrome/browser/prts:transport",
++        "//chrome/browser/ui/actions:actions_util",
++        "//chrome/browser/ui/views/frame:browser_view_header",
++        "//chrome/browser/ui/views/frame:contents_web_view",
++        "//chrome/browser/ui/views/tabs:tab_strip",
+         "//ui/gfx:animation_scale",
+         "//content/public/browser:synthetic_input",
+         "//chrome/browser/ui/browser_window:create_browser_window",
+diff --git a/chrome/browser/prts/prts_window_registry.cc b/chrome/browser/prts/prts_window_registry.cc
+index 40f14495bb..bb93c95d5f 100644
+--- a/chrome/browser/prts/prts_window_registry.cc
++++ b/chrome/browser/prts/prts_window_registry.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ #include "chrome/browser/prts/prts_window_registry.h"
+ 
++#include <array>
+ #include <bit>
+ #include <cmath>
+ #include <map>
+@@ -17,6 +18,7 @@
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/trace_event/trace_config.h"
++#include "base/values.h"
+ #include "chrome/app/chrome_command_ids.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/browser/profiles/profile_manager.h"
+@@ -36,6 +38,7 @@
+ #include "chrome/browser/ui/views/frame/browser_view.h"
+ #include "chrome/browser/ui/views/frame/contents_web_view.h"
+ #include "chrome/browser/ui/views/location_bar/location_bar_view.h"
++#include "chrome/browser/ui/views/omnibox/omnibox_result_view.h"
+ #include "chrome/browser/ui/views/omnibox/omnibox_view_views.h"
+ #include "chrome/browser/ui/views/tabs/tab_strip.h"
+ #include "chrome/browser/ui/views/toolbar/app_menu_control.h"
+@@ -62,6 +65,7 @@
+ #include "ui/display/screen.h"
+ #include "ui/views/accessibility/view_accessibility.h"
+ #include "ui/views/controls/menu/menu_item_view.h"
++#include "ui/views/controls/webview/webview.h"
+ #include "ui/views/focus/focus_manager.h"
+ #include "ui/views/view_utils.h"
+ #include "ui/views/widget/desktop_aura/desktop_headless_input.h"
+@@ -837,6 +841,97 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+       return;
+     }
+     auto id = d.Int(8);
++    if (r.type == 0x42b &&
++        base::CommandLine::ForCurrentProcess()->HasSwitch("prts-test-hooks")) {
++      if (!d.Done() || !windows_.contains(id)) {
++        Error(r.id, 1, "Invalid omnibox geometry probe");
++        return;
++      }
++      views::WebView* popup = nullptr;
++      auto find = [&](auto&& self, views::View* view) -> void {
++        if (!view->IsDrawn()) {
++          return;
++        }
++        if (auto* web = views::AsViewClass<views::WebView>(view);
++            web && web->web_contents()) {
++          if (web->web_contents()->GetLastCommittedURL().host() ==
++                  "omnibox-popup.top-chrome" &&
++              (!popup || view->GetBoundsInScreen().size().GetArea() >
++                             popup->GetBoundsInScreen().size().GetArea())) {
++            popup = web;
++          }
++        }
++        for (views::View* child : view->children()) {
++          self(self, child);
++        }
++      };
++      for (views::Widget* widget :
++           views::Widget::GetAllChildWidgets(Root(windows_.at(id)))) {
++        find(find, widget->GetRootView());
++      }
++      for (const auto& host : hosts_->Snapshot(id)) {
++        for (views::Widget* widget :
++             views::Widget::GetAllChildWidgets(host.root)) {
++          find(find, widget->GetRootView());
++        }
++      }
++      if (!popup) {
++        send_.Run(7, r.id, std::vector<uint8_t>(32));
++        return;
++      }
++      auto bounds = popup->GetBoundsInScreen();
++      if (bounds.width() <= 1 || bounds.height() <= 1) {
++        send_.Run(7, r.id, std::vector<uint8_t>(32));
++        return;
++      }
++      const auto origin = Root(windows_.at(id))->GetBoundsInScreen().origin();
++      bounds.Offset(-origin.x(), -origin.y());
++      // Read geometry only. Selection and navigation must still use Aura input.
++      popup->web_contents()->GetPrimaryMainFrame()->ExecuteJavaScriptForTests(
++          u"(()=>{function walk(root){const match=root.querySelector("
++          u"'cr-searchbox-match[selected]');if(match){const b=match."
++          u"getBoundingClientRect();if(b.width&&b.height)return [b.x,b.y,"
++          u"b.width,b.height];}for(const e of root.querySelectorAll('*'))"
++          u"if(e.shadowRoot){const b=walk(e.shadowRoot);if(b)return b;}"
++          u"return null;}return walk(document);})()",
++          base::BindOnce(
++              [](base::WeakPtr<Impl> self, uint64_t request, gfx::Rect bounds,
++                 base::Value result) {
++                if (!self) {
++                  return;
++                }
++                prts::Encoder e;
++                auto* rect = result.GetIfList();
++                std::array<double, 4> values = {};
++                bool ready = rect && rect->size() == 4;
++                for (size_t i = 0; i < 4; ++i) {
++                  ready =
++                      ready && ((*rect)[i].is_double() || (*rect)[i].is_int());
++                  values[i] = ready ? (*rect)[i].GetDouble() : 0;
++                  ready = ready && std::isfinite(values[i]);
++                }
++                // Auto-resize can briefly leave a 1x1/native old viewport
++                // alongside new DOM layout. Such geometry is not ready input.
++                ready = ready && values[0] >= 0 && values[1] >= 0 &&
++                        values[2] > 0 && values[3] > 0 &&
++                        // Native bounds round to integer DIP; DOM bounds can
++                        // retain a sub-DIP remainder. Return the full DOM rect
++                        // so the driver's owner-containment check stays exact.
++                        values[0] + values[2] < bounds.width() + 1.0 &&
++                        values[1] + values[3] < bounds.height() + 1.0;
++                for (size_t i = 0; i < 4; ++i) {
++                  double value = ready ? values[i] : 0;
++                  if (ready && i < 2) {
++                    value += i == 0 ? bounds.x() : bounds.y();
++                  }
++                  e.Int(std::bit_cast<uint64_t>(value), 8);
++                }
++                self->send_.Run(7, request, std::move(e.data));
++              },
++              weak_.GetWeakPtr(), r.id, bounds),
++          0);
++      return;
++    }
+     if (r.type == 0x42c &&
+         base::CommandLine::ForCurrentProcess()->HasSwitch("prts-test-hooks")) {
+       if (!d.Done() || !windows_.contains(id)) {
+@@ -910,10 +1005,21 @@ class PrtsWindowRegistry::Impl : public BrowserCollectionObserver,
+           bounds.Offset(-origin.x(), -origin.y());
+           menu_items.emplace_back(IDC_NEW_TAB, bounds);
+         }
++        if (auto* result = views::AsViewClass<OmniboxResultView>(item);
++            result && result->GetMatchSelected()) {
++          auto bounds = item->GetBoundsInScreen();
++          bounds.Offset(-origin.x(), -origin.y());
++          // Test-only geometry marker for the selected omnibox suggestion.
++          menu_items.emplace_back(0x7fff0001, bounds);
++        }
+         for (views::View* child : item->children()) {
+           self(self, child);
+         }
+       };
++      for (views::Widget* widget :
++           views::Widget::GetAllChildWidgets(Root(windows_.at(id)))) {
++        collect(collect, widget->GetRootView());
++      }
+       for (const auto& host : hosts) {
+         for (views::Widget* widget :
+              views::Widget::GetAllChildWidgets(host.root)) {
+diff --git a/content/browser/renderer_host/aura_input_barrier.cc b/content/browser/renderer_host/aura_input_barrier.cc
+index 5a4a3692c3..f51927d8a0 100644
+--- a/content/browser/renderer_host/aura_input_barrier.cc
++++ b/content/browser/renderer_host/aura_input_barrier.cc
+@@ -58,7 +58,12 @@ class AuraBarrier final : public WebContentsObserver,
+     auto weak = weak_.GetWeakPtr();
+     std::move(dispatch).Run();
+     if (weak) {
+-      PostPoll();
++      // A posted first check still observes asynchronous routing setup, while
++      // Views-consumed events need not wait for a delayed timer tick. Keep the
++      // pending-dispatch/ACK/state checks and delayed retries for renderer
++      // work.
++      base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++          FROM_HERE, base::BindOnce(&AuraBarrier::Poll, weak_.GetWeakPtr()));
+     }
+   }
+   base::OnceClosure Cancellation() {
+diff --git a/content/browser/renderer_host/render_widget_host_view_aura.cc b/content/browser/renderer_host/render_widget_host_view_aura.cc
+index dccb33d0a8..277773e6d0 100644
+--- a/content/browser/renderer_host/render_widget_host_view_aura.cc
++++ b/content/browser/renderer_host/render_widget_host_view_aura.cc
+@@ -76,6 +76,7 @@
+ #include "ui/aura/client/transient_window_client.h"
+ #include "ui/aura/client/window_parenting_client.h"
+ #include "ui/aura/env.h"
++#include "ui/aura/headless_root_size.h"
+ #include "ui/aura/window.h"
+ #include "ui/aura/window_event_dispatcher.h"
+ #include "ui/aura/window_observer.h"
+@@ -1330,8 +1331,16 @@ gfx::Rect RenderWidgetHostViewAura::GetBoundsInScreen() {
+     // regular ones below.
+     if (gfx::Rect* headless_bounds =
+             host->window()->GetProperty(aura::client::kHeadlessBoundsKey)) {
+-      return display::Screen::Get()->ScreenToDIPRectInWindow(top_level,
+-                                                             *headless_bounds);
++      gfx::Rect logical_bounds =
++          display::Screen::Get()->ScreenToDIPRectInWindow(top_level,
++                                                        *headless_bounds);
++      // A streamed headless root excludes the invisible native resize frame.
++      // Keep DOM outer sizes consistent with its logical canvas and display.
++      if (const gfx::Size* canvas =
++              host->window()->GetProperty(aura::kHeadlessRootSizeKey)) {
++        logical_bounds.set_size(*canvas);
++      }
++      return logical_bounds;
+     }
+ 
+     RECT window_rect = {0};

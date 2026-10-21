@@ -4,7 +4,7 @@ use openh264::{
         BitRate, Complexity, Encoder, EncoderConfig, FrameRate, IntraFramePeriod, Profile,
         RateControlMode, UsageType,
     },
-    formats::YUVBuffer,
+    formats::{BgraSliceU8, YUVBuffer},
 };
 
 pub trait VideoEncoder {
@@ -126,6 +126,8 @@ pub struct Software {
 }
 impl Software {
     pub fn new(bps: u32, fps: u32) -> anyhow::Result<Self> {
+        let threads =
+            std::thread::available_parallelism().map_or(2, |count| count.get().min(4)) as u16;
         let config = EncoderConfig::new()
             .bitrate(BitRate::from_bps(bps))
             .max_frame_rate(FrameRate::from_hz(fps as f32))
@@ -137,7 +139,7 @@ impl Software {
             // only allow frame skipping below the supported 150 kbps floor.
             .skip_frames(bps < 150_000)
             .intra_frame_period(IntraFramePeriod::from_num_frames(fps * 2))
-            .num_threads(2);
+            .num_threads(threads);
         Ok(Self {
             encoder: Encoder::with_api_config(OpenH264API::from_source(), config)?,
             started: false,
@@ -185,6 +187,11 @@ impl VideoEncoder for Software {
 }
 /// BT.601 limited range. Edge replication pads odd device dimensions to even I420.
 pub fn bgra_to_i420(bgra: &[u8], w: usize, h: usize) -> YUVBuffer {
+    if w.is_multiple_of(2) && h.is_multiple_of(2) {
+        // OpenH264's packed-BGRA converter selects AVX2/SIMD when available.
+        // Keep explicit edge replication for odd-sized capture below.
+        return YUVBuffer::from_bgra8_source(BgraSliceU8::new(bgra, (w, h)));
+    }
     let ew = (w + 1) & !1;
     let eh = (h + 1) & !1;
     bgra_to_i420_padded(bgra, w, h, ew, eh)
@@ -226,4 +233,51 @@ pub(crate) fn bgra_to_i420_padded(
         }
     }
     YUVBuffer::from_vec(data, ew, eh)
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::*;
+    use openh264::formats::YUVSource;
+
+    #[test]
+    fn packed_conversion_preserves_limited_range_and_chroma() {
+        // Exercise SIMD blocks and scalar tails with arbitrary alpha/chroma.
+        for (w, h) in [(2, 2), (6, 4), (34, 10), (80, 38)] {
+            let mut state = 0x463ab251u32;
+            let pixels: Vec<_> = (0..w * h * 4)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    state as u8
+                })
+                .collect();
+            let actual = bgra_to_i420(&pixels, w, h);
+            let reference = bgra_to_i420_padded(&pixels, w, h, w, h);
+            assert!(
+                actual
+                    .y()
+                    .iter()
+                    .zip(reference.y())
+                    .all(|(a, b)| a.abs_diff(*b) <= 1)
+            );
+            // The packed converter rounds 2x2 chroma averages; the original
+            // scalar path truncates them. Both use BT.601 limited coefficients.
+            for (actual, reference) in [(actual.u(), reference.u()), (actual.v(), reference.v())] {
+                assert!(
+                    actual
+                        .iter()
+                        .zip(reference)
+                        .all(|(a, b)| a.abs_diff(*b) <= 2)
+                );
+            }
+        }
+        for (bgra, expected) in [([0, 0, 0, 255], 16), ([255, 255, 255, 255], 235)] {
+            let actual = bgra_to_i420(&bgra.repeat(4), 2, 2);
+            assert!(actual.y().iter().all(|v| *v == expected));
+            assert_eq!(actual.u(), &[128]);
+            assert_eq!(actual.v(), &[128]);
+        }
+    }
 }

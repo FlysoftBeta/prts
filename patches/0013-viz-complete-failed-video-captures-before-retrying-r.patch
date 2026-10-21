@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Tue, 20 Oct 2026 10:27:50 +0800
-Subject: [PATCH 13/23] viz: complete failed video captures before retrying
+Subject: [PATCH 13/33] viz: complete failed video captures before retrying
  refresh
 
 Complete oracle accounting for failed readbacks and invalidated capture versions. Otherwise a phantom pending capture prevents passive refresh recovery on static sources. Add a regression for recovery after an empty copy result without compositor damage.

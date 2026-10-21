@@ -1,8 +1,10 @@
 # PRTS
 
 PRTS streams headless Chromium to a web viewer over WebRTC, with remote input.
-Whole-window mode includes the tab strip, omnibox and toolbar; separate flyouts
-and touch input are still being implemented. See [current status](docs/prts/STATUS.md).
+Whole-window mode includes the tab strip, omnibox and toolbar, with streamed
+app/context menus, native select popups and omnibox suggestions. Touch input,
+other flyout types and independent videos for additional windows remain gaps.
+See [current status](docs/prts/STATUS.md).
 
 ```
 patched headless Chromium --(anonymous pipes: control, input, frames)--> prtsd (Rust, windows-rs)
@@ -74,8 +76,8 @@ npm ci
 cd ..
 # Optional; the default is this patched component build:
 $env:PRTS_CHROME_PATH='C:/src/chromium/src/out/Default/chrome.exe'
-# Whole-window capture and Chrome UI input (v1 page-only compatibility is still the default):
-$env:PRTS_BROWSER_PROTOCOL='2'
+# The sample server defaults to whole-window capture and browser UI input.
+# Optional legacy page-only mode: $env:PRTS_BROWSER_PROTOCOL='1'
 node server
 ```
 
@@ -93,6 +95,7 @@ Run checks from repo root with one command:
 ```powershell
 powershell -File scripts/test.ps1              # build, Rust tests, Clippy/fmt, Node unit tests
 powershell -File scripts/test.ps1 -Suite full  # plus real Chromium, GPU/QSV, CPU/software and WebRTC gates
+powershell -File scripts/test.ps1 -Suite flyouts # app/context/select/omnibox, scale/credits and GPU composition
 ```
 
 The full suite requires the patched Chromium build, Intel hardware encoding and
@@ -104,6 +107,13 @@ production auto-capture Intel adapter check (both require built binaries).
 In a disconnected Windows
 session, `-AllowDisconnectedDesktop` permits the existing explicit override;
 foreground/cursor qualification still requires a connected desktop.
+
+The flyout suite covers app/context menus, select popups and omnibox suggestions.
+CPU/software latency is report-only; GPU/QSV retains the production budget.
+See [flyout lessons](docs/prts/lessons-flyouts.md) for measurements and limitations.
+The headless launcher rasterizes Views UI tiles
+on CPU to avoid cold UI shader stalls. Page GPU rasterization, hardware
+compositing, WebGL and shared-texture capture remain enabled.
 
 Individual browser tests (build prtsd first):
 

@@ -28,15 +28,22 @@ mod acceptance {
         next: u64,
         resources: prtsd::browser_frames::Resources,
         scenes: std::collections::BTreeMap<u64, Scene>,
+        composed: prtsd::scene_frames::Scenes,
         sequence: u64,
         faults: Vec<u32>,
         cursors: Vec<(u64, u64, u8)>,
         widget_count: u32,
+        menu_button: Option<DipRect>,
+        menu_items: Vec<(u32, DipRect)>,
     }
     impl Client {
         fn start() -> Result<Self> {
-            let path = std::env::args().nth(1).unwrap_or(DEFAULT_CHROME.into());
-            let raw = RawBrowser::launch_with_switches(Path::new(&path), &["--prts-test-hooks"])?;
+            let path = std::env::args()
+                .nth(1)
+                .or_else(|| std::env::var("PRTS_CHROME_PATH").ok())
+                .unwrap_or(DEFAULT_CHROME.into());
+            let switches = vec!["--prts-test-hooks"];
+            let raw = RawBrowser::launch_with_switches(Path::new(&path), &switches)?;
             raw.wait_startup()?;
             let mut event = raw.event.try_clone()?;
             let (tx, rx) = mpsc::channel();
@@ -72,18 +79,27 @@ mod acceptance {
             };
             let mut resources = prtsd::browser_frames::Resources::default();
             resources.set_gpu_adapter(luid);
+            resources.set_layer_alpha(true);
             let mut c = Self {
                 raw,
                 rx,
                 next: 1,
                 resources,
                 scenes: Default::default(),
+                composed: Default::default(),
                 sequence: 0,
                 faults: vec![],
                 cursors: vec![],
                 widget_count: 0,
+                menu_button: None,
+                menu_items: Vec::new(),
             };
-            hello(1, luid, if luid != 0 { 3 } else { 2 }, 2).write(&mut c.raw.command)?;
+            let inflight = if std::env::var_os("PRTS_M5_ONE_CREDIT").is_some() {
+                1
+            } else {
+                2
+            };
+            hello(1, luid, if luid != 0 { 3 } else { 2 }, inflight).write(&mut c.raw.command)?;
             let ack = c.receive()?;
             check_ack(&ack, 1)?;
             let caps = c.receive()?;
@@ -148,6 +164,9 @@ mod acceptance {
                     Err(e) => return Err(e).context("Processing v2 M4 resource/descriptor"),
                 };
                 self.raw.command.write_all(&reply.encode_version(2)?)?;
+                while let Some(frame) = self.resources.take_frame() {
+                    self.composed.push(frame)?;
+                }
                 return Ok(());
             }
             ensure!(
@@ -173,6 +192,7 @@ mod acceptance {
                         "Scene revision regressed"
                     );
                 }
+                self.composed.update(scene.clone())?;
                 self.scenes.insert(scene.window, scene);
             }
             if r.kind == WINDOW_CURSOR {
@@ -227,13 +247,7 @@ mod acceptance {
         fn frame(&mut self, window: u64) -> Result<prtsd::browser_frames::CpuFrame> {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
-                if let Some(f) = self.resources.take_frame()
-                    && self.scenes.get(&window).is_some_and(|s| {
-                        s.layers
-                            .iter()
-                            .any(|l| l.source == f.target && l.generation == f.generation)
-                    })
-                {
+                if let Some(f) = self.composed.take_window(window)? {
                     return Ok(f);
                 }
                 ensure!(
@@ -241,8 +255,11 @@ mod acceptance {
                     "Window frame timeout; scenes={:?}",
                     self.scenes
                 );
-                let r = self.receive()?;
-                self.consume(r)?;
+                match self.rx.recv_timeout(Duration::from_millis(10)) {
+                    Ok(record) => self.consume(record?)?,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
         }
         fn geometry(&mut self, id: u64) -> Result<(u32, u32, f64, Vec<DipRect>)> {
@@ -288,6 +305,12 @@ mod acceptance {
     }
     include!("support/m5_capture.rs");
     include!("support/m5_input.rs");
+    include!("support/m5_popup_fixture.rs");
+    include!("support/m5_hosts.rs");
+    include!("support/m5_flyouts.rs");
+    include!("support/m5_context.rs");
+    include!("support/m5_select.rs");
+    include!("support/m5_omnibox.rs");
     pub fn run() -> Result<()> {
         let desktop = DesktopProbe::start()?;
         let mut c = Client::start()?;
@@ -378,6 +401,35 @@ mod acceptance {
         }
         if std::env::var_os("PRTS_M5_INPUT").is_some() {
             input_gate(&mut c, recreated.id)?;
+        }
+        if std::env::var_os("PRTS_M5_HOSTS").is_some() {
+            host_gate(&mut c, recreated.id)?;
+        }
+        if std::env::var_os("PRTS_M5_FLYOUTS").is_some() {
+            let trace = std::env::var_os("PRTS_M5_TRACE").is_some();
+            let trace_request = |start: u8| {
+                let mut payload = vec![start];
+                v1::string("C:/src/chromium/prts-flyouts-copy.json", &mut payload)
+                    .expect("literal trace path");
+                payload
+            };
+            if trace {
+                c.request(0x429, trace_request(1))?;
+            }
+            let result = flyout_gate(&mut c, recreated.id, &desktop);
+            if trace {
+                c.request(0x429, trace_request(0))?;
+            }
+            result?;
+        }
+        if std::env::var_os("PRTS_M5_CONTEXT").is_some() {
+            context_gate(&mut c, recreated.id, &desktop)?;
+        }
+        if std::env::var_os("PRTS_M5_SELECT").is_some() {
+            select_gate(&mut c, recreated.id, &desktop)?;
+        }
+        if std::env::var_os("PRTS_M5_OMNIBOX").is_some() {
+            omnibox_gate(&mut c, recreated.id, &desktop)?;
         }
         for window in c.list()? {
             let mut p = window.id.to_le_bytes().to_vec();

@@ -1,0 +1,39 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Flysoft <flysoftbeta@outlook.com>
+Date: Wed, 21 Oct 2026 06:23:10 +0800
+Subject: [PATCH 27/33] WIP: reject stale root surfaces during window resize
+
+Viz can fit an old activated surface into the new capture resolution. Require matching source dimensions and full content bounds before publishing a root frame under the new scene generation. Unchanged fractional/odd-size M5 capture and input gates pass on GPU and CPU.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/chrome/browser/prts/prts_capture.cc b/chrome/browser/prts/prts_capture.cc
+index f9f5fd1f9d..85a28cbe97 100644
+--- a/chrome/browser/prts/prts_capture.cc
++++ b/chrome/browser/prts/prts_capture.cc
+@@ -156,11 +156,24 @@ class PrtsCapture::Impl {
+     void OnFrameCaptured(
+         media::mojom::VideoBufferHandlePtr data,
+         media::mojom::VideoFrameInfoPtr info,
+-        const gfx::Rect&,
++        const gfx::Rect& content_rect,
+         mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks>
+             cb) override {
+       mojo::Remote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks> done(
+           std::move(cb));
++      if (root && (info->metadata.capture.source_size != size ||
++                   content_rect != gfx::Rect(size))) {
++        // A resized root can still have its previous surface activated. Viz
++        // obeys our new resolution by scaling/letterboxing that old surface;
++        // publishing it would label old geometry with the new generation.
++        // Return the Viz lease and wait for the correctly sized root surface.
++        VLOG(1) << "PRTS reject stale root surface target=" << target
++                << " expected=" << size.ToString()
++                << " content=" << content_rect.ToString();
++        done->Done();
++        capturer->RequestRefreshFrame();
++        return;
++      }
+       if (!first_published) {
+         VLOG(1) << "PRTS first capture target=" << target
+                 << " expected=" << size.ToString()

@@ -1,6 +1,61 @@
 # PRTS status
 
 ## Current state
+- **Revised-plan MVP wrap-up qualified (2026-10-21):** working
+  app/context/select/omnibox popups, PRTS product branding, shared Chrome UA/CH
+  identity, sample-server default v2 and cleanup are ready to merge to main.
+  Touch, other flyouts and independent videos for extra windows are known gaps.
+  Lessons: [lessons-flyouts.md](lessons-flyouts.md). Identity: [mvp-identity.md](mvp-identity.md).
+- **Acceptance:** `prts-mvp-wrap47-resume-full-*` passed39/40; only synthetic
+  loss observation failed (shaper drops increased but receiver loss stayed0).
+  The unchanged synthetic gate passed its bounded rerun
+  `prts-mvp-wrap47-synthetic-repeat1.*`; no assertion or deadline was relaxed.
+  All Chromium/native lifecycle, Intel adapter/MF lifetime/latency, WebRTC,
+  identity and branding gates pass. GPU/QSV popup appearance24 samples86.25–248.13ms
+  (strict250ms); CPU/software24 samples69.55–262.33ms (report-only).
+- **Chromium:** qualified `work` is now `3337c44996`, exported33 patches.
+  Build47 retains pipe cancellation/join through BLOCK_SHUTDOWN; the original
+  native5s/RPC shutdown deadlines pass. Removed both temporary daemon workarounds.
+  Active-worker fixture closes in227ms with all11 recorded descendants exited.
+- **Next action:** commit this qualification on WIP, merge into main preserving
+  the latest main PLAN/HANDOFF and bounded Release build script, then push.
+  Start exactly one incremental `out/Release` build with final patches; the
+  initial non-component build finished exit0 at13:13:30. Package Chromium/daemon/
+  server, verify SHA256 and full40 gates from a clean extraction (including the
+  synthetic gate), then publish `v0.1.0-preview` on FlysoftBeta/prts.
+  GitHub CLI: `C:/Program Files/GitHub CLI/gh.exe` (authenticated).
+  Re-architecture, encoders and isolation follow the release in PLAN order.
+- **Qualification limits:** desktop probes verify hidden/cloaked HWNDs, unchanged
+  taskbar and cursor counters in a disconnected session; physical foreground/
+  cursor behavior and Windows10 22H2 remain unqualified.
+### Earlier WIP detail (historical next actions superseded above)
+- **Active WIP: `wip/mvp-flyouts` in both repos**, not merged into main. Chromium `0f563c2575`
+  (build30, exported27 patches) adds owned-layer scenes, fair two-resource alpha capture and correct
+  Aura mouse-release flags for Views buttons. Daemon CPU/GPU composition and512MiB bounded caches
+  are implemented. Dedicated `-Suite flyouts` PASS11 gates: ordinary checks, nine host cycles, Intel
+  GPU/reference pixels, and CPU/software + GPU/QSV with HELLO inflight1/2, each DSF1/2/1.25. Decoded
+  app-menu pixels/alpha/close restoration and actual pointer selection creating a new tab all pass;
+  unchanged100ms missing-layer/250ms appearance gates pass. New right-click context-menu gates
+  also PASS all4 transport/credit variants at3 DSFs, including decoded alpha, exact close restoration
+  and actual Reload selection rerunning page script (`prts-flyouts-context-all1-*`, Rust22 checks PASS).
+  Select-popup gates also PASS all4 variants at3 DSFs, including decoded dropdown pixels, Escape
+  restoration/no selection change and End/Enter committing blue option with decoded blue page
+  (`prts-flyouts-select-all1-*`, Rust23 checks PASS). The one-command runner includes context/select
+  variants. Other flyout types remain unqualified.
+  Launcher disables Views UI GPU raster only to avoid cold shader stalls; page GPU/composition stay
+  enabled. Full regression29 passed24/26 gates; two M5 resize failures came from Viz letterboxing
+  an old root surface into new dimensions. Build30 rejects stale source sizes/content bounds;
+  unchanged M5 GPU/CPU capture/input now PASS. All4 app-menu variants, production Intel auto GPU
+  (decoded WebGL/video, QSV zero-copy) and v2 CPU WebRTC reruns PASS build30. Ineffective all-stages
+  launcher comparison removed. Active uncommitted omnibox gates now PASS4 transport/credit variants
+  at3DSFs: decoded appearance (CPU max244.32ms), exact close restoration, complete selected-row
+  containment and real pointer navigation. Build40 has read-only native/WebUI geometry probes and
+  first Aura poll as posted task (all routing/ACK/state checks retained). Software encoding uses
+  existing packed-BGRA SIMD for even sizes and up to4 workers; odd/MF padding unchanged. Rust checks
+  PASS; full38-gate regression40 and GN include check running before WIP checkpoint. Other flyouts
+  remain next. Exact resume point:
+  [mvp-flyouts-wip.md](mvp-flyouts-wip.md), latest journal-mvp.md. Source `work` remains5a7769bea8;
+  current chrome binary is WIP. No full flyout signoff.
 - **Next action: continue MVP (PLAN priority 2), M5b steps 4-5**: host-family tracking and GPU/CPU
   flyout composition/input (menus, context menus, omnibox dropdown, bubbles, tooltips, dialogs,
   permission/select/extension popups). Then step 6 per-window streams, touch input and remaining cleanup.

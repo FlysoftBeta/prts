@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Tue, 20 Oct 2026 04:21:01 +0800
-Subject: [PATCH 02/23] Tighten PRTS target creation and bounded string parsing
+Subject: [PATCH 02/33] Tighten PRTS target creation and bounded string parsing
 
 Use explicit WebContents conversion for NavigateParams and retain generation 1 for targets entering their first stream.
 

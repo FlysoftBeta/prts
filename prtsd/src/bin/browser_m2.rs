@@ -248,7 +248,8 @@ mod acceptance {
     }
 
     fn malformed_inputs() -> Result<()> {
-        let mut raw = RawBrowser::launch(std::path::Path::new(DEFAULT_CHROME))?;
+        let path = std::env::var("PRTS_CHROME_PATH").unwrap_or_else(|_| DEFAULT_CHROME.into());
+        let mut raw = RawBrowser::launch(std::path::Path::new(&path))?;
         raw.wait_startup()?;
         let mut reader = raw.event.try_clone()?;
         let (tx, rx) = std::sync::mpsc::channel();
@@ -474,10 +475,9 @@ mod acceptance {
         }
         let child = Server::start(true, 0)?;
         let main = Server::start(false, child.port)?;
-        let raw = RawBrowser::launch_with_switches(
-            std::path::Path::new(DEFAULT_CHROME),
-            &["--site-per-process"],
-        )?;
+        let path = std::env::var("PRTS_CHROME_PATH").unwrap_or_else(|_| DEFAULT_CHROME.into());
+        let raw =
+            RawBrowser::launch_with_switches(std::path::Path::new(&path), &["--site-per-process"])?;
         let b = Browser::connect(raw)?;
         let target = b.create(
             &format!("http://127.0.0.1:{}/", main.port),

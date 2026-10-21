@@ -14,6 +14,9 @@ try {
   args = JSON.parse(process.env.PRTSD_ARGS || '[]');
   if (!Array.isArray(args) || args.some(arg => typeof arg !== 'string')) throw new Error();
 } catch { throw new Error('PRTSD_ARGS must be a JSON string array'); }
+// The sample serves the complete browser UI. Keep v1 available as an explicit
+// page-only compatibility option; native v1 acceptance drivers remain separate.
+process.env.PRTS_BROWSER_PROTOCOL ??= '2';
 const daemon = new Daemon(process.env.PRTSD_PATH || path.join(root, 'prtsd/target/release/prtsd.exe'), args, root);
 const clients = new Set();
 const sessions = new Map();
