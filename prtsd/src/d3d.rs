@@ -231,11 +231,27 @@ impl Device {
         }
     }
     pub fn nv12(&self, texture: &ID3D11Texture2D, w: u32, h: u32) -> Result<ID3D11Texture2D> {
+        self.nv12_aligned(texture, w, h, 4)
+    }
+    pub fn nv12_aligned(
+        &self,
+        texture: &ID3D11Texture2D,
+        w: u32,
+        h: u32,
+        alignment: u32,
+    ) -> Result<ID3D11Texture2D> {
+        ensure!(
+            alignment == 4 || alignment == 16,
+            "unsupported NV12 alignment"
+        );
         unsafe {
-            // Intel's DXGI input requires both surface/media dimensions to be
-            // multiples of four. Replicate edges before conversion; never scale
+            // MF uses four-pixel surfaces and oneVPL uses sixteen. Replicate
+            // edges before conversion; never scale
             // the visible image or read pixels back to the CPU.
-            let (sw, sh) = ((w + 3) & !3, (h + 3) & !3);
+            let (sw, sh) = (
+                (w + alignment - 1) & !(alignment - 1),
+                (h + alignment - 1) & !(alignment - 1),
+            );
             let mut source = D3D11_TEXTURE2D_DESC::default();
             texture.GetDesc(&mut source);
             ensure!(

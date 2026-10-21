@@ -265,12 +265,18 @@ ws.onmessage = e => {
   }
 };
 
+$('create').elements.encoder.onchange = e => {
+  const refresh = $('create').elements.intra_refresh;
+  refresh.disabled = e.target.value !== 'onevpl';
+  if (refresh.disabled) refresh.checked = false;
+};
 $('create').onsubmit = e => {
   e.preventDefault();
   run(async () => {
     const form = e.target;
     const result = await rpc('instance.create', { options: { initial_url: form.elements.url.value,
-      size: sizeFrom(form), source: form.elements.source.value, encoder: form.elements.encoder.value } });
+      size: sizeFrom(form), source: form.elements.source.value, encoder: form.elements.encoder.value,
+      intra_refresh: form.elements.intra_refresh.checked } });
     instances.set(result.instance.instance_id, result.instance); renderInstances();
     await selectInstance(result.instance.instance_id);
   })();

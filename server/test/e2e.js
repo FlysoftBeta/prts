@@ -9,7 +9,7 @@ import puppeteer from 'puppeteer-core';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const encoder = process.env.PRTS_TEST_ENCODER || 'software';
-assert.ok(['auto', 'qsv', 'software'].includes(encoder), 'Invalid PRTS_TEST_ENCODER');
+assert.ok(['auto', 'qsv', 'onevpl', 'mf', 'software'].includes(encoder), 'Invalid PRTS_TEST_ENCODER');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function deadline(promise, ms, description) {
   let timer;

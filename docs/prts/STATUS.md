@@ -47,9 +47,16 @@
   rejection, mismatched qualification rejection and remote hash verification
   pass. Publishing twice is idempotent: skips all assets, preserves pre-release.
   Source is Chromium `c14260952f`, 34 patches; release fix main `56b6cc1`.
-- **Next action:** merge and push qualified publisher tools, then begin direct
-  oneVPL QSV on matching `wip/e1-onevpl` branches. Keep MF fallback, verify
-  D3D11 zero-copy and low-bitrate VBV behavior, benchmark into encoder-bench.md.
+- **E1 active:** publisher tools merged/pushed on main `ef8dc29`; matching
+  `wip/e1-onevpl` branches contain unfinished encoder work, not on main.
+  Official libvpl 2.17 dispatcher is statically linked; Intel runtime API1.35
+  accepts shared D3D11. Native CPU/GPU900 immediate frames each, bitrate/IDR
+  gates,20 stable239-handle cycles,18 odd/edge variants and forced oneVPL GPU
+  window-WebRTC pass. New auto/QSV selector prefers oneVPL with MF/software
+  recovery; forced oneVPL forbids fallback. Clippy style correction pending
+  recheck; CPU/live recovery, MF comparison and full regression remain.
+- **Next action:** finish E1 checks and MF versus oneVPL benchmark in
+  encoder-bench.md; do not merge before all required gates pass.
   Isolation, v0.2.0, patch re-architecture, NVENC, then flyout latency follow
   the newest PLAN order. Release notes:
   [release-v0.1.0-preview.md](release-v0.1.0-preview.md).

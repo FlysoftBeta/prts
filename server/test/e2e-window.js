@@ -36,6 +36,10 @@ const source=document.createElement('canvas');source.width=128;source.height=128
   for(const [name,value] of Object.entries({source:'chromium',encoder:process.env.PRTS_TEST_ENCODER||'qsv',url:`http://127.0.0.1:${fixture.address().port}/`,width:960,height:640})) {
     await page.$eval(`#create [name=${name}]`,(e,value)=>e.value=value,String(value));
   }
+  if(process.env.PRTS_TEST_INTRA_REFRESH==='1') {
+    await page.select('#create [name=encoder]','onevpl');
+    await page.click('#create [name=intra_refresh]');
+  }
   await page.click('#create button');
   await page.waitForFunction(()=>document.querySelector('video').videoWidth===960,{timeout:320000});
   const rois=await until(()=>page.$eval('video',v=>{
@@ -61,6 +65,7 @@ const source=document.createElement('canvas');source.width=128;source.height=128
   console.log('M5 decoded WebGL and both animated HTML video colors');
   await page.waitForFunction(()=>{try {const s=JSON.parse(document.querySelector('#encoder').textContent);return s.frames.backend && s.encoder.input_path;}catch{return false;}});
   const stats=JSON.parse(await page.$eval('#encoder',e=>e.textContent));
+  if(process.env.PRTS_TEST_INTRA_REFRESH==='1') assert.equal(stats.encoder.intra_refresh,true);
   if(process.env.PRTS_FRAME_MODE==='cpu')assert.match(stats.frames.backend,/cpu-section/);
   else {assert.match(stats.frames.backend,/gpu-texture/);assert.equal(stats.encoder.input_path,'d3d11-zero-copy');}
   assert.equal(await page.$eval('#error',e=>e.textContent),'');
@@ -104,6 +109,7 @@ const source=document.createElement('canvas');source.width=128;source.height=128
     const oddStats=JSON.parse(await page.$eval('#encoder',e=>e.textContent));
     if(process.env.PRTS_TEST_ENCODER!=='software') {
       assert.match(oddStats.encoder.name,/Quick Sync/);
+      if(process.env.PRTS_TEST_ENCODER==='onevpl') assert.match(oddStats.encoder.name,/oneVPL/);
       assert.equal(oddStats.encoder.input_path,process.env.PRTS_FRAME_MODE==='cpu'?'cpu-nv12':'d3d11-zero-copy');
     }
     console.log(`PASS odd WebRTC ${width}x${height}@${dpr}: true ${pw}x${ph}, ${oddStats.encoder.name}/${oddStats.encoder.input_path}, frontend crop ${JSON.stringify(crop)}`);

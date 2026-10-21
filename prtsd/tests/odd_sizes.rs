@@ -104,3 +104,43 @@ fn hardware_fractional_and_odd_sizes() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires Intel oneVPL hardware; run --release --ignored --nocapture"]
+fn onevpl_fractional_and_odd_sizes() -> anyhow::Result<()> {
+    use prtsd::{d3d, vpl_encoder::VplEncoder};
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+    for (w, h) in SIZES {
+        for gpu_input in [false, true] {
+            let mut encoder = VplEncoder::new(w, h, 4_000_000, 30)?;
+            let pixels = pixels(w, h);
+            let gpu = d3d::shared()?;
+            let texture = {
+                let g = gpu.lock().unwrap();
+                let texture = g.texture(w, h, DXGI_FORMAT_B8G8R8A8_UNORM, false)?;
+                unsafe {
+                    g.context.UpdateSubresource(
+                        &texture,
+                        0,
+                        None,
+                        pixels.as_ptr().cast(),
+                        w * 4,
+                        0,
+                    );
+                }
+                texture
+            };
+            let frame = d3d::Frame { texture, gpu };
+            eprintln!("oneVPL {w}x{h} gpu={gpu_input}");
+            check_decode(w, h, |key| {
+                if gpu_input {
+                    encoder.encode_texture(&frame, key)
+                } else {
+                    encoder.encode(&pixels, w as usize, h as usize, key)
+                }
+            })?;
+        }
+    }
+    Ok(())
+}

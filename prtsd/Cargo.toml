@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 default-run = "prtsd"
 
+[build-dependencies]
+cc = "1"
+
 [dependencies]
 anyhow = "1.0.104"
 async-trait = "0.1"

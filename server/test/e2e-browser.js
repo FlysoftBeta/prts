@@ -164,8 +164,10 @@ $daemonCpu=(Get-Process -Id $rootPid).TotalProcessorTime.TotalSeconds
     if (mode === 'cpu') assert.match(stats, /cpu-section/);
     else {
       assert.match(stats, /gpu-texture/);
-      assert.match(stats, process.env.PRTS_TEST_ENCODER === 'qsv' ? /d3d11-zero-copy/ : /staging/);
+      const hardware = ['auto','qsv','onevpl','mf'].includes(process.env.PRTS_TEST_ENCODER);
+      assert.match(stats, hardware ? /d3d11-zero-copy/ : /staging/);
     }
+    if (process.env.PRTS_TEST_ENCODER === 'onevpl') assert.match(stats, /oneVPL/);
     assert.equal(await p.$eval('#error',e=>e.textContent),'');
   }
   await b.bringToFront();

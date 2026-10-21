@@ -17,16 +17,21 @@ pub trait VideoEncoder {
     ) -> anyhow::Result<Vec<u8>>;
 }
 
-/// CPU/GPU frame adapter with hardware selection and sticky software recovery.
+/// CPU/GPU frame adapter with oneVPL -> MF -> software recovery.
 pub struct Selected {
     backend: Backend,
     bps: u32,
     fps: u32,
+    width: u32,
+    height: u32,
+    strict_vpl: bool,
 }
 enum Backend {
     Software(Box<Software>),
     #[cfg(windows)]
     Hardware(crate::mf_encoder::MfEncoder),
+    #[cfg(windows)]
+    OneVpl(crate::vpl_encoder::VplEncoder),
 }
 impl Selected {
     pub fn new(
@@ -36,19 +41,58 @@ impl Selected {
         bps: u32,
         fps: u32,
     ) -> anyhow::Result<(Self, Option<String>)> {
+        Self::new_with_intra_refresh(preference, w, h, bps, fps, false)
+    }
+    pub fn new_with_intra_refresh(
+        preference: &str,
+        w: u32,
+        h: u32,
+        bps: u32,
+        fps: u32,
+        intra_refresh: bool,
+    ) -> anyhow::Result<(Self, Option<String>)> {
+        anyhow::ensure!(
+            !intra_refresh || preference == "onevpl",
+            "intra refresh requires explicit oneVPL"
+        );
+        anyhow::ensure!(
+            matches!(preference, "auto" | "qsv" | "onevpl" | "mf" | "software"),
+            "unsupported encoder preference"
+        );
+        let selected = |backend| Self {
+            backend,
+            bps,
+            fps,
+            width: w,
+            height: h,
+            strict_vpl: preference == "onevpl",
+        };
         let mut warning = None;
+        #[cfg(windows)]
+        if matches!(preference, "auto" | "qsv" | "onevpl") {
+            match crate::vpl_encoder::VplEncoder::new_with_intra_refresh(
+                w,
+                h,
+                bps,
+                fps,
+                intra_refresh,
+            ) {
+                Ok(hw) => return Ok((selected(Backend::OneVpl(hw)), None)),
+                Err(error) if preference == "onevpl" => {
+                    return Err(error.context("explicit oneVPL initialization"));
+                }
+                Err(error) => {
+                    warning = Some(format!(
+                        "oneVPL initialization failed: {error:#}; trying Media Foundation"
+                    ))
+                }
+            }
+        }
         #[cfg(windows)]
         if preference != "software" {
             match crate::mf_encoder::MfEncoder::new(w, h, bps, fps) {
                 Ok(hw) => {
-                    return Ok((
-                        Self {
-                            backend: Backend::Hardware(hw),
-                            bps,
-                            fps,
-                        },
-                        None,
-                    ));
+                    return Ok((selected(Backend::Hardware(hw)), warning));
                 }
                 Err(e) => {
                     warning = Some(format!(
@@ -63,11 +107,7 @@ impl Selected {
             warning = Some("Media Foundation requires Windows; falling back to software".into());
         }
         Ok((
-            Self {
-                backend: Backend::Software(Box::new(Software::new(bps, fps)?)),
-                bps,
-                fps,
-            },
+            selected(Backend::Software(Box::new(Software::new(bps, fps)?))),
             warning,
         ))
     }
@@ -79,6 +119,7 @@ impl Selected {
     ) -> anyhow::Result<Vec<u8>> {
         match &mut self.backend {
             Backend::Hardware(hw) => hw.encode_texture(frame, key),
+            Backend::OneVpl(hw) => hw.encode_texture(frame, key),
             Backend::Software(sw) => {
                 let gpu = frame.gpu.lock().unwrap();
                 let pixels = gpu.readback(&frame.texture)?;
@@ -95,6 +136,23 @@ impl Selected {
             Backend::Software(_) => "software/openh264",
             #[cfg(windows)]
             Backend::Hardware(hw) => hw.name(),
+            #[cfg(windows)]
+            Backend::OneVpl(hw) => hw.name(),
+        }
+    }
+    pub fn preference(&self) -> &'static str {
+        match &self.backend {
+            Backend::Software(_) => "software",
+            #[cfg(windows)]
+            Backend::Hardware(_) => "mf",
+            #[cfg(windows)]
+            Backend::OneVpl(_) => {
+                if self.strict_vpl {
+                    "onevpl"
+                } else {
+                    "qsv"
+                }
+            }
         }
     }
     pub fn set_bitrate(&mut self, bps: u32) -> anyhow::Result<()> {
@@ -102,11 +160,31 @@ impl Selected {
             Backend::Software(sw) => sw.set_bitrate(bps, self.fps)?,
             #[cfg(windows)]
             Backend::Hardware(hw) => hw.set_bitrate(bps)?,
+            #[cfg(windows)]
+            Backend::OneVpl(hw) => hw.set_bitrate(bps)?,
         }
         self.bps = bps;
         Ok(())
     }
     pub fn fallback(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.strict_vpl,
+            "explicit oneVPL backend failed; fallback disabled"
+        );
+        #[cfg(windows)]
+        if matches!(self.backend, Backend::OneVpl(_)) {
+            match crate::mf_encoder::MfEncoder::new(self.width, self.height, self.bps, self.fps) {
+                Ok(hw) => {
+                    self.backend = Backend::Hardware(hw);
+                    return Ok(());
+                }
+                Err(error) => {
+                    eprintln!("prtsd: oneVPL recovery MF initialization failed: {error:#}")
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = (self.width, self.height);
         self.backend = Backend::Software(Box::new(Software::new(self.bps, self.fps)?));
         Ok(())
     }
@@ -117,6 +195,8 @@ impl VideoEncoder for Selected {
             Backend::Software(sw) => sw.encode(bgra, w, h, key),
             #[cfg(windows)]
             Backend::Hardware(hw) => hw.encode(bgra, w, h, key),
+            #[cfg(windows)]
+            Backend::OneVpl(hw) => hw.encode(bgra, w, h, key),
         }
     }
 }

@@ -429,7 +429,7 @@ InstanceOptions fields: source=`"synthetic"|"chromium"` (default synthetic),
 initial_url:string (default about:blank), size:Size (default 1280x720,dpr=1),
 fps?:number (synthetic production ceiling, default 30; 1..60 in Phase 1;
 effective value and supported range are reported in options/capabilities),
-encoder=`"auto"|"qsv"|"software"` (default auto), bitrate_caps=
+encoder=`"auto"|"qsv"|"onevpl"|"mf"|"software"` (default auto), bitrate_caps=
 `{min_bps?:number=100000,max_bps?:number=4000000}` with 1<=min<=max<=100000000,
 isolation_profile:string (default `"job"`). Auto prefers QSV, then software;
 explicit qsv attempts the hardware H.264 MFT too. Hardware initialization or

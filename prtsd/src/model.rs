@@ -122,6 +122,7 @@ pub struct Options {
     pub initial_url: String,
     pub size: Size,
     pub encoder: String,
+    pub intra_refresh: bool,
     pub bitrate_caps: Caps,
     pub isolation_profile: String,
     pub fps: u32,
@@ -148,10 +149,16 @@ impl Options {
         let encoder = v
             .get("encoder")
             .map_or(Ok("auto"), |_| string(v, "encoder"))?;
-        if !matches!(encoder, "auto" | "qsv" | "software") {
+        if !matches!(encoder, "auto" | "qsv" | "onevpl" | "mf" | "software") {
             return Err(Error::new(
                 "unsupported",
-                "Encoder must be auto, qsv, or software",
+                "Encoder must be auto, qsv, onevpl, mf, or software",
+            ));
+        }
+        let intra_refresh = boolean(v, "intra_refresh", false)?;
+        if intra_refresh && encoder != "onevpl" {
+            return Err(invalid(
+                "intra_refresh requires the explicit onevpl encoder",
             ));
         }
         let profile = v
@@ -191,6 +198,7 @@ impl Options {
                 .transpose()?
                 .unwrap_or_default(),
             encoder: encoder.into(),
+            intra_refresh,
             bitrate_caps: Caps {
                 min_bps: min,
                 max_bps: max,

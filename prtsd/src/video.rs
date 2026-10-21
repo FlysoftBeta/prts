@@ -72,6 +72,7 @@ impl Video {
         let encoder_name = Arc::new(Mutex::new("initializing".to_string()));
         let name = encoder_name.clone();
         let preference = options.encoder.clone();
+        let intra_refresh = options.intra_refresh;
         let source_name = options.source.clone();
         let initial_size = options.size.device();
         let initial_bps = options.bitrate_caps.max_bps;
@@ -101,12 +102,13 @@ impl Video {
         };
         let worker = std::thread::spawn(move || {
             let mut encoded_id = 0;
-            let (mut encoder, warning) = match Selected::new(
+            let (mut encoder, warning) = match Selected::new_with_intra_refresh(
                 &preference,
                 initial_size.0,
                 initial_size.1,
                 initial_bps,
                 initial_fps,
+                intra_refresh,
             ) {
                 Ok(result) => result,
                 Err(e) => {
@@ -171,16 +173,13 @@ impl Video {
                 let mut encode_ms = 0.0;
                 let result = (|| -> anyhow::Result<Vec<u8>> {
                     if (config.0, config.1, config.3) != (w, h, fps) {
-                        let (new, warning) = Selected::new(
-                            if hardware_disabled {
-                                "software"
-                            } else {
-                                &preference
-                            },
+                        let (new, warning) = Selected::new_with_intra_refresh(
+                            encoder.preference(),
                             w,
                             h,
                             bps,
                             fps,
+                            intra_refresh,
                         )?;
                         encoder = new;
                         if let Some(warning) = warning {
@@ -189,13 +188,21 @@ impl Video {
                         hardware_disabled = encoder.name() == "software/openh264";
                         config = cfg;
                     } else if config.2 != bps {
-                        if let Err(e) = encoder.set_bitrate(bps) {
-                            m.lock().unwrap().warnings.push(format!(
-                                "Hardware bitrate change failed: {e:#}; falling back to software"
-                            ));
-                            encoder.fallback()?;
-                            encoder.set_bitrate(bps)?;
-                            hardware_disabled = true;
+                        for attempt in 0..3 {
+                            match encoder.set_bitrate(bps) {
+                                Ok(()) => break,
+                                Err(error) => {
+                                    if attempt == 2 {
+                                        return Err(error);
+                                    }
+                                    encoder.fallback()?;
+                                    hardware_disabled = encoder.name() == "software/openh264";
+                                    m.lock().unwrap().warnings.push(format!(
+                                        "Encoder bitrate change failed: {error:#}; using {}",
+                                        encoder.name()
+                                    ));
+                                }
+                            }
                         }
                         config.2 = bps;
                     }
@@ -209,13 +216,17 @@ impl Video {
                     };
                     #[cfg(not(windows))]
                     let mut result = encoder.encode(&bgra, w as usize, h as usize, force_key);
-                    if result.is_err() && !hardware_disabled {
-                        m.lock().unwrap().warnings.push(format!(
-                            "Hardware encode failed: {:#}; falling back to software",
-                            result.as_ref().unwrap_err()
-                        ));
+                    for _ in 0..2 {
+                        if result.is_ok() || hardware_disabled {
+                            break;
+                        }
+                        let error = format!("{:#}", result.as_ref().unwrap_err());
                         encoder.fallback()?;
-                        hardware_disabled = true;
+                        hardware_disabled = encoder.name() == "software/openh264";
+                        m.lock().unwrap().warnings.push(format!(
+                            "Hardware encode failed: {error}; using {}",
+                            encoder.name()
+                        ));
                         #[cfg(windows)]
                         {
                             result = if let Some(texture) = &captured.texture {

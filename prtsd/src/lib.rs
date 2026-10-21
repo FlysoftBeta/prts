@@ -19,4 +19,6 @@ pub mod scene_frames;
 pub mod transport;
 pub mod video;
 pub mod viewer;
+#[cfg(windows)]
+pub mod vpl_encoder;
 pub mod window_wire;

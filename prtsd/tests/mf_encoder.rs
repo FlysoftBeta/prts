@@ -190,7 +190,7 @@ fn hardware_live_bitrate_cap_is_effective() -> anyhow::Result<()> {
     };
     let target = Target::new(1, "about:blank".into(), Size::default(), true);
     let (w, h) = target.size.device();
-    let (mut encoder, warning) = prtsd::encoder::Selected::new("qsv", w, h, 4_000_000, 30)?;
+    let (mut encoder, warning) = prtsd::encoder::Selected::new("mf", w, h, 4_000_000, 30)?;
     assert!(warning.is_none(), "hardware must initialize");
     let mut decoder = openh264::decoder::Decoder::new()?;
     let (mut baseline_bytes, mut capped_bytes, mut capped_frames) = (0usize, 0usize, 0);

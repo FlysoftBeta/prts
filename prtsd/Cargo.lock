@@ -1069,6 +1069,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "cc",
  "font8x8",
  "openh264",
  "openh264-sys2",
