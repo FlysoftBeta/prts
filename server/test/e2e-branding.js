@@ -19,14 +19,18 @@ test('PRTS standard branding in executable resources, version and About UI', {ti
   const label=await page.$eval('tr .label',e=>e.textContent.trim());
   assert.equal(label,'PRTS');
   await page.goto('chrome://settings/help');
-  await page.waitForFunction(()=>{
-    function text(root){return [...root.childNodes].map(n=>n.nodeType===Node.TEXT_NODE?n.textContent:n.shadowRoot?text(n.shadowRoot):text(n)).join(' ');}
-    return text(document).includes('About PRTS');
-  });
-  const about=await page.evaluate(()=>{
-    function text(root){return [...root.childNodes].map(n=>n.nodeType===Node.TEXT_NODE?n.textContent:n.shadowRoot?text(n.shadowRoot):text(n)).join(' ');}
-    return text(document.querySelector('settings-ui'));
-  });
-  assert.match(about,/About PRTS/);assert.match(about,/PRTS/);
-  console.log('BRANDING '+JSON.stringify({resource,versionLabel:label,about:true}));
+  function aboutLabels() {
+    function find(root,selector) {
+      const match=root.querySelector(selector);if(match)return match;
+      for(const el of root.querySelectorAll('*'))if(el.shadowRoot){const found=find(el.shadowRoot,selector);if(found)return found;}
+      return null;
+    }
+    const about=find(document,'settings-about-page');if(!about)return false;
+    const root=about.shadowRoot||about, product=find(root,'.product-title'), section=find(root,'settings-section');
+    return product && section ? {product:product.textContent.trim(),heading:section.getAttribute('page-title')} : false;
+  }
+  await page.waitForFunction(aboutLabels);
+  const about=await page.evaluate(aboutLabels);
+  assert.equal(about.product,'PRTS');assert.equal(about.heading,'About PRTS');
+  console.log('BRANDING '+JSON.stringify({resource,versionLabel:label,about}));
 });

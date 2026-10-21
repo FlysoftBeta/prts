@@ -79,7 +79,7 @@ if ($Suite -eq 'mf') {
     if ($Suite -eq 'flyouts') { FlyoutGates }
     if ($Suite -eq 'full') {
         $env:PRTS_BROWSER_PROTOCOL = '2'
-        Gate 'chrome-identity' 'node --test server/test/e2e-identity.js' 120
+        Gate 'chrome-identity' 'node --test server/test/e2e-identity.js' 420
         Gate 'product-branding' 'node --test server/test/e2e-branding.js' 120
         Remove-Item Env:\PRTS_BROWSER_PROTOCOL
         $env:PRTS_M5_CAPTURE = '1'

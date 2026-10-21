@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Flysoft <flysoftbeta@outlook.com>
 Date: Wed, 21 Oct 2026 11:05:15 +0800
-Subject: [PATCH 29/31] WIP: brand PRTS resources and preserve Chrome web
+Subject: [PATCH 29/33] WIP: brand PRTS resources and preserve Chrome web
  identity
 
 Use standard Chromium BRANDING and branded strings for the application. Keep Windows web identity independent: omit the headless UA token and pass Google Chrome through the existing Client Hints GREASE/permutation generator shared by pages and workers. Runtime identity and product gates are pending.

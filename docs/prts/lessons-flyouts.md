@@ -51,7 +51,23 @@ flags delivered press/release events but Views correctly rejected the click.
 - A script-ready OOPIF fixture was not necessarily painted. Static loopback
   fixtures plus a real base-pixel witness avoid false restoration failures.
 
+## Shutdown qualification
+
+A full regression caught a lifecycle failure that popup-only checks missed:
+Chromium acknowledged shutdown, but its process wait never completed. Pipe
+cancellation/join was posted with CONTINUE_ON_SHUTDOWN. Using BLOCK_SHUTDOWN
+keeps that task alive through thread-pool teardown. Build47 passes the unchanged
+raw startup/shutdown probe. Temporary daemon grace/terminal-status workarounds
+were removed; the production identity fixture then closed in227ms with all11
+recorded browser descendants exited, within the original control deadline.
+Full native and worker-close gates remain mandatory before release.
+
 ## Measurements and latency policy
+
+Build47 full-suite popup matrix passes all16 gates. Across24 GPU/QSV samples,
+appearance is86.25-248.13ms under the strict250ms limit. Across24 CPU/software
+samples it is69.55-262.33ms (report-only). No compiler ran during this suite.
+Evidence: `C:/src/chromium/prts-mvp-wrap47-resume-full-*`.
 
 Historical build40/Rust37 omnibox matrix passed all four transport/credit
 variants at all three scales; the slowest measured CPU/software decoded

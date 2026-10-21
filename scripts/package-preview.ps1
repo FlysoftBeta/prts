@@ -69,8 +69,10 @@ Copy-Item -LiteralPath (Join-Path $bundle 'QUICKSTART.txt') -Destination $browse
 Copy-Item -LiteralPath 'C:\src\chromium\src\LICENSE' -Destination (Join-Path $browser 'LICENSE.chromium')
 $revision = & git -C $repo rev-parse HEAD
 $pin = (Get-Content (Join-Path $repo 'PIN') -Raw).Trim()
-"version=$Version`ninfra=$revision`nchromium_pin=$pin" | Set-Content -Encoding UTF8 (Join-Path $bundle 'BUILD.txt')
+$chromiumHead = & git -C 'C:\src\chromium\src' rev-parse HEAD
+"version=$Version`ninfra=$revision`nchromium_pin=$pin`nchromium_patch_head=$chromiumHead" | Set-Content -Encoding UTF8 (Join-Path $bundle 'BUILD.txt')
 Copy-Item -LiteralPath (Join-Path $bundle 'BUILD.txt') -Destination $browser
+Copy-Item -LiteralPath (Join-Path $ChromeDir 'args.gn') -Destination (Join-Path $browser 'BUILD-ARGS.gn')
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 foreach ($dir in @($browser,$bundle)) {
     $zip = "$dir-$Version.zip"

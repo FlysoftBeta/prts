@@ -1,137 +1,26 @@
-# M5b flyouts WIP: resume here
+# MVP flyouts: qualification and resume
 
-Both repositories use `wip/mvp-flyouts`. Nothing from this unfinished feature
-has merged to main. Qualified Chromium `work` stays `5a7769bea8` (23 baseline
-patches). `out/Default` is being rebuilt as **WIP wrap45**; do not launch its
-partially replaced component files until the build exits successfully. The
-baseline identity report was collected from build40 before rebuilding.
+The revised PLAN accepts the four qualified popup families for the preview.
+All native gates pass on Chromium `3337c44996`, now promoted to `work` and
+exported as33 patches. Component build47 is qualified. The original native5s
+shutdown/RPC deadlines pass after pipe cancellation/join uses BLOCK_SHUTDOWN;
+both temporary daemon workarounds were removed.
 
-## Current checkpoint (2026-10-21)
+Full acceptance prefix: `C:/src/chromium/prts-mvp-wrap47-resume-full`.
+39/40 passed initially; synthetic receiver loss stayed0 despite shaper drops.
+The unchanged gate passes `prts-mvp-wrap47-synthetic-repeat1.*`. No assertions
+were relaxed. GPU/QSV popup appearance86.25–248.13ms; CPU/software69.55–262.33ms
+(report-only). Worker identity fixture closes227ms, all11 descendants exited.
 
-### Revised-plan wrap-up (supersedes the older backlog below)
+Next: commit/merge qualified wrap-up to main, push, then one incremental
+Release build. The initial non-component build completed exit0 at13:13:30.
+Use scripts/package-preview.ps1 and scripts/verify-preview.ps1; require the full
+clean-extract suite before publishing the preview. Detailed state is STATUS.md.
 
-PLAN.md revised07:30 accepts the four working flyout types; do not extend to
-other flyouts before the preview release. Current edits apply standard PRTS
-BRANDING/branded strings, a small shared Windows UA/Client Hints hook, four
-missing direct GN Views dependencies, and CPU/software report-only latency.
-GPU/QSV still enforces250ms. Lessons are in lessons-flyouts.md. Touch and
-independent extra-window tracks remain known gaps.
-
-Bounded Default build: `C:/src/chromium/prts-mvp-wrap45.*` (7200s).
-Wrap44 parsed the full graph in~10min and completed113 actions; UA constant-false
-Windows branch failed unreachable-code warnings. It now uses a build guard.
-About7k branding-dependent actions remain; preserve outputs and rebuild incrementally.
-Earlier41/42/43 were stopped during slow preparation, preserving all state.
-Profiling shows main waiting on full Ninja manifest parsing, with thousands of
-Windows EvalSymlinks/FindFirstFile tasks; queued-task count is decreasing. The
-fs-close log was the temporary manifest-checker, not a main HashFS-close stall.
-Temporary profiling `.sisorc` has been removed; no profiling flags remain for
-future builds. Stack evidence: `C:/src/chromium/prts-siso-debug/`.
-Quick suite: `prts-mvp-wrap41-quick-*` PASS5/5.
-GN check: `prts-mvp-wrap41-gn.*` PASS.
-Baseline identity gate40 FAILS old UA/CH as expected, all4 report contexts work.
-Chromium WIP `92256ff842` exported31 patches; infra checkpoint `dda95d3` pushed.
-New `server/test/e2e-identity.js` uses the production daemon/pipe launcher and
-HTTP reports from page/dedicated/shared/service workers; full suite includes it.
-Existing Release build is still running (siso PID10124, about38k/70k steps);
-never start another Release ninja concurrently. Final incremental Release build
-and clean-extract verification must precede publishing.
-
-Next: inspect these exits; run fixed-binary identity and full acceptance matrix;
-fix genuine failures; commit/export WIP then merge only qualified work to main,
-update STATUS and push. Release follows. Historical notes below retain evidence.
-
-### Active omnibox follow-on after select checkpoint1e9b856
-
-Current incremental binary is build40. Chromium HEAD remains0f563c2575 with
-uncommitted changes in `prts_window_registry.cc` (test-only native/WebUI row
-geometry) and `content/browser/renderer_host/aura_input_barrier.cc` (first poll
-posted without a timer; all pending-router/ACK/visual-state checks retained).
-Infra adds `m5_omnibox.rs`, `m5_popup_fixture.rs`, software packed-BGRA SIMD
-conversion for even sizes and up to4 available CPU encoder workers. Odd edge
-replication and MF padded conversion stay unchanged. Rust37 checks PASS,
-including a BT.601/chroma/SIMD-tail regression.
-
-**Omnibox-all2 PASS4/4** CPU/software+GPU/QSV xHELLO1/2, each3DSFs, with decoded
-appearance (CPU max244.32ms against unchanged250ms), exact close restoration,
-full selected-row stream containment and real pointer navigation to decoded
-blue page. The runner now includes all app/context/select/omnibox combinations
-(23 dedicated-suite gates including ordinary/host/GPU-reference checks).
-
-Exact next step: inspect bounded full38-gate regression currently running at
-`C:/src/chromium/prts-flyouts-regression40-*` and GN include check
-`C:/src/chromium/prts-flyouts-includes40-*`; fix failures without relaxing gates.
-Then commit/export Chromium WIP, commit/push infra WIP, and continue dialogs,
-permission/bubble/profile/extension popups, tooltip and nested-edge menus.
-
-Probe invariants:0x42c native selected-row marker0x7fff0001;0x42b WebUI shadow-DOM
-read-only geometry. Use non-creating `WebView::web_contents()`; GetWebContents()
-creates/attaches empty content and corrupts hidden popup state. DOM geometry
-retains fractional DIP while native bounds round; readiness permits <1DIP
-rounding but returns the complete DOM row for exact driver containment. No
-probe injects input or invokes navigation. Static loopback fixture avoids OOPIF
-first-paint false positives. Use unique per-DSF second-query fragments because
-history may autocomplete a prior URL, and retyping identical text does not
-reopen suggestions. Latency visibility witnesses use a tighter120DIP region
-below the omnibox and borrowed CPU pixels, retaining >1000 changed pixels and
-the250ms deadline. Temporary logs/Ganesh comparison were removed; failed test
-pixel dumps remain diagnostic-only outside the repo.
-Owned-host scenes, fair two-resource capture, premultiplied CPU/GPU composition,
-and actual app-menu pointer selection work. The dedicated one-command suite
-passes all11 gates:
-
-```powershell
-powershell -File scripts/test.ps1 -Suite flyouts -AllowDisconnectedDesktop
-```
-
-The desktop override applies only to this disconnected session. Connected
-foreground/physical-cursor qualification is still open. Existing gates verify
-hidden/cloaked windows, taskbar exclusion and native cursor-write counters.
-
-Evidence: `C:/src/chromium/prts-flyouts-qualified1-*` (build29). This covers
-Rust release/tests/Clippy/fmt, Node unit tests, nine real host cycles, Intel
-GPU/reference alpha/mask/shadow composition, and four decoded app-menu gates:
-CPU/software and GPU/QSV, each HELLO inflight1/2, each DSF1/2/1.25. App menu
-opens by real toolbar click; decoded appearance stays <=250ms, missing-layer
-100ms diagnostics stay zero, alpha is preserved and close restores exact page
-pixels. A second real menu click selects New tab and requires a new selected
-tab before cleanup. This is **partial M5b qualification**, not all-flyout signoff.
-
-Chromium source checkpoint `0f563c2575` is committed and exported as27 patches;
-infra checkpoint `255ffcd` was pushed before that final resize correction.
-Full regression `C:/src/chromium/prts-flyouts-regression29-*` completed24/26:
-
-```powershell
-powershell -File scripts/test.ps1 -Suite full -AllowDisconnectedDesktop
-```
-
-The two failures were M5 resize ROI gates: Viz fitted the old root surface into
-new capture dimensions, producing black letterbox margins. Build30 rejects
-root frames until `metadata.capture.source_size` and full `content_rect` match
-the requested pixels. Unchanged M5 GPU/CPU capture/input gates PASS in
-`prts-flyouts-resize20-*`; all4 app-menu variants, production Intel auto GPU
-(decoded WebGL/video and QSV zero-copy) and v2 CPU WebRTC PASS in
-`prts-flyouts-final30-*`. The ineffective all-stages launcher flag was removed.
-All other broad gates passed regression29 (including M1/M2/M3/M4/recovery,
-MF hardware/lifetime/latency, odd sizes and GPU/CPU/synthetic WebRTC).
-
-Resize correction infra checkpoint `fa96c6c` is pushed. Context-menu gates now
-also PASS CPU/software and GPU/QSV, HELLO1/2, all3 DSFs in
-`C:/src/chromium/prts-flyouts-context-all1-*`; Rust22 checks PASS. They require
-real page right-click, decoded pixels/alpha within250ms, zero missing-layer
-diagnostics, exact close restoration, and pointer Reload executing page script.
-The one-command runner includes these4 additional gates. Chromium source unchanged.
-
-Context checkpoint `7dc05b4` is pushed. Select-popup gates now also PASS all4
-CPU/GPU/credit variants at3 DSFs (`prts-flyouts-select-all1-*`, Rust23 checks
-PASS): visible decoded dropdown below the closed control, exact Escape
-restoration/no value change, then End/Enter selecting blue with decoded blue
-page. The one-command runner includes context and select variants.
-
-Exact next step: checkpoint/push select coverage on WIP, then implement
-real omnibox gates. Main must wait for all required flyout,
-input and lifecycle gates. Keep all acceptance thresholds unchanged.
-
+The backlog below is historical. Follow PLAN priority order: release first,
+then unified window/flyout model and minimal Chromium patch re-architecture,
+then encoders/isolation and reintegration. Touch, other flyouts and independent
+extra-window videos remain known gaps for this preview.
 ## Implemented behavior
 
 - `prts_host_tracker.*`: opt-in Views host/widget lifecycle tracking, stable

@@ -44,7 +44,7 @@ test('PRTS browser frames: real Chromium page pixels, input, targets and two ins
   const daemonPath = process.env.PRTSD_PATH || fileURLToPath(new URL('../../prtsd/target/release/prtsd.exe', import.meta.url));
   const server = fork(process.env.PRTS_TEST_SERVER_DIR ? join(process.env.PRTS_TEST_SERVER_DIR,'index.js') : fileURLToPath(new URL('../index.js', import.meta.url)), [], {
     cwd: fileURLToPath(new URL('../../', import.meta.url)), windowsHide: true, silent: true,
-    env: { ...process.env, PORT: '0', PRTSD_PATH: daemonPath, PRTSD_ARGS: '[]' },
+    env: { ...process.env, PORT: '0', PRTSD_PATH: daemonPath, PRTSD_ARGS: '[]', PRTS_BROWSER_PROTOCOL:'1' },
   });
   let logs = '', browser, daemonPid;
   const exit = once(server, 'exit');

@@ -1,32 +1,33 @@
 # PRTS status
 
 ## Current state
-- **Revised-plan MVP wrap-up active (2026-10-21, supersedes older next actions below):**
-  both repos remain on `wip/mvp-flyouts`; preserve the four already working
-  app/context/select/omnibox paths. Standard PRTS branding and shared Windows
-  Chrome UA/Client Hints hook are applied but await incremental build/runtime
-  qualification. Chromium WIP `92256ff842` is exported as31 patches; infra WIP
-  `dda95d3` is pushed. Missing direct GN Views deps were fixed and GN check PASS;
-  Rust release/tests/Clippy/fmt and Node unit checks PASS. Baseline identity gate
-  correctly rejects build40's HeadlessChrome/two-brand values. CPU/software
-  flyout latency is report-only, with all pixel,
-  input, restoration and resource assertions retained; GPU/QSV keeps250ms.
-  Added production-launch HTTP/JS identity gate covering page, dedicated/shared
-  workers and service workers. Lessons: [lessons-flyouts.md](lessons-flyouts.md).
-  Touch, other flyouts and independent tracks for extra windows remain known gaps.
-- **Next action:** inspect bounded incremental build `prts-mvp-wrap45.*` (7200s).
-  Wrap44 parsed the manifest in~10min and completed113 actions, then failed only
-  the UA constant-false branch under `-Wunreachable-code`; it now uses a normal
-  build guard. About7k branding-dependent actions remain. Profiling `.sisorc`
-  was removed. Previous wrap41/42/43 were stopped during preparation, without
-  deleting state or outputs. Then qualify identity
-  and full regression, export patches, commit/merge qualified wrap-up to main and
-  push. Then finish the existing non-component Release build (PID10124, started
-  07:38; do not start another), rebuild it incrementally with final patches,
-  package/clean-extract verify and publish the GitHub preview. Re-architecture,
-  encoders and isolation follow the release in PLAN order. Exact commands/logs
-  are in [mvp-flyouts-wip.md](mvp-flyouts-wip.md) and journal-mvp.md.
-
+- **Revised-plan MVP wrap-up qualified (2026-10-21):** working
+  app/context/select/omnibox popups, PRTS product branding, shared Chrome UA/CH
+  identity, sample-server default v2 and cleanup are ready to merge to main.
+  Touch, other flyouts and independent videos for extra windows are known gaps.
+  Lessons: [lessons-flyouts.md](lessons-flyouts.md). Identity: [mvp-identity.md](mvp-identity.md).
+- **Acceptance:** `prts-mvp-wrap47-resume-full-*` passed39/40; only synthetic
+  loss observation failed (shaper drops increased but receiver loss stayed0).
+  The unchanged synthetic gate passed its bounded rerun
+  `prts-mvp-wrap47-synthetic-repeat1.*`; no assertion or deadline was relaxed.
+  All Chromium/native lifecycle, Intel adapter/MF lifetime/latency, WebRTC,
+  identity and branding gates pass. GPU/QSV popup appearance24 samples86.25–248.13ms
+  (strict250ms); CPU/software24 samples69.55–262.33ms (report-only).
+- **Chromium:** qualified `work` is now `3337c44996`, exported33 patches.
+  Build47 retains pipe cancellation/join through BLOCK_SHUTDOWN; the original
+  native5s/RPC shutdown deadlines pass. Removed both temporary daemon workarounds.
+  Active-worker fixture closes in227ms with all11 recorded descendants exited.
+- **Next action:** commit this qualification on WIP, merge into main preserving
+  the latest main PLAN/HANDOFF and bounded Release build script, then push.
+  Start exactly one incremental `out/Release` build with final patches; the
+  initial non-component build finished exit0 at13:13:30. Package Chromium/daemon/
+  server, verify SHA256 and full40 gates from a clean extraction (including the
+  synthetic gate), then publish `v0.1.0-preview` on FlysoftBeta/prts.
+  GitHub CLI: `C:/Program Files/GitHub CLI/gh.exe` (authenticated).
+  Re-architecture, encoders and isolation follow the release in PLAN order.
+- **Qualification limits:** desktop probes verify hidden/cloaked HWNDs, unchanged
+  taskbar and cursor counters in a disconnected session; physical foreground/
+  cursor behavior and Windows10 22H2 remain unqualified.
 ### Earlier WIP detail (historical next actions superseded above)
 - **Active WIP: `wip/mvp-flyouts` in both repos**, not merged into main. Chromium `0f563c2575`
   (build30, exported27 patches) adds owned-layer scenes, fair two-resource alpha capture and correct

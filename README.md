@@ -76,8 +76,8 @@ npm ci
 cd ..
 # Optional; the default is this patched component build:
 $env:PRTS_CHROME_PATH='C:/src/chromium/src/out/Default/chrome.exe'
-# Whole-window capture and Chrome UI input (v1 page-only compatibility is still the default):
-$env:PRTS_BROWSER_PROTOCOL='2'
+# The sample server defaults to whole-window capture and browser UI input.
+# Optional legacy page-only mode: $env:PRTS_BROWSER_PROTOCOL='1'
 node server
 ```
 
